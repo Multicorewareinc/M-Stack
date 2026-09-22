@@ -1,0 +1,15 @@
+{{ include "portal.fullname" . }} is serving {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+
+  in cluster:  http://{{ include "portal.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+  locally:     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "portal.fullname" . }} 8080:{{ .Values.service.port }}
+
+{{ if .Values.config.apiUpstream -}}
+  /v1 proxies to {{ .Values.config.apiUpstream }}
+{{- else -}}
+  No API upstream (config.allowNoApi=true). The bundle loads and every
+  /v1 request returns 404, so signing in will not work.
+{{- end }}
+{{ if .Values.nodeSelector }}
+Pinned to {{ range $k, $v := .Values.nodeSelector }}{{ $v }}{{ end }}, which is the only node holding the
+image -- there is no registry yet. Remove nodeSelector when there is one.
+{{- end }}

@@ -1,0 +1,28 @@
+{{/*
+Non-secret env only. Anything that can carry a credential is in the
+Secret, including MODEL_ROUTES.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "model-gateway.fullname" . }}
+  labels: {{- include "model-gateway.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  UPSTREAM_URL: {{ required "config.upstreamUrl is required -- the gateway has nothing to proxy to without it" .Values.config.upstreamUrl | quote }}
+  REQUEST_TIMEOUT: {{ .Values.config.requestTimeout | quote }}
+  ORG_CP_INTERNAL_URL: {{ required "config.orgCpInternalUrl is required -- verify_api_key calls it for every /v1 request (ADR-026 removed the static-key fallback), so with none every request fails closed with a 503" .Values.config.orgCpInternalUrl | quote }}
+  {{/*
+  Routes with no credentials in them. A route that carries a
+  provider api_key belongs in the Secret instead, which is listed
+  after this ConfigMap in envFrom and therefore wins.
+  */}}
+  MODEL_ROUTES: {{ .Values.config.modelRoutes | default "{}" | quote }}
+  POLICY_ENDPOINTS: {{ join "," .Values.config.policy.endpoints | quote }}
+  POLICY_TIMEOUT_MS: {{ .Values.config.policy.timeoutMs | quote }}
+  POLICY_FAIL_MODE: {{ .Values.config.policy.failMode | quote }}
+  EVENT_BACKBONE_URL: {{ .Values.config.events.backboneUrl | quote }}
+  EVENT_STREAM_NAME: {{ .Values.config.events.streamName | quote }}
+  EVENT_STREAM_SUBJECT: {{ .Values.config.events.streamSubject | quote }}
+  EVENT_CAPTURE_BODIES: {{ .Values.config.events.captureBodies | quote }}
+  EVENT_MAX_INFLIGHT: {{ .Values.config.events.maxInflight | quote }}

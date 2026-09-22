@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Multicorewareinc/M-Stack/security/advisories/new
+    about: >
+      Please do not open a public issue for anything exploitable. Report it
+      privately here.

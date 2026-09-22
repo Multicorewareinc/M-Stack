@@ -1,0 +1,45 @@
+{{- if and (not .Values.config.events.backboneUrl) (not .Values.config.allowNoBackbone) }}
+{{- fail "\n\nenricher: no event backbone configured, so nothing would be enriched.\n\nWithout a backbone this service consumes nothing and republishes\nnothing: rate-limiter-tpm and billing both get zero enrichment forever,\nwith no error on either side -- an enricher that is deployed, healthy,\nand doing nothing.\n\nSet one of:\n  config.events.backboneUrl=nats://<nats-service>:4222\n  config.allowNoBackbone=true    deliberately deploy an inert enricher,\n                                 to wire up the rest of the pipeline\n                                 before NATS exists\n" }}
+{{- end }}
+{{- if .Values.config.tokenizer.url }}
+{{/*
+Same arithmetic the service's own .env.example calls out: if the ack
+wait is shorter than a tokenizer call can take plus time to republish,
+JetStream redelivers the message while the first attempt is still in
+flight -- burning maxDeliver's budget on retries that were never really
+failures. A 5s margin here is a floor, not a guarantee; a slow
+tokenizer or slow NATS still wants a wider margin than this catches.
+*/}}
+{{- $ackWaitSeconds := .Values.config.events.ackWaitSeconds | int }}
+{{- $tokenizerTimeoutMs := .Values.config.tokenizer.timeoutMs | int }}
+{{- $ackWaitMs := mul $ackWaitSeconds 1000 }}
+{{- $minMs := add $tokenizerTimeoutMs 5000 }}
+{{- if lt $ackWaitMs $minMs }}
+{{- $minSeconds := div (add $minMs 999) 1000 }}
+{{- fail (printf "\n\nenricher: config.events.ackWaitSeconds (%ds = %dms) is too close to\nconfig.tokenizer.timeoutMs (%dms).\n\nACK_WAIT_SECONDS must cover a tokenizer call plus time to republish, or\nJetStream redelivers a message while the first attempt is still in\nflight, burning maxDeliver's retry budget on attempts that were never\nreally failures.\n\nSet config.events.ackWaitSeconds to at least %d (tokenizer timeout +\na 5s republish margin, rounded up).\n" $ackWaitSeconds $ackWaitMs $tokenizerTimeoutMs $minSeconds) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "enricher.fullname" . }}
+  labels: {{- include "enricher.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  EVENT_BACKBONE_URL: {{ .Values.config.events.backboneUrl | quote }}
+  EVENT_STREAM_NAME: {{ .Values.config.events.streamName | quote }}
+  EVENT_STREAM_SUBJECT: {{ .Values.config.events.streamSubject | quote }}
+  EVENT_DURABLE_NAME: {{ .Values.config.events.durableName | quote }}
+  ENRICHED_STREAM_NAME: {{ .Values.config.events.enrichedStreamName | quote }}
+  ENRICHED_SUBJECT: {{ .Values.config.events.enrichedSubject | quote }}
+  MAX_DELIVER: {{ .Values.config.events.maxDeliver | quote }}
+  ACK_WAIT_SECONDS: {{ .Values.config.events.ackWaitSeconds | quote }}
+  {{/*
+  Empty is valid and means the fallback is inert: a response event with
+  no usage block is republished with source="none" rather than
+  estimated, so downstream consumers go uncounted rather than guessed
+  at. That is under-enforcement/under-billing, not failure, which is why
+  it is allowed -- but see NOTES.
+  */}}
+  TOKENIZER_URL: {{ .Values.config.tokenizer.url | quote }}
+  TOKENIZER_TIMEOUT_MS: {{ .Values.config.tokenizer.timeoutMs | quote }}

@@ -1,0 +1,197 @@
+# rate-limiter-rpm
+#
+# The service is stateless; the counters live in Valkey. Two things
+# about this chart are not obvious:
+#
+#   1. RATE_LIMITS goes in a Secret, always. Its user_overrides and
+#      user_model_overrides maps are keyed by principal, and the gateway
+#      sets the principal to the caller's bearer token -- so a limits
+#      document that raises one customer's ceiling contains that
+#      customer's API key.
+#
+#   2. Counting is asynchronous (ADR-013). /check only READS the
+#      counters; a JetStream consumer increments them from the gateway's
+#      request events. With events.backboneUrl empty, no consumer runs,
+#      the counters never advance, and /check allows everything. The
+#      service is doing what it was told, but it is not limiting
+#      anything -- so this chart refuses to install without either a
+#      backbone URL or an explicit acknowledgement.
+
+# One replica, and not merely as a default: the counting consumer is a
+# *push* consumer (src/consumer.py calls js.subscribe with a durable
+# name), and JetStream allows only one subscription bound to a durable at
+# a time. A second replica's consumer fails to bind with "consumer is
+# already bound to a subscription", the service logs a warning and starts
+# anyway, and that pod answers /check while counting nothing.
+#
+# Raising this needs the service to use a pull consumer or a queue group
+# first. Verified on the cluster, 2026-09-08.
+replicaCount: 1
+
+# maxSurge 0, for the same reason. The default rolling update starts the
+# new pod before terminating the old one, the new pod cannot bind the
+# durable, and it comes up Ready with counting dead -- /check keeps
+# answering "allow" with remaining == limit, so the platform silently
+# stops enforcing limits until someone restarts it. That is exactly what
+# happened here on the first upgrade.
+#
+# The cost is a gap in /check during an upgrade. With the gateway's
+# POLICY_FAIL_MODE=closed that gap blocks requests, which is the correct
+# direction to fail for a limiter, and is seconds long.
+#
+# The real fix belongs in the service: readiness should depend on the
+# consumer being active, so a failed bind stalls the rollout visibly
+# instead of completing into a service that enforces nothing.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+
+image:
+  repository: ghcr.io/multicorewareinc/rate-limiter-rpm
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private by default, so a pull needs credentials.
+# Named by convention rather than passed through every spec: the
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- non-secret configuration -> ConfigMap -> envFrom ------------------
+config:
+  logLevel: INFO
+
+  # The counter store. In this SDK that is the Valkey service:
+  #   redis://<service>.<namespace>.svc:6379/0
+  # If your URL carries a password, put VALKEY_URL in the Secret instead:
+  # the Secret is applied after this ConfigMap and overrides it.
+  valkeyUrl: redis://localhost:6379/0
+
+  events:
+    # nats://<nats-service>:4222. Empty => no consumer, no counting.
+    backboneUrl: ""
+    streamName: GATEWAY_EVENTS
+    streamSubject: gateway.events
+    durableName: rpm-counter
+    # Seconds to remember a request_id so at-least-once delivery does not
+    # double-count. Must be >= the 60s window.
+    dedupeTtl: 120
+
+  # Set true only to deploy deliberately without a backbone -- a service
+  # that answers /check and allows everything, which is useful for
+  # wiring up the gateway before NATS exists. Without this the install
+  # refuses, because "deployed and limiting nothing" otherwise looks
+  # identical to "deployed and working".
+  allowNoBackbone: false
+
+  # Per-org plan limits (AD-04). Empty adminCpUrl => inert: falls back to
+  # secret.limits.userDefault/userOverrides for the "user" (org) scope,
+  # same as before this existed -- so an install with this unset behaves
+  # exactly as it always did, not degraded.
+  #   http://<admin-control-plane-service>.<namespace>.svc.cluster.local:8000
+  adminCpUrl: ""
+  # Seconds a resolved org plan limit is cached. Matches the service's
+  # own default; exposed so a value file can tune it without editing the
+  # ConfigMap by hand.
+  planCacheTtl: 30
+
+# --- limits -> Secret -> envFrom --------------------------------------
+secret:
+  # A Secret you created, holding RATE_LIMITS (and optionally VALKEY_URL,
+  # SERVICE_API_KEY).
+  existingSecret: ""
+
+  # Bearer for admin-control-plane's /internal/v1/organizations/{id}/plan
+  # (AD-04) -- a credential, so it goes here rather than config.adminCpUrl
+  # above, the same reasoning as secret.valkeyUrl below. Must equal
+  # admin-control-plane's own SERVICE_API_KEY exactly, or the plan lookup
+  # 401s and this silently falls back to the static limits.
+  serviceApiKey: ""
+
+  # The counter-store URL *with* its password, rendered into this chart's
+  # own Secret and overriding the ConfigMap's credential-free one (envFrom
+  # applies the Secret second). Set this when Valkey has auth enabled --
+  # putting the password in `config.valkeyUrl` instead leaves it in a
+  # ConfigMap, readable by anything holding `get configmaps` here.
+  #
+  # Ignored when `existingSecret` is set: that Secret is yours, so
+  # VALKEY_URL goes in it directly.
+  valkeyUrl: ""
+
+  # Assembled into the RATE_LIMITS JSON document. 0 or absent means that
+  # scope is unlimited. A request is denied if ANY applicable scope is
+  # over its limit in the current 60s window.
+  limits:
+    userDefault: 0
+    modelDefault: 0
+    # {"<bearer-token>": 600}
+    userOverrides: {}
+    # {"gpt-4o": 120}
+    modelOverrides: {}
+    # {"<bearer-token>|gpt-4o": 300}   -- no default for this scope
+    userModelOverrides: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser unset: the image has no non-root user yet.
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Set by the Python `Policy` spec's
+# network_policy_allowed_ingress, not meant to be hand-edited per release.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort -- e.g. the
+  # model-gateway pods, the only intended caller of /check:
+  #   - app.kubernetes.io/name: model-gateway
+  allowedIngress: []

@@ -1,0 +1,14 @@
+{
+  "name": "multistack-ui",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Multistack RBAC Platform UI monorepo (admin-portal, organization-portal, @multistack/ui). The agentic console lives separately, at agentic/frontend/ -- see its own package.json for how it consumes @multistack/ui.",
+  "workspaces": [
+    "packages/*",
+    "admin-portal",
+    "organization-portal"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

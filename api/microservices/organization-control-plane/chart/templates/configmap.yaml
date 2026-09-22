@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "organization-control-plane.fullname" . }}
+  labels: {{- include "organization-control-plane.labels" . | nindent 4 }}
+  annotations:
+    {{/*
+    Also a hook, ordered ahead of the migration Job (weight -10 vs. the
+    Job's -5): a pre-install hook Job runs before this chart's normal
+    resources exist, so without this the Job's envFrom finds no
+    ConfigMap. before-hook-creation (not hook-succeeded) keeps it in
+    place afterward for the Deployment to read.
+    */}}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  ADMIN_CP_INTERNAL_URL: {{ required "config.adminCpInternalUrl is required -- role-permission validation has nowhere to call" .Values.config.adminCpInternalUrl | quote }}
+  ADMIN_TIMEOUT_MS: {{ .Values.config.adminTimeoutMs | quote }}
+  {{- if .Values.config.billingInternalUrl }}
+  # Not required like adminCpInternalUrl above: a portal deployed before billing exists is a
+  # supported stage, not an error -- see values.yaml.
+  BILLING_INTERNAL_URL: {{ .Values.config.billingInternalUrl | quote }}
+  {{- end }}

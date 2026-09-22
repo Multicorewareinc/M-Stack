@@ -1,0 +1,30 @@
+# Dependencies for the agentic layer (agentic/) only -- deliberately kept
+# separate from the core `multistack` package, which has zero third-party
+# runtime dependencies by design (see pyproject.toml). Install with:
+#   pip install -e .                      # the SDK itself
+#   pip install -r agentic/backend/requirements.txt
+
+# mcp>=2 renamed FastMCP -> MCPServer with a different API (see
+# agentic/backend/src/mcp_server.py). langchain-mcp-adapters as of 0.3.2 only
+# supports the mcp 1.x line, and pip installs it silently pull mcp back
+# down to 1.x even if 2.x was installed first -- pinned here so that
+# downgrade is explicit instead of a surprise next time this file is touched.
+mcp>=1.29,<2
+
+langgraph>=1.2,<2
+langchain-mcp-adapters>=0.3,<0.4
+# langchain-groq is the only provider integration installed by default,
+# since it's LLM_PROVIDER's own default -- langchain-anthropic/
+# langchain-openai/langchain-ollama are each one `pip install` away,
+# only needed if LLM_PROVIDER is actually set to that one (see llm.py
+# and .env.example).
+langchain-groq>=1.1,<2
+python-dotenv>=1.2,<2
+
+# agentic/backend/src/main.py -- the production HTTP entry point, following
+# service-template's flat FastAPI shape (settings/errors/service/router/main).
+fastapi>=0.141,<1
+uvicorn[standard]>=0.52,<1
+pydantic-settings>=2.2,<3
+prometheus-client>=0.20,<1
+httpx>=0.27,<1  # needed by fastapi.testclient.TestClient (tests/conftest.py, tests/test_service.py)

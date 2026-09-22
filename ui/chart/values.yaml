@@ -1,0 +1,126 @@
+# One chart, installed once per portal. The two portals differ only in
+# which image they serve and which API they talk to -- same nginx, same
+# port, same SPA fallback -- so a second copy of this would be two
+# things to keep in step for no gain.
+#
+#   helm install admin-portal ui/chart --set image.repository=...
+#   helm install org-portal   ui/chart --set image.repository=...
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/multicorewareinc/organization-portal
+  tag: ""                      # defaults to .Chart.AppVersion
+  # Never Always. There is no registry: images are built locally and
+  # sideloaded into one node's containerd (scratch/rebuild/images.sh),
+  # so a pull attempt can only fail.
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private by default, so a pull needs credentials.
+# Named by convention rather than passed through every spec: the
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+service:
+  type: ClusterIP
+  port: 80
+
+# Must match the port nginx listens on in the image (EXPOSE 80).
+containerPort: 80
+
+# --- non-secret configuration -> ConfigMap -> mounted nginx.conf ------
+config:
+  # nginx error_log level: debug, info, notice, warn, error.
+  logLevel: notice
+
+  # Where /v1 goes. The portals call their API on the same origin under
+  # /v1 (src/api/client.ts defaults VITE_API_BASE_URL to "/v1"), so this
+  # proxy is what connects them -- and keeping it a deploy-time value
+  # rather than a build-time bake means one image serves any namespace.
+  #
+  #   http://organization-control-plane.<namespace>.svc.cluster.local:8000
+  apiUpstream: ""
+
+  # Which prefixes go to the API rather than the SPA. Two, not one:
+  # nearly every call is getBaseUrl() + path, which is /v1/..., but the
+  # silent token refresh in src/api/client.ts calls '/api/auth/refresh'
+  # directly and bypasses the base URL. Proxy only /v1/ and that one
+  # request falls through to the SPA fallback, which answers 200 with
+  # index.html -- so the refresh does not fail, it succeeds and returns
+  # HTML.
+  apiPrefixes:
+    - /v1/
+    - /api/
+
+  # Where /mg goes (chat only -- src/features/chat calls /mg/v1/...).
+  # Empty means no /mg location is rendered at all, so a call to it
+  # falls through to the SPA fallback and returns 200 with index.html --
+  # same silent-HTML failure mode as an unlisted apiPrefix, which is why
+  # this exists as its own value rather than folding /mg/ into
+  # apiPrefixes (that loop forwards $request_uri unchanged; /mg/ needs
+  # the prefix stripped before it reaches the gateway).
+  #
+  #   http://gateway-model-gateway.<namespace>.svc.cluster.local:8080
+  gatewayUpstream: ""
+
+  # Set true only to deploy a portal deliberately without an API: the
+  # static bundle loads, every /v1 call returns 404, and the login it
+  # opens on cannot complete. Useful for looking at the build. Without
+  # this the install refuses, because "deployed and unusable" otherwise
+  # looks identical to "deployed and working".
+  allowNoApi: false
+
+  # Resolver for the proxy. Needed because the upstream is passed
+  # through a variable (see the ConfigMap), which makes nginx resolve it
+  # per request instead of at startup -- so a portal can be installed
+  # before its API exists rather than crash-looping on
+  # "host not found in upstream".
+  #
+  # An IP, not a Service name: nginx resolves the resolver's own address
+  # at startup, and `nginx -t` on a name fails outright with
+  # "host not found in resolver". This is the cluster DNS ClusterIP:
+  #
+  #   kubectl -n kube-system get svc -l k8s-app=kube-dns
+  resolver: 10.43.0.10
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 20
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    failureThreshold: 3
+
+resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 128Mi}
+
+# There is no registry, so the image exists in exactly one node's
+# containerd. Without this the pod schedules anywhere and sits in
+# ImagePullBackOff -- which is where chart-test/tokenizer has been for
+# 20 hours, on mcw-all-series, while its image sits on rke2-wrk-2.
+# Remove this the day a registry exists, not before.
+nodeSelector:
+  kubernetes.io/hostname: rke2-wrk-2
+
+# Nothing else keeps workloads off the control plane: rke2-cp01 carries
+# no taint.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+tolerations: []
+podAnnotations: {}
+
+podSecurityContext: {}
+# nginx:alpine binds 80, so it needs to start as root and drops
+# privileges to the nginx user itself.
+securityContext: {}

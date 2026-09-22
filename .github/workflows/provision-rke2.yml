@@ -1,0 +1,144 @@
+name: Provision RKE2 Cluster (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+          - create
+          - verify
+          - upgrade
+          - delete
+
+      install_storage:
+        description: 'Install Longhorn storage after cluster is ready?'
+        required: true
+        default: false
+        type: boolean
+
+      force_recreate:
+        description: 'Delete existing cluster before creating? (recommended)'
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: rke2-provision
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: ${{ inputs.action }} RKE2 Cluster
+    runs-on: [self-hosted, linux, x64, onprem, rke2]
+    timeout-minutes: 45
+    environment: onprem
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Install SDK dependencies (not the SDK itself)
+      - name: Install SDK dependencies
+        run: make install-rke2-deps
+
+      # Add multistack to PYTHONPATH instead of pip install -e
+      - name: Set PYTHONPATH for multistack SDK
+        run: |
+          echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/multistack:$PYTHONPATH" >> $GITHUB_ENV
+
+      # --------------------------------------------------------
+      # SSH KEY SETUP
+      # --------------------------------------------------------
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.MULTISTACK_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          for host in ${{ vars.MULTISTACK_SERVER }} $(echo ${{ vars.MULTISTACK_AGENTS }} | tr ',' ' '); do
+            ssh-keyscan -H $host >> ~/.ssh/known_hosts 2>/dev/null || true
+          done
+
+      - name: Test SSH connectivity
+        run: make setup-rke2 SERVER="${{ vars.MULTISTACK_SERVER }}" AGENTS="${{ vars.MULTISTACK_AGENTS }}" SSH_USER="${{ vars.MULTISTACK_SSH_USER }}" SSH_KEY="$HOME/.ssh/id_ed25519"
+
+      - name: Set environment variables
+        run: |
+          echo "MULTISTACK_SERVER=${{ vars.MULTISTACK_SERVER }}" >> $GITHUB_ENV
+          echo "MULTISTACK_AGENTS=${{ vars.MULTISTACK_AGENTS }}" >> $GITHUB_ENV
+          echo "MULTISTACK_SSH_USER=${{ vars.MULTISTACK_SSH_USER }}" >> $GITHUB_ENV
+          echo "MULTISTACK_SSH_KEY=$HOME/.ssh/id_ed25519" >> $GITHUB_ENV
+          echo "MULTISTACK_KUBECONFIG=$HOME/.multistack/kubeconfig" >> $GITHUB_ENV
+          mkdir -p ~/.multistack
+
+      # --------------------------------------------------------
+      # DELETE EXISTING
+      # --------------------------------------------------------
+      - name: Delete existing RKE2 cluster (if any)
+        if: inputs.action == 'create' && inputs.force_recreate
+        continue-on-error: true
+        run: make delete-rke2
+
+      # --------------------------------------------------------
+      # CREATE
+      # --------------------------------------------------------
+      - name: Create RKE2 cluster
+        if: inputs.action == 'create'
+        run: make provision-rke2 FORCE_RECREATE=false
+
+      # --------------------------------------------------------
+      # COPY KUBECONFIG TO RKE2 SERVER
+      # --------------------------------------------------------
+      - name: Copy kubeconfig to RKE2 server
+        if: inputs.action == 'create'
+        run: make copy-kubeconfig SERVER="$MULTISTACK_SERVER" SSH_USER="$MULTISTACK_SSH_USER" SSH_KEY="$MULTISTACK_SSH_KEY"
+
+      # --------------------------------------------------------
+      # VERIFY ON RKE2 SERVER
+      # --------------------------------------------------------
+      - name: Verify kubeconfig on RKE2 server
+        if: inputs.action == 'create'
+        run: make verify-rke2 SERVER="$MULTISTACK_SERVER" SSH_USER="$MULTISTACK_SSH_USER" SSH_KEY="$MULTISTACK_SSH_KEY"
+
+      - name: Install Longhorn storage
+        if: inputs.action == 'create' && inputs.install_storage
+        env:
+          KUBECONFIG: ${{ env.MULTISTACK_KUBECONFIG }}
+        run: make install-storage
+
+      - name: Verify RKE2 cluster
+        if: inputs.action == 'verify'
+        run: make verify-rke2 SERVER="$MULTISTACK_SERVER" SSH_USER="$MULTISTACK_SSH_USER" SSH_KEY="$MULTISTACK_SSH_KEY"
+
+      # - name: Verify RKE2 cluster
+      #   if: inputs.action == 'create' || inputs.action == 'verify'
+      #   env:
+      #     KUBECONFIG: ${{ env.MULTISTACK_KUBECONFIG }}
+      #   run: |
+      #     python examples/rke2/verify.py
+      #     kubectl get nodes -o wide
+      #     kubectl get pods -A
+
+      - name: Upgrade RKE2 cluster
+        if: inputs.action == 'upgrade'
+        run: make upgrade-rke2
+
+      - name: Delete RKE2 cluster
+        if: inputs.action == 'delete'
+        run: make delete-rke2
+
+      - name: Upload kubeconfig artifact
+        if: inputs.action == 'create'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig
+          path: ~/.multistack/kubeconfig
+          retention-days: 7
+          if-no-files-found: warn

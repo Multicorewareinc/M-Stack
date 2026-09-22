@@ -1,0 +1,82 @@
+# tokenizer
+#
+# Stateless, no consumer, no state of its own -- unlike the rate
+# limiters, this is safe to run with more than one replica and to roll
+# with the default strategy.
+#
+# config.tokenizerDefault must name a backend the service actually
+# registers (only "cl100k_base" today). Get this wrong and the service
+# fails fast at startup (RuntimeError) rather than serving with a bad
+# default -- so a typo here surfaces as CrashLoopBackOff, not a wrong
+# token count downstream in rate-limiter-tpm.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/multicorewareinc/tokenizer
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private by default, so a pull needs credentials.
+# Named by convention rather than passed through every spec: the
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- configuration -> ConfigMap -> envFrom ------------------------------
+# Nothing here is a credential: no Secret object exists for this chart.
+config:
+  logLevel: INFO
+  tokenizerDefault: cl100k_base
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser unset: the image has no non-root user yet.
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}

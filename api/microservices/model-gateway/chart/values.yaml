@@ -1,0 +1,187 @@
+# model-gateway
+#
+# Two rules shape this file:
+#
+#   1. Credentials go in a Secret, never in here. API_KEY,
+#      UPSTREAM_API_KEY and MODEL_ROUTES are all under `secret` for that
+#      reason -- MODEL_ROUTES because a per-model route can carry that
+#      provider's own api_key.
+#
+#   2. Features attach by config, not code (ADR-006). An empty
+#      policy.endpoints means no policy chain and an empty
+#      events.backboneUrl means no event publisher: the gateway builds
+#      neither client, and the request path is identical to a build
+#      without the feature. So this file's defaults deploy a plain
+#      authenticated proxy, and rate limiting and the backbone are each
+#      one value away.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/multicorewareinc/model-gateway
+  # Empty => Chart.appVersion. Pin a digest or tag here for a real deploy;
+  # `latest` gives you no way to know what is running.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private by default, so a pull needs credentials.
+# Named by convention rather than passed through every spec: the
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Must match the port the image's uvicorn command binds (8080). Changing
+# it means also overriding the container command.
+containerPort: 8080
+
+# --- non-secret configuration -> ConfigMap -> envFrom ------------------
+config:
+  logLevel: INFO
+
+  # The OpenAI-compatible upstream. In this SDK that is the vLLM service:
+  #   http://<vllm-service>.<namespace>.svc:8000
+  upstreamUrl: http://localhost:8000
+
+  # Where /v1 auth verifies a bearer against the org that owns it
+  # (GET /internal/v1/api-keys/verify). Not optional: the static
+  # single-key auth mode was removed (ADR-026), so with no organization
+  # control plane to call, EVERY /v1 request fails closed with a 503 --
+  # deployed, healthy, and unable to serve a single authenticated
+  # request. In this SDK that is the organization control plane:
+  #   http://organization-control-plane.<namespace>.svc.cluster.local:8000
+  orgCpInternalUrl: ""
+
+  requestTimeout: 60
+
+  # Per-model routing as JSON, for routes with no credentials in them:
+  #   {"llama-3-8b":"http://vllm:8000"}
+  # Unlisted models fall back to upstreamUrl. If a route needs that
+  # provider's api_key, set MODEL_ROUTES in the Secret instead --
+  # it is applied after this and overrides it.
+  modelRoutes: "{}"
+
+  policy:
+    # Policy services implementing POST /check, joined into
+    # POLICY_ENDPOINTS. Empty => the chain is inert.
+    #   - http://rate-limiter-rpm:8000/check
+    endpoints: []
+    # 500ms, not the service's own default of 50. Fifty is plausible for
+    # a policy service in the same process; across a pod hop plus the
+    # limiter's own Redis round-trip it is not, and the first request
+    # after any idle period exceeded it -- returning 503, because
+    # failMode below is (correctly) closed. Measured on this cluster:
+    # a warm /check is single-digit milliseconds, a cold one is not.
+    timeoutMs: 500
+    # closed => a policy that errors blocks the request; open => allows.
+    # Closed is the right default for a limiter: failing open under load
+    # is exactly when the limit matters.
+    failMode: closed
+
+  events:
+    # nats://<nats-service>:4222. Empty => no publisher is built.
+    backboneUrl: ""
+    streamName: GATEWAY_EVENTS
+    streamSubject: gateway.events
+    # true also emits full prompt and response text. Governance decision,
+    # not a performance one: those events carry user content.
+    captureBodies: false
+    maxInflight: 1000
+
+# --- secret configuration ---------------------------------------------
+secret:
+  # A Secret you created, holding API_KEY and ORG_VERIFY_API_KEY (and
+  # optionally UPSTREAM_API_KEY, MODEL_ROUTES). This is the intended path.
+  #
+  # This chart cannot read an existingSecret's contents, so one missing
+  # ORG_VERIFY_API_KEY installs cleanly and passes both probes -- it
+  # fails the first real request instead, with a 503 here (the org
+  # control plane 500s on an empty/unset bearer, which arrives as a
+  # transport-adjacent failure, not an auth one). The SDK's own
+  # check_prerequisites reads the Secret before installing and names it
+  # if it is missing.
+  existingSecret: ""
+
+  # Local work only: create the Secret from the values below. They then
+  # sit in your values file and in `helm get values`, readable by anyone
+  # with release access.
+  create: false
+  apiKey: ""
+
+  # Bearer sent to the organization control plane's
+  # GET /internal/v1/api-keys/verify. Deliberately distinct from any
+  # other service credential (least-privilege: this gateway is
+  # internet-adjacent and must not hold anything that opens more than
+  # key verification). Must equal that release's secret.mgServiceApiKey
+  # exactly.
+  orgVerifyApiKey: ""
+  upstreamApiKey: ""
+  # Per-model routing as JSON. Unlisted models fall back to upstreamUrl.
+  # {"llama-3-8b":"http://vllm:8000","claude":{"url":"...","type":"anthropic","api_key":"..."}}
+  modelRoutes: "{}"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# /health serves both probes (it is a liveness check that does not touch
+# the upstream, so readiness cannot flap on upstream trouble).
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+# GET /metrics on each pod.
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser are deliberately unset: the image builds on
+  # python:3.12-slim with no non-root user created, so enabling them
+  # without first rebuilding the image gives a pod that cannot start.
+  # Turn both on in the same change that adds a USER to the Dockerfile.
+
+# Keeps pods off the control plane, which nothing else enforces --
+# rke2-cp01 carries no taint. Override wholesale if you need to pin.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Set by the Python `Gateway` spec's
+# network_policy_allowed_ingress, not meant to be hand-edited per release.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort -- e.g. the Istio
+  # ingress gateway's own pods:
+  #   - istio: ingressgateway
+  allowedIngress: []

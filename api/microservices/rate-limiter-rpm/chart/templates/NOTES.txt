@@ -1,0 +1,36 @@
+{{ include "rate-limiter-rpm.fullname" . }} is deployed.
+
+Attach it to the gateway -- config only, no gateway rebuild (ADR-006):
+
+  --set config.policy.endpoints[0]=http://{{ include "rate-limiter-rpm.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/check
+
+Counters: {{ .Values.config.valkeyUrl }}
+
+{{ if .Values.config.events.backboneUrl -}}
+Counting from: {{ .Values.config.events.backboneUrl }}
+  stream {{ .Values.config.events.streamName }}, subject {{ .Values.config.events.streamSubject }}, durable {{ .Values.config.events.durableName }}
+{{- else -}}
+NOT COUNTING. No event backbone, so no consumer runs and the counters
+never advance: /check will allow every request. You set
+config.allowNoBackbone=true, so this is deliberate. Give it a backbone
+to start enforcing:
+
+  --set config.events.backboneUrl=nats://<nats-service>:4222
+{{- end }}
+
+Limits in effect:
+  user_default          {{ .Values.secret.limits.userDefault }}{{ if not .Values.secret.limits.userDefault }}  (unlimited){{ end }}
+  model_default         {{ .Values.secret.limits.modelDefault }}{{ if not .Values.secret.limits.modelDefault }}  (unlimited){{ end }}
+  user_overrides        {{ len .Values.secret.limits.userOverrides }} entr{{ if eq (len .Values.secret.limits.userOverrides) 1 }}y{{ else }}ies{{ end }}
+  model_overrides       {{ len .Values.secret.limits.modelOverrides }} entr{{ if eq (len .Values.secret.limits.modelOverrides) 1 }}y{{ else }}ies{{ end }}
+  user_model_overrides  {{ len .Values.secret.limits.userModelOverrides }} entr{{ if eq (len .Values.secret.limits.userModelOverrides) 1 }}y{{ else }}ies{{ end }}
+
+A limit of 0 means that scope is unlimited, not that it blocks
+everything. All-zero limits deploy a service that answers /check and
+denies nothing.
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rate-limiter-rpm.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+  curl -s localhost:{{ .Values.service.port }}/check -H 'content-type: application/json' \
+    -d '{"principal":"some-key","model":"some-model","path":"/v1/chat/completions"}'

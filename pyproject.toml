@@ -1,0 +1,197 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The distribution name. `multistack` on PyPI is an unrelated, abandoned
+# OpenStack client wrapper (4 releases, last one in 2015), so it is not
+# available and would be confusing besides. The import name stays
+# `multistack`, which is normal — pip install sentry-sdk, import sentry_sdk.
+name = "multistack-sdk"
+version = "0.1.0a1"
+description = "Declarative Python SDK for provisioning AI infrastructure on Kubernetes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Guhan Eswaran", email = "guhan.eswaran@multicorewareinc.com" }]
+# pydantic is the SDK's one hard dependency. Specs are pydantic models, so
+# a spec that exists is one that validated — construction and assignment
+# both check, and a spec can be built from a dict, which is what makes
+# loading one from YAML or JSON possible.
+#
+# Everything else still shells out to ssh/helm/kubectl rather than using a
+# client library, so no Kubernetes or cloud SDK is pulled in. The Helm
+# layer's own dependency (pyhelm3) stays an optional extra: installing the
+# SDK for RKE2 alone shouldn't fetch it, and multistack.helm imports it
+# only when an operation actually runs.
+dependencies = ["pydantic>=2.7"]
+
+keywords = ["kubernetes", "rke2", "longhorn", "minio", "vllm", "helm",
+            "infrastructure", "declarative", "sdk", "inference"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+    "Topic :: System :: Clustering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/Multicorewareinc/M-Stack"
+Repository = "https://github.com/Multicorewareinc/M-Stack"
+Documentation = "https://github.com/Multicorewareinc/M-Stack/tree/main/docs"
+
+[project.optional-dependencies]
+dev = ["build", "twine", "pytest"]
+helm = ["pyhelm3", "PyYAML>=6.0"]
+
+[tool.setuptools.packages.find]
+include = ["multistack*"]
+exclude = ["examples*", "tests*"]
+
+# Ships the py.typed marker, so consumers' type checkers actually see the
+# annotations. Without it PEP 561 says to ignore them, and every spec
+# field's type is invisible to a caller — which for a library whose whole
+# surface is typed specs is most of the value lost.
+[tool.setuptools.package-data]
+multistack = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "agentic/backend/tests"]
+# docs/structure.md asks for tests/<capability>/test_spec.py, so several
+# test modules share a basename. Under pytest's default "prepend" import
+# mode, same-named modules in directories that are not packages collide
+# ("import file mismatch"). importlib mode gives each file its own module
+# identity, which is the modern recommendation and avoids scattering
+# __init__.py files through the test tree purely to disambiguate.
+addopts = "--import-mode=importlib"
+# agentic/backend/tests imports its modules flatly (from mcp_server import ...,
+# from main import create_app, ...) per agentic/backend/src's service-template-
+# style layout -- this is agentic/backend/pytest.ini's own `pythonpath = src`
+# setting, repeated here so `pytest` run from the repo root (which uses
+# this file, not agentic/backend/pytest.ini) resolves the same imports.
+#
+# agentic/backend/tests is here for the same reason, and specifically because of
+# the importlib mode above: test_service.py does `from conftest import
+# FakeGraph`, which prepend mode used to satisfy by inserting the test's
+# own directory into sys.path. importlib mode does not, so the path has
+# to be stated. Without it the whole run aborts during collection --
+# testpaths includes agentic/backend/tests, and a collection error is fatal.
+pythonpath = ["agentic/backend/src", "agentic/backend/tests"]
+
+#######################################################
+# ============================================================
+# Ruff — repo-wide linting for api/microservices, multistack SDK,
+# agentic backend, ui, and tests
+# ============================================================
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Ensure Ruff scans the same tree CI scans.
+extend-exclude = [
+    ".venv",
+    "venv",
+    "**/venv/**",
+    "**/__pycache__/**",
+    "**/migrations/versions/**",
+    "ui",
+    "dist",
+    "build",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "B",     # flake8-bugbear (includes B008)
+    "UP",    # pyupgrade
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",  # line-too-long — handled by the formatter
+]
+
+# FastAPI's Depends()/Query()/Path()/etc. in argument defaults are
+# the framework's intended pattern. Tell Ruff they are safe to call
+# at definition time, which silences B008 for all FastAPI routers.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+]
+
+# Import grouping: treat each microservice's own top-level modules as
+# first-party so Ruff does not sort them in with third-party packages.
+# Adjust the list to match the modules your services actually import
+# (based on your snippets: errors, modules, settings, core).
+[tool.ruff.lint.isort]
+known-first-party = [
+    "modules",
+    "errors",
+    "settings",
+    "core",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: allow assert (S101) and blind excepts for setup/teardown.
+"**/tests/**"                     = ["S101"]
+"**/test_*.py"                    = ["S101"]
+# Alembic migrations: generated code, don't fight it.
+"**/migrations/versions/*.py"     = ["E501", "I001"]
+# Agentic backend uses its own flat imports.
+"agentic/backend/**"              = ["E501"]
+
+
+# ============================================================
+# Black — keep it consistent with Ruff's line-length
+# ============================================================
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = '''
+/(
+    \.venv
+  | venv
+  | __pycache__
+  | migrations/versions
+  | ui
+  | dist
+  | build
+)/
+'''
+
+
+# ============================================================
+# mypy — repo-wide type checking
+# ============================================================
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_configs = true
+# Don't blow up on generated or vendored code.
+exclude = [
+    "venv/",
+    "\\.venv/",
+    "migrations/versions/",
+    "ui/",
+    "dist/",
+    "build/",
+]

@@ -1,0 +1,30 @@
+{{ include "enricher.fullname" . }} is deployed.
+
+{{ if .Values.config.events.backboneUrl -}}
+Consuming: {{ .Values.config.events.streamName }}/{{ .Values.config.events.streamSubject }} (durable {{ .Values.config.events.durableName }})
+Producing: {{ .Values.config.events.enrichedStreamName }}/{{ .Values.config.events.enrichedSubject }}
+
+Point rate-limiter-tpm and billing at the enriched stream (config only, no
+rebuild):
+  config.events.backboneUrl={{ .Values.config.events.backboneUrl }}
+  EVENT_STREAM_NAME={{ .Values.config.events.enrichedStreamName }}
+  EVENT_STREAM_SUBJECT={{ .Values.config.events.enrichedSubject }}
+{{- else -}}
+NOT ENRICHING. No event backbone, so no consumer runs: nothing is
+consumed and nothing is republished. You set config.allowNoBackbone=true,
+so this is deliberate. Give it a backbone to start enriching:
+
+  --set config.events.backboneUrl=nats://<nats-service>:4222
+{{- end }}
+
+{{ if .Values.config.tokenizer.url -}}
+Tokenizer fallback: {{ .Values.config.tokenizer.url }} ({{ .Values.config.tokenizer.timeoutMs }}ms)
+{{- else -}}
+No tokenizer configured -- a response event with no usage block is
+republished with source="none", never estimated.
+{{- end }}
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "enricher.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+  curl -s localhost:{{ .Values.service.port }}/metrics | grep enricher_

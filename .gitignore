@@ -8,19 +8,25 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
-develop-eggs/
+# Anchored to the repo root: these are Python build-artifact names, and
+# unanchored they match any directory of that name at any depth. `lib/`
+# silently excluded ui/admin-portal/src/lib/ -- five files import
+# ../../lib/formatters, the directory was never committed, and the
+# portal's `tsc --noEmit` fails in a clean clone with TS2307 on all
+# five. `dist/` stays unanchored on purpose: every portal writes one.
+/build/
+/develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -194,6 +200,12 @@ cython_debug/
 #   Learn more at https://abstra.io/docs
 .abstra/
 
+# Node
+node_modules/
+
+# Newman/Postman run reports
+api/tests/manual-test/newman-report*.json
+
 # Visual Studio Code
 #   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
@@ -216,3 +228,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.claude
+
+# Working scratch space: throwaway scripts, captured command output, spec
+# backups taken before a rewrite, one-off manifests, cloned branches to
+# compare against. Kept inside the repo so it sits next to the code it
+# refers to, and ignored because none of it is the project.
+#
+# Nothing here is load-bearing. If something in scratch/ turns out to
+# matter, it belongs in the tree with a commit explaining why.
+scratch/
+api/microservices/model-gateway/model-gateway-0.1.0.tgz
+api/microservices/model-gateway/chart/values-rke2.yaml
+agentic/frontend/.vite/

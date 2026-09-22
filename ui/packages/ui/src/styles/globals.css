@@ -1,0 +1,23 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  body {
+    font-family: theme('fontFamily.sans');
+    font-size: theme('fontSize.body');
+    color: theme('colors.neutral.900');
+    /* Canvas base sits one step darker than neutral.0 (the shell/card surface
+       tone) so raised surfaces read as elevated rather than recessed. */
+    background: #090d11;
+  }
+  *:focus-visible {
+    outline: 2px solid theme('colors.primary.600');
+    outline-offset: 2px;
+  }
+}

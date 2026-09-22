@@ -1,0 +1,70 @@
+{{/*
+Runs `alembic upgrade head` once per install/upgrade, before the
+Deployment is touched. Helm waits for this Job to reach Complete and
+fails the release if it does not -- so a broken migration blocks the
+rollout instead of shipping app pods against a stale or half-migrated
+schema.
+
+hook-delete-policy removes the previous attempt's Job before this one
+is created (Jobs are immutable, so a same-named Job from the last
+release would otherwise collide) and cleans up after a successful run;
+a failed Job is left in place for `kubectl logs`/`kubectl describe` to
+inspect it.
+
+The image's CMD is docker-entrypoint.sh, which already does this same
+`alembic upgrade head` before serving -- command/workingDir here
+bypass that entrypoint entirely rather than duplicating its "then
+serve" half, which this Job must never do.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "admin-control-plane.fullname" . }}-migrate
+  labels: {{- include "admin-control-plane.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels: {{- include "admin-control-plane.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          workingDir: /app
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "admin-control-plane.fullname" . }}
+            - secretRef:
+                name: {{ include "admin-control-plane.secretName" . }}
+      {{/*
+      The same scheduling constraints as the Deployment, from the same
+      values. The Job was the one pod in this chart that could land on
+      rke2-cp01 -- short-lived, but it runs alembic against the database
+      next to etcd.
+      */}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}

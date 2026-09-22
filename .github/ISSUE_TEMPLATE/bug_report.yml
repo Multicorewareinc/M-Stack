@@ -1,0 +1,88 @@
+name: Bug report
+description: Something behaved differently from what the docs or the spec said
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most bugs in this SDK are one of three things: a prerequisite the
+        node is missing, a kubeconfig pointing at the wrong cluster, or a
+        spec field that means something other than you expected. The
+        questions below are the ones that tell those apart quickly.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the full error, not a summary — the messages carry the diagnosis.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec
+    attributes:
+      label: The spec you built
+      description: >
+        The Storage / MinIOTenant / Inference / RKE2Cluster you constructed,
+        with credentials removed. `spec.model_dump()` is ideal.
+      render: python
+    validations:
+      required: true
+
+  - type: dropdown
+    id: capability
+    attributes:
+      label: Which part
+      options:
+        - cluster (RKE2)
+        - storage (Longhorn)
+        - object storage (MinIO)
+        - inference (vLLM)
+        - Helm layer
+        - Stack / dependency wiring
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: prereqs
+    attributes:
+      label: Output of check_prerequisites()
+      description: >
+        Run the backend's `check_prerequisites(spec, nodes=...)` and paste the
+        result. This answers most storage and inference reports on its own —
+        and if it raised, that *is* the bug report.
+      render: text
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Paste the output of the commands below.
+      placeholder: |
+        python -c "import multistack, sys; print(sys.version)"
+        pip show multistack-sdk | head -2
+        kubectl version -o json | head -20
+        helm version --short
+        kubectl get nodes -o wide
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before filing
+      options:
+        - label: I removed credentials, tokens and kubeconfig contents from everything pasted above
+          required: true
+        - label: The kubeconfig I used points at the cluster I think it does (`kubectl config current-context`)
+          required: true

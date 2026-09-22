@@ -1,0 +1,43 @@
+{{ include "model-gateway.fullname" . }} is deployed.
+
+In-cluster address:
+  http://{{ include "model-gateway.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "model-gateway.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+
+Proxying to: {{ .Values.config.upstreamUrl }}
+
+Verifying /v1 bearers against: {{ .Values.config.orgCpInternalUrl }}
+A wrong or unreachable address here does not fail this install or the
+probes -- it fails every single authenticated request afterward with a
+503 ("key verification is unavailable"), because ADR-026 removed the
+static-key auth mode this gateway used to fall back to.
+
+{{ if .Values.config.policy.endpoints -}}
+Policy chain ({{ .Values.config.policy.failMode }} on error):
+{{- range .Values.config.policy.endpoints }}
+  - {{ . }}
+{{- end }}
+{{- else -}}
+Policy chain: INERT. No rate limiting, no quota -- every authenticated
+request is forwarded. To attach the RPM limiter once it is deployed:
+
+  --set config.policy.endpoints[0]=http://<limiter-release>-rate-limiter-rpm:8000/check
+{{- end }}
+
+{{ if .Values.config.events.backboneUrl -}}
+Event backbone: {{ .Values.config.events.backboneUrl }} (bodies captured: {{ .Values.config.events.captureBodies }})
+{{- else -}}
+Event backbone: INERT. No usage events are published, so nothing
+downstream can bill, audit or count tokens. To attach:
+
+  --set config.events.backboneUrl=nats://<nats-service>:4222
+{{- end }}
+
+{{ if and .Values.secret.create (not .Values.secret.existingSecret) -}}
+WARNING: this release created its own Secret from values, so the API key
+is readable via `helm get values {{ .Release.Name }}`. For anything
+shared, create the Secret separately and use secret.existingSecret.
+{{- end }}

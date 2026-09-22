@@ -1,0 +1,99 @@
+name: Publish Helm Charts
+
+on:
+  workflow_run:
+    workflows: ["Build All Microservices"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to publish (leave empty for all)'
+        required: false
+        type: string
+
+concurrency:
+  group: publish-charts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Only run if upstream Build succeeded (or manual run)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    name: Publish ${{ matrix.service }} chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - admin-control-plane
+          - organization-control-plane
+          - model-gateway
+          - rate-limiter-rpm
+          - rate-limiter-tpm
+          - tokenizer
+          - billing
+          - enricher
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # When triggered by workflow_run, check out the exact SHA that was built
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Skip unselected services (manual run)
+        if: inputs.service != '' && inputs.service != matrix.service
+        run: echo "skipped" && exit 0
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+                --username ${{ github.actor }} \
+                --password-stdin
+
+      - name: Package chart
+        id: pkg
+        run: |
+          set -euo pipefail
+          CHART_DIR="api/microservices/${{ matrix.service }}/chart"
+          if [ ! -f "$CHART_DIR/Chart.yaml" ]; then
+            echo "::warning::No Chart.yaml in $CHART_DIR — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Unique, SemVer-valid version derived from the commit
+          SHA=$(git rev-parse --verify HEAD | cut -c1-7)
+          VERSION="0.0.0-${SHA}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${{ matrix.service }} as ${VERSION}"
+
+          # Patch the version on a temp copy so we don't dirty the repo
+          rm -rf /tmp/chart-pkg
+          cp -r "$CHART_DIR" /tmp/chart-pkg
+          sed -i "s/^version:.*/version: ${VERSION}/" /tmp/chart-pkg/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${SHA}\"/" /tmp/chart-pkg/Chart.yaml
+
+          helm package /tmp/chart-pkg --destination ./dist
+
+      - name: Push chart to GHCR
+        if: steps.pkg.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          helm push ./dist/${{ matrix.service }}-*.tgz \
+            oci://ghcr.io/${OWNER}/charts

@@ -1,0 +1,35 @@
+{{ include "admin-control-plane.fullname" . }} is deployed.
+
+Migrations ran via the {{ include "admin-control-plane.fullname" . }}-migrate
+Job before this Deployment was touched. If this install/upgrade
+succeeded, the schema is at head.
+
+Calls out to organization-control-plane at:
+  {{ .Values.config.orgCpInternalUrl }}
+
+Remember: SERVICE_API_KEY must match the value configured on
+organization-control-plane's release, or every cross-service call
+(org creation, user-directory proxy, permission validation) will 401.
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "admin-control-plane.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+  curl -s localhost:{{ .Values.service.port }}/v1/plans -H "Authorization: Bearer <ADMIN_API_KEY>"
+
+{{ if .Values.secret.existingSecret -}}
+Using the existing Secret {{ .Values.secret.existingSecret }}. This chart never
+reads its contents, so check it carries every key:
+
+    DATABASE_URL
+    ADMIN_API_KEY
+    SERVICE_API_KEY
+    VALKEY_URL
+    JWT_SECRET
+
+A missing VALKEY_URL or JWT_SECRET does not fail this install and does
+not fail the probes. It fails every sign-in with a 500, because the
+login path checks the lockout counters before verifying a password and
+refuses to issue an unsigned token.
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secret.existingSecret }} -o jsonpath='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'
+{{- end }}

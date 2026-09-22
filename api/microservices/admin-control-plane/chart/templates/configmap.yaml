@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "admin-control-plane.fullname" . }}
+  labels: {{- include "admin-control-plane.labels" . | nindent 4 }}
+  annotations:
+    {{/*
+    Also a hook, ordered ahead of the migration Job (weight -10 vs. the
+    Job's -5): a pre-install hook Job runs before this chart's normal
+    resources exist, so without this the Job's envFrom finds no
+    ConfigMap. before-hook-creation (not hook-succeeded) keeps it in
+    place afterward for the Deployment to read.
+    */}}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  SEED_PLANS: {{ .Values.config.seedPlans | quote }}
+  SEED_PERMISSIONS: {{ .Values.config.seedPermissions | quote }}
+  ORG_CP_INTERNAL_URL: {{ required "config.orgCpInternalUrl is required -- the org-creation workflow and user-directory proxy have nowhere to call" .Values.config.orgCpInternalUrl | quote }}
+  ORG_TIMEOUT_MS: {{ .Values.config.orgTimeoutMs | quote }}
+  {{- if .Values.config.billingInternalUrl }}
+  # Not required like orgCpInternalUrl above: the org/plan-change notify to billing is
+  # best-effort (ADR-032) -- billing not existing yet is a supported deployment stage, not
+  # an error, so this chart has no default of its own here. Left unset, the service falls
+  # back to its own settings.py default (http://billing:8000), which resolves nowhere on a
+  # real cluster and silently 401s/DNS-fails the notify on every org create and plan change.
+  BILLING_INTERNAL_URL: {{ .Values.config.billingInternalUrl | quote }}
+  {{- end }}

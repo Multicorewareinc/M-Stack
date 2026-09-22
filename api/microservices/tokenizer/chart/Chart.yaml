@@ -1,0 +1,13 @@
+apiVersion: v2
+name: tokenizer
+description: |
+  Standalone token-counting microservice. Stateless, single endpoint
+  (POST /tokenize), used as the fallback text-source for
+  rate-limiter-tpm when a response event carries no usage block.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [tokenizer, policy, gateway]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/tokenizer

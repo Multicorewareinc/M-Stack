@@ -1,0 +1,13 @@
+# Root .dockerignore -- agentic/backend/Dockerfile is built with the repo
+# root as its context (it needs the sibling multistack/ package), so this
+# is the one Docker actually reads for that build.
+.git/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+agentic/backend/.env
+.pytest_cache/
+*.md
+!README.md

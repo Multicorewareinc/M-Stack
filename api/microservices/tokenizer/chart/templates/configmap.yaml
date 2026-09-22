@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tokenizer.fullname" . }}
+  labels: {{- include "tokenizer.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  TOKENIZER_DEFAULT: {{ required "config.tokenizerDefault is required -- an empty default fails the service at startup" .Values.config.tokenizerDefault | quote }}

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: model-gateway
+description: |
+  OpenAI-compatible inference gateway: authentication, a pluggable
+  pre-request policy chain, and the event backbone. Stateless.
+type: application
+# version    -- the chart's own version, bumped when the templates change.
+# appVersion -- the default image tag, bumped when the service is released.
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [gateway, inference, openai, proxy, rate-limiting]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/model-gateway

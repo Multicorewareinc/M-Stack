@@ -1,0 +1,29 @@
+name: Variables
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: "Version (short SHA or tag)"
+        value: ${{ jobs.variables.outputs.version }}
+      python_version:
+        description: "Python version"
+        value: ${{ jobs.variables.outputs.python_version }}
+      image_tag:
+        description: "Image tag"
+        value: ${{ jobs.variables.outputs.image_tag }}
+
+jobs:
+  variables:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      python_version: ${{ steps.vars.outputs.python_version }}
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract variables
+        id: vars
+        run: make github-variables >> "$GITHUB_OUTPUT"

@@ -1,0 +1,14 @@
+{{ include "tokenizer.fullname" . }} is deployed.
+
+Default backend: {{ .Values.config.tokenizerDefault }}
+
+Point rate-limiter-tpm at it to enable the usage-fallback path (config
+only, no rebuild -- ADR-006):
+
+  --set config.tokenizer.url=http://{{ include "tokenizer.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/tokenize
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "tokenizer.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+  curl -s localhost:{{ .Values.service.port }}/tokenize -H 'content-type: application/json' \
+    -d '{"text":"hello world"}'

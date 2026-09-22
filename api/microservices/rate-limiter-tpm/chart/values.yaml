@@ -1,0 +1,211 @@
+# rate-limiter-tpm
+#
+# The tokens-per-minute sibling of rate-limiter-rpm. Same contract
+# (POST /check), same async counting, same Valkey instance -- different
+# counter, and two differences that matter when you configure it:
+#
+#   1. It counts off **response** events, not request events. A request
+#      is only charged once its token usage is known, so a limit is
+#      always enforced against the previous minute's completions rather
+#      than the request in flight. RPM charges on the request.
+#
+#   2. It needs a token count per event. The common path is
+#      `usage.total_tokens` on the response event. When that is absent
+#      the service falls back to the tokenizer -- and with
+#      config.tokenizer.url empty the fallback is inert, so those events
+#      are skipped entirely rather than estimated. Skipped means
+#      uncounted, which means under-enforced.
+#
+# Everything else -- the Secret for the limits document, the
+# single-replica constraint, the refusal to install without a backbone --
+# is the same as RPM, for the same reasons.
+
+# One replica, and not merely as a default: the counting consumer is a
+# *push* consumer (src/consumer.py calls js.subscribe with a durable
+# name), and JetStream allows only one subscription bound to a durable at
+# a time. A second replica's consumer fails to bind, the service logs
+# tpm_consumer_durable_conflict and starts anyway, and that pod answers
+# /check while counting nothing.
+replicaCount: 1
+
+# maxSurge 0, for the same reason: the default rolling update starts the
+# new pod before terminating the old one, the new pod cannot bind the
+# durable, and it comes up Ready with counting dead. /check keeps
+# answering "allow" with remaining == limit, so enforcement stops
+# silently until someone restarts it.
+#
+# The cost is a gap in /check during an upgrade, which with the
+# gateway's POLICY_FAIL_MODE=closed blocks requests -- the correct
+# direction to fail for a limiter, and seconds long.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+
+image:
+  repository: ghcr.io/multicorewareinc/rate-limiter-tpm
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private by default, so a pull needs credentials.
+# Named by convention rather than passed through every spec: the
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- non-secret configuration -> ConfigMap -> envFrom ------------------
+config:
+  logLevel: INFO
+
+  # The counter store. The same Valkey instance as RPM (ADR-011);
+  # the two do not collide, because TPM keys are prefixed rl:tpm:.
+  #   redis://<service>.<namespace>.svc:6379/0
+  # If your URL carries a password, put VALKEY_URL in the Secret instead:
+  # the Secret is applied after this ConfigMap and overrides it.
+  valkeyUrl: redis://localhost:6379/0
+
+  events:
+    # nats://<nats-service>:4222. Empty => no consumer, no counting.
+    backboneUrl: ""
+    streamName: GATEWAY_EVENTS
+    streamSubject: gateway.events
+    # Distinct from RPM's rpm-counter on purpose. Both consumers read the
+    # same stream and subject; the durable name is what gives each its
+    # own independent cursor. Point them at one durable and they steal
+    # each other's messages, and both under-count.
+    durableName: tpm-counter
+    # Seconds to remember a request_id so at-least-once delivery does not
+    # double-count. Must be >= the 60s window.
+    dedupeTtl: 120
+
+  # Fallback for response events that carry no usage block. Empty means
+  # the fallback is inert and such events are skipped -- not estimated,
+  # not counted. Streaming responses are the usual case, and they are
+  # only recoverable when the gateway runs with
+  # EVENT_CAPTURE_BODIES=true.
+  #   http://<tokenizer-service>.<namespace>.svc:8000/tokenize
+  tokenizer:
+    url: ""
+    timeoutMs: 2000
+
+  # Set true only to deploy deliberately without a backbone -- a service
+  # that answers /check and allows everything, which is useful for
+  # wiring up the gateway before NATS exists. Without this the install
+  # refuses, because "deployed and limiting nothing" otherwise looks
+  # identical to "deployed and working".
+  allowNoBackbone: false
+
+  # Per-org plan limits (AD-04). Empty adminCpUrl => inert: falls back to
+  # secret.limits.userDefault/userOverrides for the "user" (org) scope,
+  # same as before this existed -- so an install with this unset behaves
+  # exactly as it always did, not degraded.
+  #   http://<admin-control-plane-service>.<namespace>.svc.cluster.local:8000
+  adminCpUrl: ""
+  # Seconds a resolved org plan limit is cached. Matches the service's
+  # own default; exposed so a value file can tune it without editing the
+  # ConfigMap by hand.
+  planCacheTtl: 30
+
+# --- limits -> Secret -> envFrom --------------------------------------
+secret:
+  # A Secret you created, holding RATE_LIMITS (and optionally VALKEY_URL,
+  # SERVICE_API_KEY).
+  existingSecret: ""
+
+  # Bearer for admin-control-plane's /internal/v1/organizations/{id}/plan
+  # (AD-04) -- a credential, so it goes here rather than config.adminCpUrl
+  # above, the same reasoning as secret.valkeyUrl below. Must equal
+  # admin-control-plane's own SERVICE_API_KEY exactly, or the plan lookup
+  # 401s and this silently falls back to the static limits.
+  serviceApiKey: ""
+
+  # The counter-store URL *with* its password, rendered into this chart's
+  # own Secret and overriding the ConfigMap's credential-free one (envFrom
+  # applies the Secret second). Set this when Valkey has auth enabled --
+  # putting the password in `config.valkeyUrl` instead leaves it in a
+  # ConfigMap, readable by anything holding `get configmaps` here.
+  #
+  # Ignored when `existingSecret` is set: that Secret is yours, so
+  # VALKEY_URL goes in it directly.
+  valkeyUrl: ""
+
+  # Assembled into the RATE_LIMITS JSON document. Same shape as RPM's,
+  # but the values are **token** counts, not request counts -- so the
+  # numbers are three or four orders of magnitude larger. 0 or absent
+  # means that scope is unlimited.
+  limits:
+    userDefault: 0
+    modelDefault: 0
+    # {"<bearer-token>": 200000}
+    userOverrides: {}
+    # {"gpt-4o": 1000000}
+    modelOverrides: {}
+    # {"<bearer-token>|gpt-4o": 500000}   -- no default for this scope
+    userModelOverrides: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+# Liveness probes /health (unconditional: uvicorn is up), readiness probes
+# /ready (503 when a backbone is configured and the consumer is not
+# counting). See the template for why they differ.
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser unset: the image has no non-root user yet.
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Set by the Python `Policy` spec's
+# network_policy_allowed_ingress, not meant to be hand-edited per release.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort -- e.g. the
+  # model-gateway pods, the only intended caller of /check:
+  #   - app.kubernetes.io/name: model-gateway
+  allowedIngress: []

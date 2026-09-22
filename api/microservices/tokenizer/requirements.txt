@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+tiktoken>=0.7
+pydantic-settings>=2.2
+prometheus-client>=0.20

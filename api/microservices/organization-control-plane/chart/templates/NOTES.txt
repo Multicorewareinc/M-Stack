@@ -1,0 +1,39 @@
+{{ include "organization-control-plane.fullname" . }} is deployed.
+
+Migrations ran via the {{ include "organization-control-plane.fullname" . }}-migrate
+Job before this Deployment was touched. If this install/upgrade
+succeeded, the schema is at head.
+
+Calls out to admin-control-plane at:
+  {{ .Values.config.adminCpInternalUrl }}
+
+Remember: SERVICE_API_KEY must match the value configured on
+admin-control-plane's release, or every cross-service call (tenant
+init, user-directory reads, permission validation) will 401.
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "organization-control-plane.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+
+{{ if .Values.secret.existingSecret -}}
+Using the existing Secret {{ .Values.secret.existingSecret }}. This chart never
+reads its contents, so check it carries every key:
+
+    DATABASE_URL
+    SERVICE_API_KEY
+    VALKEY_URL
+    JWT_SECRET
+    MG_SERVICE_API_KEY
+
+A missing VALKEY_URL or JWT_SECRET does not fail this install and does
+not fail the probes. It fails every sign-in with a 500, because the
+login path checks the lockout counters before verifying a password and
+refuses to issue an unsigned token. A missing MG_SERVICE_API_KEY does
+not fail this install or the probes either -- it fails the
+model-gateway's very next key-verification call with a 500, because
+require_mg_service_key has no static-key fallback the way
+require_service_key does. That value must be identical to the
+model-gateway release's secret.orgVerifyApiKey.
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secret.existingSecret }} -o jsonpath='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'
+{{- end }}

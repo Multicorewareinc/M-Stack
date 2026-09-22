@@ -1,0 +1,191 @@
+# organization-control-plane
+#
+# Three things worth knowing before you set values:
+#
+#   1. DATABASE_URL and SERVICE_API_KEY are credentials and both live
+#      in the Secret, never the ConfigMap -- DATABASE_URL because it
+#      embeds the DB user/password, SERVICE_API_KEY because it is a
+#      bearer token.
+#
+#   2. Migrations run once per install/upgrade via a Helm hook Job
+#      (templates/migration-job.yaml), *before* the Deployment is
+#      touched, using `helm.sh/hook: pre-install,pre-upgrade` -- not
+#      inside every app pod. `helm upgrade` fails before any new pod is
+#      scheduled if the migration fails.
+#
+#      The image's own docker-entrypoint.sh also runs
+#      `alembic upgrade head` on every pod start. That stays as a
+#      harmless no-op (Alembic skips a schema already at head) rather
+#      than being removed, since dropping it is an application change,
+#      not a chart one -- it also means local `docker run` still works
+#      without the hook Job's help.
+#
+#   3. SERVICE_API_KEY must be the exact same value configured on
+#      admin-control-plane's chart -- it is a shared secret between the
+#      two services, not something either one generates on its own.
+#      This chart cannot see the other release's values; keeping the
+#      two in sync is on you.
+#
+# There is one Postgres database for every organization (logical
+# multi-tenant). This chart does not provision it -- it takes a
+# DATABASE_URL for a database that already exists, the same way this
+# SDK's other stateful pieces are provisioned separately and referenced
+# by URL rather than bundled as a chart dependency.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/multicorewareinc/organization-control-plane
+  # Empty => Chart.appVersion. Pin a digest or tag here for a real
+  # deploy; `latest` gives you no way to know what is running.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private by default, so a pull needs credentials.
+# Named by convention rather than passed through every spec: the
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- non-secret configuration -> ConfigMap -> envFrom ------------------
+config:
+  logLevel: INFO
+
+  # admin-control-plane's internal API -- role-permission composition
+  # validates every permission id against its master catalog here.
+  #   http://<admin-cp-service>.<namespace>.svc:8000
+  adminCpInternalUrl: http://admin-control-plane:8000
+  adminTimeoutMs: 3000
+
+  # billing's internal API -- the usage read-through proxy
+  # (add-org-cp-usage-proxy, GET /v1/usage/*). Empty renders no
+  # BILLING_INTERNAL_URL at all, so the service falls back to its own
+  # settings.py default (http://billing:8000), which resolves nowhere on
+  # a real cluster -- unlike adminCpInternalUrl above, unset is a
+  # supported deployment stage (billing not deployed yet), not an error,
+  # so this has no `required` guard.
+  #   http://<billing-service>.<namespace>.svc.cluster.local:8000
+  billingInternalUrl: ""
+
+# --- secret configuration -----------------------------------------------
+secret:
+  # A Secret you created, holding DATABASE_URL, SERVICE_API_KEY,
+  # VALKEY_URL and JWT_SECRET. This is the intended path for anything
+  # past local work.
+  #
+  # This chart cannot read it, so a Secret missing one of those keys
+  # installs cleanly and passes both probes. See NOTES.txt.
+  existingSecret: ""
+
+  # Local work only: create the Secret from the values below. They then
+  # sit in your values file and in `helm get values`, readable by anyone
+  # with release access.
+  create: false
+
+  # postgresql+asyncpg://<user>:<pass>@<host>:5432/org_control_plane
+  databaseUrl: ""
+  serviceApiKey: ""
+
+  # Bearer the model-gateway sends to GET /internal/v1/api-keys/verify --
+  # deliberately distinct from serviceApiKey (least-privilege: a
+  # model-gateway compromise must not also open the broader /v1
+  # users/roles/rbac surface serviceApiKey does). Must equal the
+  # model-gateway release's secret.orgVerifyApiKey exactly, or every
+  # gateway request fails closed with a 503 the moment it needs to verify
+  # a key -- the app's own dependency raises a 500 (ServiceKeyUnsetError)
+  # if this is left empty, since unlike serviceApiKey there is no
+  # static-key fallback for this call site.
+  mgServiceApiKey: ""
+
+  # The cache holding the brute-force lockout counters. settings.py
+  # defaults valkey_url to redis://localhost:6379/0, which in a pod is no
+  # Redis at all -- and lockout.check_locked runs before the password is
+  # even verified, so a missing one is not a degraded login, it is a 500
+  # on every attempt. In this SDK that is the Valkey capability:
+  #
+  #   redis://:<password>@valkey-primary.<namespace>.svc.cluster.local:6379/1
+  #
+  # A Secret value rather than a ConfigMap one because it carries the
+  # password; the limiter charts take theirs from a ConfigMap and say to
+  # move it here when it does.
+  valkeyUrl: ""
+
+  # HS256 signing key for access and refresh tokens. jwt_secret has no
+  # default on purpose -- jwt.py raises JwtSecretUnsetError and fails
+  # login closed rather than ever issuing an unsigned token -- so an
+  # unset one presents exactly like the missing cache above: healthy
+  # pods, passing probes, 500 on every sign-in.
+  #
+  # Must be the SAME value on both control planes: each verifies tokens
+  # the other issued.
+  jwtSecret: ""
+
+  # The service's own .env.example ships "change-me" as its default for
+  # this key, so a forgotten override still boots -- wide open, not
+  # broken. This chart refuses to install a Secret it creates itself
+  # (secret.create=true) with the key left at "change-me" unless you set
+  # this true. It never inspects an existingSecret's contents.
+  allowInsecureDefaults: false
+
+# The pre-install/pre-upgrade migration Job.
+migration:
+  # Bounds how long `helm install`/`helm upgrade` waits for the Job
+  # before giving up and failing the release.
+  activeDeadlineSeconds: 120
+  backoffLimit: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 384Mi
+
+# /health serves both probes -- it does not touch Postgres, so
+# readiness cannot flap on transient DB trouble.
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser are deliberately unset: the image builds on
+  # python:3.12-slim with no non-root user created, so enabling them
+  # without first rebuilding the image gives a pod that cannot start.
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}

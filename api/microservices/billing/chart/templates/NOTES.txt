@@ -1,0 +1,41 @@
+{{ include "billing.fullname" . }} is deployed.
+
+Migrations ran via the {{ include "billing.fullname" . }}-migrate
+Job before this Deployment was touched. If this install/upgrade
+succeeded, the schema is at head.
+
+{{ if .Values.config.events.backboneUrl -}}
+Metering from: {{ .Values.config.events.backboneUrl }}
+  stream GATEWAY_EVENTS_ENRICHED, subject gateway.events.enriched, durable {{ .Values.config.events.durableName }}
+{{- else -}}
+NOT METERING. No event backbone, so no consumer runs and the outbox
+never fills. You set config.allowNoBackbone=true, so this is
+deliberate. Give it a backbone to start metering:
+
+  --set config.events.backboneUrl=nats://<nats-service>:4222
+{{- end }}
+
+{{ if .Values.secret.stripeSecretKey -}}
+Stripe reporting: ENABLED (draining the outbox every {{ .Values.config.reporter.pollIntervalSeconds }}s)
+{{- else -}}
+Stripe reporting: INERT. STRIPE_SECRET_KEY is unset -- usage is still
+metered into the ledger, but nothing is reported to Stripe and outbox
+rows stay pending. This is a valid configuration, not a broken one.
+{{- end }}
+
+{{ if .Values.secret.stripeWebhookSecret -}}
+Stripe webhooks: ENABLED at /webhooks/stripe
+{{- else -}}
+Stripe webhooks: INERT (STRIPE_WEBHOOK_SECRET unset) -- POST
+/webhooks/stripe returns 501 without reading the request body.
+{{- end }}
+
+Remember: SERVICE_API_KEY must match the value configured on
+admin-control-plane's release, or its best-effort subscription
+notifications on org creation / plan change will fail (logged, never
+blocking the org/plan operation itself).
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "billing.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+  curl -s localhost:{{ .Values.service.port }}/metrics

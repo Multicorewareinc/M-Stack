@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rate-limiter-tpm.fullname" . }}
+  labels: {{- include "rate-limiter-tpm.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      # By name, so a changed containerPort cannot leave the Service
+      # pointing at a port nothing listens on.
+      targetPort: http
+      protocol: TCP
+  selector: {{- include "rate-limiter-tpm.selectorLabels" . | nindent 4 }}

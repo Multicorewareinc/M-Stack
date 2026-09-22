@@ -1,0 +1,186 @@
+# billing
+#
+# Four things worth knowing before you set values:
+#
+#   1. DATABASE_URL, SERVICE_API_KEY, STRIPE_SECRET_KEY and
+#      STRIPE_WEBHOOK_SECRET are all credentials and all live in the
+#      Secret, never the ConfigMap.
+#
+#   2. This service MUST consume the ENRICHED stream
+#      (GATEWAY_EVENTS_ENRICHED / gateway.events.enriched), never the
+#      raw gateway stream -- the app itself enforces this with a
+#      fail-fast RuntimeError at startup if EVENT_STREAM_NAME/SUBJECT
+#      don't match exactly, before any DB engine or consumer is built.
+#      Because there is only one correct value, this chart does not
+#      expose them as configurable at all -- they're hardcoded in the
+#      ConfigMap template. If you're wiring this up, point config.events
+#      .backboneUrl at the same NATS the `enricher` service publishes
+#      to; the stream/subject names take care of themselves.
+#
+#   3. SERVICE_API_KEY must be the exact same value configured on
+#      admin-control-plane's chart -- it's the outbound bearer admin-cp
+#      reuses to notify this service of org/plan changes
+#      (BILLING_INTERNAL_URL), a third participant in the same
+#      shared-secret chain as admin-cp <-> org-cp's SERVICE_API_KEY.
+#      This chart cannot see admin-cp's release; keeping them in sync is
+#      on you.
+#
+#   4. STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are both genuinely,
+#      deliberately optional. Unset means the Stripe reporter and the
+#      webhook endpoint are both fully inert (zero Stripe calls, zero
+#      outbox mutations; the webhook route 501s without reading the
+#      request body) -- not a broken deploy, a valid "usage metering
+#      only, no Stripe integration yet" configuration. No install-time
+#      guard exists for either, unlike the other secrets here.
+#
+# The Stripe CLI auto-forwarder (ENABLE_STRIPE_CLI) is dev-only -- "never
+# enable this in a deployed environment" per the service's own
+# .env.example -- so this chart does not expose it at all.
+
+replicaCount: 1
+
+# maxSurge 0, for the same reason rate-limiter-rpm's chart has this: the
+# metering consumer is a *push* consumer (src/consumer.py calls
+# js.subscribe with a durable name), and JetStream allows only one
+# subscription bound to a durable at a time. The default RollingUpdate
+# starts the new pod before terminating the old one, so the new pod's
+# subscribe races the old one's still-live subscription and loses --
+# "billing_consumer_durable_conflict" in the logs, the pod stays Ready,
+# and metering silently stops until the next restart. maxSurge 0 costs a
+# gap in consumption during an upgrade (bounded by JetStream's own
+# redelivery once the new pod does bind), which is the correct direction
+# to fail for a metering pipeline.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+
+image:
+  repository: ghcr.io/multicorewareinc/billing
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- non-secret configuration -> ConfigMap -> envFrom ------------------
+config:
+  logLevel: INFO
+
+  events:
+    # nats://<nats-service>:4222. Empty => no consumer, no metering.
+    backboneUrl: ""
+    durableName: billing-metering
+
+  # Set true only to deploy deliberately without a backbone -- a
+  # service that meters nothing and never drains its outbox, which is
+  # useful for standing up the DB/API surface before NATS exists.
+  # Without this the install refuses, because "deployed and metering
+  # nothing" otherwise looks identical to "deployed and working".
+  allowNoBackbone: false
+
+  stripe:
+    meterEventName: tokens_used
+    meterCustomerField: stripe_customer_id
+
+  reporter:
+    pollIntervalSeconds: 5
+    batchSize: 50
+    maxAttempts: 5
+    backoffBaseSeconds: 30
+    backoffMaxSeconds: 3600
+
+# --- secret configuration -----------------------------------------------
+secret:
+  # A Secret you created, holding DATABASE_URL, SERVICE_API_KEY, and
+  # optionally STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET. This is the
+  # intended path for anything past local work.
+  existingSecret: ""
+
+  # Local work only: create the Secret from the values below. They then
+  # sit in your values file and in `helm get values`, readable by anyone
+  # with release access.
+  create: false
+
+  # postgresql+asyncpg://<user>:<pass>@<host>:5432/billing_service
+  databaseUrl: ""
+
+  # Shared with admin-control-plane's SERVICE_API_KEY -- see note 3
+  # above. No safe default; an unset value fails this endpoint closed
+  # (500) on first use rather than silently accepting any bearer.
+  serviceApiKey: ""
+
+  # Optional -- see note 4 above. Leave empty to run usage metering
+  # without Stripe reporting.
+  stripeSecretKey: ""
+  stripeWebhookSecret: ""
+
+  # The service's own .env.example ships no default for SERVICE_API_KEY
+  # at all (an unset value already fails closed), so the only thing this
+  # guards is an accidentally-empty value on a Secret this chart creates
+  # itself.
+  allowInsecureDefaults: false
+
+# The pre-install/pre-upgrade migration Job.
+migration:
+  activeDeadlineSeconds: 120
+  backoffLimit: 2
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 256Mi
+
+# /health serves both probes -- it does not touch Postgres or Stripe, so
+# readiness cannot flap on transient trouble in either.
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser are deliberately unset: the image builds on
+  # python:3.12-slim with no non-root user created, so enabling them
+  # without first rebuilding the image gives a pod that cannot start.
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}

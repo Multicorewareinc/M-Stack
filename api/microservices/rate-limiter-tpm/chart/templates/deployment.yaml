@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rate-limiter-tpm.fullname" . }}
+  labels: {{- include "rate-limiter-tpm.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- with .Values.strategy }}
+  strategy: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels: {{- include "rate-limiter-tpm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "rate-limiter-tpm.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{/*
+        Roll the pods when config changes. Without this, editing a value
+        rewrites the ConfigMap and the running pods keep the old env
+        until something unrelated restarts them -- which reads as "the
+        setting did not work".
+        */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secret.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.metrics.scrapeAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: {{ .Values.containerPort | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rate-limiter-tpm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "rate-limiter-tpm.fullname" . }}
+            - secretRef:
+                name: {{ include "rate-limiter-tpm.secretName" . }}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{/*
+          /ready, not /health -- the difference is the whole point
+          (ADR-016). /health is liveness: uvicorn is up, and it stays
+          unconditional because restarting a pod cannot clear a durable-bind
+          conflict. /ready reports *counting*: with a backbone configured
+          and the consumer not bound it returns 503, so a pod that answers
+          /check while counting nothing leaves the Service instead of
+          quietly under-enforcing.
+
+          This also makes the maxSurge 0 note above self-healing rather
+          than merely defensive: a new pod that cannot bind the durable
+          stays NotReady and stalls the rollout visibly, instead of going
+          Ready with counting dead.
+
+          rate-limiter-rpm has no /ready yet, so its chart still probes
+          /health -- see API-2 in bugs.md.
+          */}}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- with .Values.resources }}
+          resources: {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}

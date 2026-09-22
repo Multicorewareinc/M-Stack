@@ -1,0 +1,15 @@
+apiVersion: v2
+name: organization-control-plane
+description: |
+  Organization-level control plane -- Users, Roles, and RBAC composition
+  for every organization, as logical multi-tenant tenants in one shared
+  Postgres database (one Org CP + one Org PG for all organizations, not
+  one per org). Schema migrations run via Alembic through a
+  pre-install/pre-upgrade Helm hook Job, ahead of the Deployment.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [organization, control-plane, rbac, multi-tenant]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/organization-control-plane

@@ -1,0 +1,21 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rate-limiter-tpm.fullname" . }}
+  labels: {{- include "rate-limiter-tpm.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "rate-limiter-tpm.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.allowedIngress }}
+        - podSelector:
+            matchLabels: {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.containerPort }}
+{{- end }}

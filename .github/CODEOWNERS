@@ -1,0 +1,40 @@
+# Review ownership, so a pull request reaches the person who wrote the
+# thing it changes rather than whoever happens to be looking.
+#
+# Derived from `git log --all` authorship per area. The handles below are
+# the git author names in this repository's history — REPLACE THEM WITH
+# THE MATCHING GITHUB USERNAMES before this takes effect, since GitHub
+# resolves CODEOWNERS against usernames and teams, not author names, and
+# silently ignores entries it cannot resolve.
+
+# Default: anything not claimed below.
+*                                   @guhan-eswaran
+
+# Capabilities and shared machinery
+/multistack/capability.py           @guhan-eswaran
+/multistack/kube.py                 @guhan-eswaran
+/multistack/stack.py                @guhan-eswaran
+/multistack/backends/rke2_client.py @guhan-eswaran
+/multistack/core/rke2.py            @guhan-eswaran
+/multistack/storage/                @guhan-eswaran
+
+# Object storage — original package by Vinubama, reshaped into the SDK
+/multistack/core/minio.py           @guhan-eswaran @Vinubama
+/multistack/backends/minio_client.py @guhan-eswaran @Vinubama
+/docs/minio.md                      @guhan-eswaran @Vinubama
+
+# Helm layer — original helm-manager-sdk by Nikhil Rai
+/multistack/helm/                   @guhan-eswaran @nikhil-rai
+/docs/helm.md                       @guhan-eswaran @nikhil-rai
+
+# Layers that live outside this package but in the same repo family
+/agentic/                           @anand-devarajan-m
+/api/                               @Abishek-V-MCW
+
+# Structural decisions: the one document that governs how the SDK is
+# shaped. Changes here affect every capability, so they get a wider read.
+/docs/structure.md                  @guhan-eswaran
+
+# Packaging and CI affect everyone who installs or contributes.
+/pyproject.toml                     @guhan-eswaran
+/.github/                           @guhan-eswaran

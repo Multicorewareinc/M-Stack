@@ -1,0 +1,15 @@
+apiVersion: v2
+name: rate-limiter-tpm
+description: |
+  Tokens-per-minute policy service: the second plug for the gateway's
+  pluggable policy chain. Answers POST /check; counts asynchronously off
+  the event backbone. Stateless -- the counters live in Valkey,
+  under the rl:tpm: prefix, in the same instance rate-limiter-rpm uses
+  (ADR-011).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [rate-limiting, policy, tpm, tokens, gateway]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/rate-limiter-tpm

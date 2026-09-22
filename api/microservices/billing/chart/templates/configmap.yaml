@@ -1,0 +1,40 @@
+{{- if and (not .Values.config.events.backboneUrl) (not .Values.config.allowNoBackbone) }}
+{{- fail "\n\nbilling: no event backbone configured, so nothing would be metered.\n\nWithout a backbone this service's consumer never runs: usage events are\nnever recorded, the outbox never fills, and the Stripe reporter (if\nconfigured) has nothing to drain -- a billing service that is deployed,\nhealthy, and metering nothing.\n\nSet one of:\n  config.events.backboneUrl=nats://<nats-service>:4222\n  config.allowNoBackbone=true    deliberately deploy without metering,\n                                 to stand up the DB/API surface before\n                                 NATS exists\n" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "billing.fullname" . }}
+  labels: {{- include "billing.labels" . | nindent 4 }}
+  annotations:
+    {{/*
+    Also a hook, ordered ahead of the migration Job (weight -10 vs. the
+    Job's -5): a pre-install hook Job runs before this chart's normal
+    resources exist, so without this the Job's envFrom finds no
+    ConfigMap. before-hook-creation (not hook-succeeded) keeps it in
+    place afterward for the Deployment to read.
+    */}}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  EVENT_BACKBONE_URL: {{ .Values.config.events.backboneUrl | quote }}
+  {{/*
+  Hardcoded, not exposed as configurable values: the app itself
+  fail-fasts at startup (before any DB engine or consumer is built) if
+  these don't exactly match the enriched stream the `enricher` service
+  produces. There is exactly one correct value, so making it
+  configurable only invites a typo the app would then refuse to start
+  over anyway -- see values.yaml note 2.
+  */}}
+  EVENT_STREAM_NAME: "GATEWAY_EVENTS_ENRICHED"
+  EVENT_STREAM_SUBJECT: "gateway.events.enriched"
+  EVENT_DURABLE_NAME: {{ .Values.config.events.durableName | quote }}
+  STRIPE_METER_EVENT_NAME: {{ .Values.config.stripe.meterEventName | quote }}
+  STRIPE_METER_CUSTOMER_FIELD: {{ .Values.config.stripe.meterCustomerField | quote }}
+  REPORTER_POLL_INTERVAL_SECONDS: {{ .Values.config.reporter.pollIntervalSeconds | quote }}
+  REPORTER_BATCH_SIZE: {{ .Values.config.reporter.batchSize | quote }}
+  REPORTER_MAX_ATTEMPTS: {{ .Values.config.reporter.maxAttempts | quote }}
+  REPORTER_BACKOFF_BASE_SECONDS: {{ .Values.config.reporter.backoffBaseSeconds | quote }}
+  REPORTER_BACKOFF_MAX_SECONDS: {{ .Values.config.reporter.backoffMaxSeconds | quote }}

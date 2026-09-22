@@ -1,0 +1,138 @@
+# enricher
+#
+# Three things worth knowing before you set values:
+#
+#   1. Without a backbone, this service is a total no-op -- it does not
+#      even answer /check like the rate limiters do, since it has no
+#      HTTP surface downstream depends on. No backbone means TPM and
+#      billing both silently get zero enrichment. This chart refuses to
+#      install without one, for the same reason rate-limiter-rpm's does.
+#
+#   2. It ack's a NATS message only after a successful republish (ADR-030
+#      D5) -- unlike the rate limiters, which always ack (fail-open, a
+#      missed count is just under-enforcement). Here a dropped republish
+#      is real data loss for billing, so a failing republish is retried
+#      up to config.maxDeliver times instead. ackWaitSeconds must be
+#      generous enough to cover a tokenizer call plus republish, or
+#      JetStream redelivers mid-attempt and burns the retry budget for
+#      nothing -- this chart checks that arithmetic at install time.
+#
+#   3. Single consumer, same reason as the rate limiters: this is a
+#      durable JetStream push consumer, and JetStream allows only one
+#      subscription bound to a durable at a time. A second replica's
+#      consumer fails to bind and that pod does nothing while looking
+#      healthy.
+replicaCount: 1
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+
+image:
+  repository: ghcr.io/multicorewareinc/enricher
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Secret is namespace-scoped and created alongside the release (see
+# docs/publishing.md). Set it to [] for a public package or a
+# mirror that needs no auth.
+imagePullSecrets:
+  - name: ghcr-creds
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- configuration -> ConfigMap -> envFrom -------------------------------
+# Nothing here is a credential: no Secret object exists for this chart.
+config:
+  logLevel: INFO
+
+  events:
+    # nats://<nats-service>:4222. Empty => no consumer, no enrichment.
+    backboneUrl: ""
+
+    # Input: the gateway's own, unchanged stream. Consumes response
+    # events only.
+    streamName: GATEWAY_EVENTS
+    streamSubject: gateway.events
+    durableName: enricher
+
+    # Output: a separate derived stream, so its retention/cursor is
+    # independent of the raw input's. rate-limiter-tpm and billing both
+    # point here, not at streamName/streamSubject above.
+    enrichedStreamName: GATEWAY_EVENTS_ENRICHED
+    enrichedSubject: gateway.events.enriched
+
+    # Bounded redelivery for the not-ack-on-republish-failure path.
+    maxDeliver: 5
+    ackWaitSeconds: 30
+
+  # Fallback for response events that carry no usage block. Empty means
+  # the fallback is inert and such events are republished with
+  # source="none" rather than estimated. Streaming responses are the
+  # usual case, and they are only recoverable when the gateway runs with
+  # EVENT_CAPTURE_BODIES=true.
+  #   http://<tokenizer-service>.<namespace>.svc:8000/tokenize
+  tokenizer:
+    url: ""
+    timeoutMs: 2000
+
+  # Set true only to deploy deliberately without a backbone -- a service
+  # that consumes nothing and republishes nothing, which is useful for
+  # wiring up the rest of the pipeline before NATS exists. Without this
+  # the install refuses, because "deployed and enriching nothing"
+  # otherwise looks identical to "deployed and working".
+  allowNoBackbone: false
+
+resources:
+  requests:
+    cpu: 30m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
+
+# No /ready: the README is explicit that enricher_consumer_active is the
+# readiness signal, read via /metrics, not a separate endpoint. Both
+# probes use /health.
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # runAsNonRoot/runAsUser unset: the image has no non-root user yet.
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}

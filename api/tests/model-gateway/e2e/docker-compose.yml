@@ -1,0 +1,137 @@
+name: mg-e2e
+
+services:
+  mock-upstream:
+    build: ./mock-upstream
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Shared Valkey for the rate-limiter (fixed-window counters, prefix rl:rpm:).
+  valkey:
+    image: valkey/valkey:8-alpine
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Event backbone (ADR-007/008). The gateway publishes request/response events; the
+  # rate-limiter consumes `request` events to count RPM (ADR-013, async counting).
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # First policy plug (docs/policy-plane.md, ADR-005/013). Built from the new root folder.
+  # limited-model gets an RPM cap of 3; llama-3-8b/claude stay unlimited so the
+  # existing collection is unaffected (attach-by-config, gateway image UNCHANGED).
+  # Counting is async: EVENT_BACKBONE_URL wires the consumer that INCRs Redis from the queue.
+  rate-limiter-rpm:
+    build:
+      context: ../../rate-limiter-rpm
+      dockerfile: Dockerfile
+    environment:
+      VALKEY_URL: redis://valkey:6379/0
+      RATE_LIMITS: '{"model_overrides":{"limited-model":3}}'
+      EVENT_BACKBONE_URL: nats://nats:4222
+    depends_on:
+      valkey:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Tokenizer (ADR-014). No dependency on redis/nats — a plain HTTP service TPM's
+  # consumer calls only on its usage-absent fallback path.
+  tokenizer:
+    build:
+      context: ../../tokenizer
+      dockerfile: Dockerfile
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Second policy plug (docs/policy-plane.md, ADR-011). tpm-limited-model gets a TPM cap
+  # so the escalating-then-429 pattern below is deterministic; llama-3-8b/claude/
+  # limited-model stay unlimited under TPM so the existing collection is unaffected
+  # (attach-by-config, gateway image UNCHANGED except the one AD-01 events.py field).
+  # Counts from `response` events (not `request`, unlike RPM) — the common path needs
+  # only usage; TOKENIZER_URL is the fallback for events without usage.
+  rate-limiter-tpm:
+    build:
+      context: ../../rate-limiter-tpm
+      dockerfile: Dockerfile
+    environment:
+      VALKEY_URL: redis://valkey:6379/0
+      RATE_LIMITS: '{"model_overrides":{"tpm-limited-model":15}}'
+      EVENT_BACKBONE_URL: nats://nats:4222
+      TOKENIZER_URL: http://tokenizer:8000/tokenize
+    depends_on:
+      valkey:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      tokenizer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      API_KEY: test-key
+      UPSTREAM_URL: http://mock-upstream:8000
+      MODEL_ROUTES: '{"llama-3-8b":"http://mock-upstream:8000","claude":{"url":"http://mock-upstream:8000","type":"anthropic","api_key":"mock-key"},"tpm-limited-model":"http://mock-upstream:8000"}'
+      # Attach both limiters by config only — no gateway source change beyond the one
+      # generic events.py field (AD-01).
+      POLICY_ENDPOINTS: http://rate-limiter-rpm:8000/check,http://rate-limiter-tpm:8000/check
+      POLICY_TIMEOUT_MS: "500"
+      # Publish request/response events so both limiters can count async (ADR-007/013,
+      # AD-01). EVENT_CAPTURE_BODIES=true so TPM's tokenizer fallback has text to use on
+      # responses with no usage (the mock's /v1/completions response has none).
+      EVENT_BACKBONE_URL: nats://nats:4222
+      EVENT_CAPTURE_BODIES: "true"
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+      rate-limiter-rpm:
+        condition: service_healthy
+      rate-limiter-tpm:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  newman:
+    image: postman/newman:alpine
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - ./collection.json:/etc/newman/collection.json:ro
+    # --delay-request: RPM/TPM counting is async (ADR-013, AD-01); a 300ms gap lets each
+    # limiter's consumer drain its event into Redis before the next /check, so the RPM
+    # and TPM bursts are deterministic (otherwise a soft limit can overshoot by a request).
+    command: ["run", "collection.json", "--reporters", "cli", "--delay-request", "300"]

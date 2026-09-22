@@ -1,0 +1,22 @@
+{{- if and (not .Values.config.events.backboneUrl) (not .Values.config.allowNoBackbone) }}
+{{- fail "\n\nrate-limiter-rpm: no event backbone configured, so nothing would count.\n\nCounting is asynchronous (ADR-013): /check only READS the Valkey counters,\nand a JetStream consumer increments them from the gateway's request\nevents. With no backbone there is no consumer, the counters never\nadvance, and /check allows every request -- a limiter that is deployed,\nhealthy, and enforcing nothing.\n\nSet one of:\n  config.events.backboneUrl=nats://<nats-service>:4222\n  config.allowNoBackbone=true    deliberately deploy an always-allow\n                                 /check, to wire the gateway up before\n                                 NATS exists\n" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rate-limiter-rpm.fullname" . }}
+  labels: {{- include "rate-limiter-rpm.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  {{/*
+  A URL with no password in it. If yours has one, set VALKEY_URL in the
+  Secret: it is applied after this ConfigMap and overrides this value.
+  */}}
+  VALKEY_URL: {{ required "config.valkeyUrl is required -- the counters have nowhere to live without it" .Values.config.valkeyUrl | quote }}
+  EVENT_BACKBONE_URL: {{ .Values.config.events.backboneUrl | quote }}
+  EVENT_STREAM_NAME: {{ .Values.config.events.streamName | quote }}
+  EVENT_STREAM_SUBJECT: {{ .Values.config.events.streamSubject | quote }}
+  EVENT_DURABLE_NAME: {{ .Values.config.events.durableName | quote }}
+  DEDUPE_TTL: {{ .Values.config.events.dedupeTtl | quote }}
+  ADMIN_CP_URL: {{ .Values.config.adminCpUrl | quote }}
+  PLAN_CACHE_TTL: {{ .Values.config.planCacheTtl | quote }}

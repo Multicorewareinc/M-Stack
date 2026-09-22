@@ -1,0 +1,15 @@
+apiVersion: v2
+name: enricher
+description: |
+  Event enricher (ADR-030) -- consumes the gateway's raw response events,
+  guarantees a token count on each (provider-reported, tokenizer-estimated,
+  or explicitly none), and republishes to a separate enriched stream that
+  rate-limiter-tpm and billing consume. Stateless; the counters live in
+  the enriched NATS stream, not here.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [enricher, events, nats, billing, tpm]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/enricher

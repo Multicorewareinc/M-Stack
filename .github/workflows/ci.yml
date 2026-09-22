@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, format and type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install CI dependencies
+        run: make install-ci
+      - name: Run checks
+        run: make check
+
+  test:
+    name: Repository test suite
+    # tests.yml already has its own push/pull_request trigger, so a plain
+    # push/PR would otherwise run the full suite here too — twice for one
+    # event. Only call it here for the cases tests.yml doesn't cover on
+    # its own: the release gate (workflow_call) and a manual run.
+    if: github.event_name != 'push' && github.event_name != 'pull_request'
+    uses: ./.github/workflows/tests.yml
+
+  ci-gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    if: always()
+    steps:
+      - name: Require all checks to pass
+        run: |
+          if [ "${{ needs.check.result }}" != "success" ]; then
+            echo "::error::check failed: ${{ needs.check.result }}"
+            exit 1
+          fi
+          # "skipped" is expected on a plain push/PR — see the comment on
+          # the test job above; anything else (failure/cancelled) fails the gate.
+          if [ "${{ needs.test.result }}" != "success" ] && [ "${{ needs.test.result }}" != "skipped" ]; then
+            echo "::error::test failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "All CI checks passed."

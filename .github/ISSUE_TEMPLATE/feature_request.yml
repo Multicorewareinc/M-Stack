@@ -1,0 +1,55 @@
+name: Feature request
+description: A capability, an implementation, or a field that should exist
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `docs/structure.md` describes how this SDK is shaped — one rule is
+        that the capability is the class and the implementation is data.
+        Requests that fit that shape are much easier to accept, so it is
+        worth a skim first.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of addition
+      options:
+        - A new implementation of an existing capability (e.g. Ceph for storage)
+        - A new capability (e.g. networking, secrets)
+        - A field on an existing spec
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What you are trying to do that you currently cannot, or can only do
+        by reaching around the SDK. Describe the situation rather than the
+        API you have in mind — the shape often falls out differently.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What it might look like
+      description: A sketch of the calling code, if you have one in mind.
+      render: python
+
+  - type: input
+    id: substitutable
+    attributes:
+      label: For a new implementation — what does it substitute for?
+      description: >
+        The test for whether something belongs in an existing capability is
+        substitutability. Block storage and object storage are separate
+        capabilities because you cannot back a PVC with MinIO.
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you are doing instead today

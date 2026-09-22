@@ -1,0 +1,17 @@
+apiVersion: v2
+name: billing
+description: |
+  Meters LLM token usage from the enriched event stream into a durable,
+  idempotent Postgres ledger (ADR-031) and reports it to Stripe via a
+  transactional outbox. A second surface of the same service also
+  verifies Stripe webhooks and creates/updates Stripe Subscriptions on
+  admin-control-plane's behalf. Schema migrations run via Alembic
+  through a pre-install/pre-upgrade Helm hook Job, ahead of the
+  Deployment.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [billing, stripe, usage, metering]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/billing

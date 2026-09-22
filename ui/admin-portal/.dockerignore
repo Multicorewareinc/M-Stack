@@ -1,0 +1,7 @@
+node_modules
+dist
+coverage
+.vite
+e2e
+playwright-report
+test-results

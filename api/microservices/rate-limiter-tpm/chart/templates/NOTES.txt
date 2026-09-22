@@ -1,0 +1,52 @@
+{{ include "rate-limiter-tpm.fullname" . }} is deployed.
+
+Attach it to the gateway -- config only, no gateway rebuild (ADR-006).
+The policy chain is a list, so add it alongside RPM rather than replacing
+it:
+
+  --set config.policy.endpoints[1]=http://{{ include "rate-limiter-tpm.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/check
+
+Counters: {{ .Values.config.valkeyUrl }}  (prefix rl:tpm:)
+
+{{ if .Values.config.events.backboneUrl -}}
+Counting from: {{ .Values.config.events.backboneUrl }}
+  stream {{ .Values.config.events.streamName }}, subject {{ .Values.config.events.streamSubject }}, durable {{ .Values.config.events.durableName }}
+  off **response** events -- a request is charged once its token usage
+  is known, so limits apply to completed work, not the request in flight.
+{{- else -}}
+NOT COUNTING. No event backbone, so no consumer runs and the counters
+never advance: /check will allow every request. You set
+config.allowNoBackbone=true, so this is deliberate. Give it a backbone
+to start enforcing:
+
+  --set config.events.backboneUrl=nats://<nats-service>:4222
+{{- end }}
+
+{{ if .Values.config.tokenizer.url -}}
+Tokenizer fallback: {{ .Values.config.tokenizer.url }} ({{ .Values.config.tokenizer.timeoutMs }}ms)
+{{- else -}}
+NO TOKENIZER FALLBACK. Response events that carry no `usage` block are
+skipped -- not estimated, not counted. Streaming responses are the usual
+case, and they are only recoverable when the gateway runs with
+EVENT_CAPTURE_BODIES=true. Until then those tokens are invisible to this
+limiter, so the effective ceiling is higher than the numbers below:
+
+  --set config.tokenizer.url=http://<tokenizer-service>.{{ .Release.Namespace }}.svc:8000/tokenize
+{{- end }}
+
+Limits in effect (token counts per minute, not request counts):
+  user_default          {{ .Values.secret.limits.userDefault }}{{ if not .Values.secret.limits.userDefault }}  (unlimited){{ end }}
+  model_default         {{ .Values.secret.limits.modelDefault }}{{ if not .Values.secret.limits.modelDefault }}  (unlimited){{ end }}
+  user_overrides        {{ len .Values.secret.limits.userOverrides }} entr{{ if eq (len .Values.secret.limits.userOverrides) 1 }}y{{ else }}ies{{ end }}
+  model_overrides       {{ len .Values.secret.limits.modelOverrides }} entr{{ if eq (len .Values.secret.limits.modelOverrides) 1 }}y{{ else }}ies{{ end }}
+  user_model_overrides  {{ len .Values.secret.limits.userModelOverrides }} entr{{ if eq (len .Values.secret.limits.userModelOverrides) 1 }}y{{ else }}ies{{ end }}
+
+A limit of 0 means that scope is unlimited, not that it blocks
+everything. All-zero limits deploy a service that answers /check and
+denies nothing.
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rate-limiter-tpm.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/health
+  curl -s localhost:{{ .Values.service.port }}/check -H 'content-type: application/json' \
+    -d '{"principal":"some-key","model":"some-model","path":"/v1/chat/completions"}'

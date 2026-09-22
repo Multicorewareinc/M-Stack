@@ -1,0 +1,14 @@
+apiVersion: v2
+name: admin-control-plane
+description: |
+  Platform admin control plane -- Plans, Organizations, and the global
+  Permission catalog, over a dedicated Postgres database. First DB-backed
+  service in the repo; schema migrations run via Alembic through a
+  pre-install/pre-upgrade Helm hook Job, ahead of the Deployment.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [admin, control-plane, plans, organizations, rbac]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/admin-control-plane

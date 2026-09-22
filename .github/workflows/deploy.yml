@@ -1,0 +1,547 @@
+name: Deploy to RKE2 (Manual)
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to deploy'
+        required: true
+        type: choice
+        default: dev
+        options:
+          - main
+          - dev
+          - staging
+      service:
+        description: 'Service to deploy (leave empty for ALL)'
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-multistack
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve deployable version
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      chart_version: ${{ steps.resolve.outputs.chart_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+
+      - name: Resolve SHA and chart version
+        id: resolve
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_REF}" ]; then
+            SHA="${INPUT_REF}"
+          else
+            SHA=$(git rev-parse --verify HEAD | cut -c1-7)
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=0.0.0-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved deployable version: SHA=${SHA}  chart=0.0.0-${SHA}"
+
+      - name: Verify image + chart exist for ALL services
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          CHART_VERSION: ${{ steps.resolve.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          # Login once for both checks
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          SERVICES="admin-control-plane organization-control-plane model-gateway rate-limiter-rpm rate-limiter-tpm tokenizer billing enricher"
+
+          FAILED=0
+          for svc in $SERVICES; do
+            echo ""
+            echo "=== Checking $svc ==="
+
+            # Image — must match where `make docker-push` (build.yml) actually
+            # puts it: $(REGISTRY)/$(SERVICE), and REGISTRY defaults to
+            # ghcr.io/multicorewareinc/m-stack in the Makefile.
+            if docker manifest inspect "ghcr.io/${OWNER}/m-stack/${svc}:${SHA}" >/dev/null 2>&1; then
+              echo " image ghcr.io/${OWNER}/m-stack/${svc}:${SHA}"
+            else
+              echo " image ghcr.io/${OWNER}/m-stack/${svc}:${SHA} NOT FOUND"
+              FAILED=1
+            fi
+
+            # Chart
+            if helm show chart "oci://ghcr.io/${OWNER}/charts/${svc}" --version "${CHART_VERSION}" >/dev/null 2>&1; then
+              echo " chart ${svc}:${CHART_VERSION}"
+            else
+              echo " chart ${svc}:${CHART_VERSION} NOT FOUND"
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" = "1" ]; then
+            echo ""
+            echo "::error::One or more artifacts are missing. Run Build + Publish Charts for SHA ${SHA} first."
+            exit 1
+          fi
+
+          echo ""
+          echo "All images + charts present for SHA=${SHA}"
+
+  deploy:
+    name: Deploy ${{ matrix.service }}
+    needs: resolve
+    runs-on: [self-hosted, linux, x64, onprem, rke2]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      NAMESPACE: multistack
+      IMAGE_TAG: ${{ needs.resolve.outputs.sha }}
+      CHART_VERSION: ${{ needs.resolve.outputs.chart_version }}
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        service:
+          - admin-control-plane
+          - organization-control-plane
+          - model-gateway
+          - rate-limiter-rpm
+          - rate-limiter-tpm
+          - tokenizer
+          - billing
+          - enricher
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip unselected services
+        if: inputs.service != '' && inputs.service != matrix.service
+        run: echo "skipped ${{ matrix.service }}" && exit 0
+
+      - name: Setup kubectl
+        run: |
+          set -euo pipefail
+          which kubectl || (
+            curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          )
+
+      - name: Set kubeconfig
+        run: |
+          set -euo pipefail
+          [ -f "$HOME/.multistack/kubeconfig" ] || { echo "::error::Kubeconfig not found at $HOME/.multistack/kubeconfig"; exit 1; }
+          echo "KUBECONFIG=$HOME/.multistack/kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Verify cluster access
+        run: |
+          set -euo pipefail
+          kubectl get nodes
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+
+      - name: Log in to GHCR
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+
+      - name: Deploy ${{ matrix.service }}
+        if: inputs.service == '' || inputs.service == matrix.service
+        env:
+          OWNER: ${{ github.repository_owner }}
+          SERVICE: ${{ matrix.service }}
+
+          # Secrets
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SERVICE_API_KEY: ${{ secrets.SERVICE_API_KEY }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          API_KEY: ${{ secrets.API_KEY }}
+          UPSTREAM_API_KEY: ${{ secrets.UPSTREAM_API_KEY }}
+
+          # Variables
+          MODEL_ROUTES: ${{ vars.MODEL_ROUTES }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          ENVIRONMENT: ${{ vars.ENVIRONMENT }}
+          SEED_PLANS: ${{ vars.SEED_PLANS }}
+          SEED_PERMISSIONS: ${{ vars.SEED_PERMISSIONS }}
+          ORG_CP_INTERNAL_URL: ${{ vars.ORG_CP_INTERNAL_URL }}
+          ORG_TIMEOUT_MS: ${{ vars.ORG_TIMEOUT_MS }}
+          UPSTREAM_URL: ${{ vars.UPSTREAM_URL }}
+          REQUEST_TIMEOUT: ${{ vars.REQUEST_TIMEOUT }}
+          POLICY_ENDPOINTS: ${{ vars.POLICY_ENDPOINTS }}
+          POLICY_TIMEOUT_MS: ${{ vars.POLICY_TIMEOUT_MS }}
+          POLICY_FAIL_MODE: ${{ vars.POLICY_FAIL_MODE }}
+          EVENT_BACKBONE_URL: ${{ vars.EVENT_BACKBONE_URL }}
+          EVENT_STREAM_NAME: ${{ vars.EVENT_STREAM_NAME }}
+          EVENT_STREAM_SUBJECT: ${{ vars.EVENT_STREAM_SUBJECT }}
+          EVENT_CAPTURE_BODIES: ${{ vars.EVENT_CAPTURE_BODIES }}
+          EVENT_MAX_INFLIGHT: ${{ vars.EVENT_MAX_INFLIGHT }}
+          ADMIN_CP_INTERNAL_URL: ${{ vars.ADMIN_CP_INTERNAL_URL }}
+          ADMIN_TIMEOUT_MS: ${{ vars.ADMIN_TIMEOUT_MS }}
+          RATE_LIMITS: ${{ vars.RATE_LIMITS }}
+          EVENT_DURABLE_NAME: ${{ vars.EVENT_DURABLE_NAME }}
+          DEDUPE_TTL_MS: ${{ vars.DEDUPE_TTL_MS }}
+          TOKENIZER_URL: ${{ vars.TOKENIZER_URL }}
+          TOKENIZER_TIMEOUT_MS: ${{ vars.TOKENIZER_TIMEOUT_MS }}
+          TOKENIZER_DEFAULT: ${{ vars.TOKENIZER_DEFAULT }}
+          STRIPE_METER_EVENT_NAME: ${{ vars.STRIPE_METER_EVENT_NAME }}
+          STRIPE_METER_CUSTOMER_FIELD: ${{ vars.STRIPE_METER_CUSTOMER_FIELD }}
+          REPORTER_POLL_INTERVAL_SECONDS: ${{ vars.REPORTER_POLL_INTERVAL_SECONDS }}
+          REPORTER_BATCH_SIZE: ${{ vars.REPORTER_BATCH_SIZE }}
+          REPORTER_MAX_ATTEMPTS: ${{ vars.REPORTER_MAX_ATTEMPTS }}
+          REPORTER_BACKOFF_BASE_SECONDS: ${{ vars.REPORTER_BACKOFF_BASE_SECONDS }}
+          REPORTER_BACKOFF_MAX_SECONDS: ${{ vars.REPORTER_BACKOFF_MAX_SECONDS }}
+
+        run: |
+          set -euo pipefail
+
+          # Make the kubeconfig path explicit for this shell
+          export KUBECONFIG="$HOME/.multistack/kubeconfig"
+          [ -f "$KUBECONFIG" ] || { echo "::error::Kubeconfig not found at $KUBECONFIG"; exit 1; }
+
+          OWNER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+
+          VALUES_FILE="$(mktemp)"
+          trap 'rm -f "$VALUES_FILE"' EXIT
+
+          cat > "$VALUES_FILE" <<EOF
+          secret:
+            create: true
+            databaseUrl: "${DATABASE_URL}"
+            redisUrl: "${REDIS_URL}"
+            adminApiKey: "${ADMIN_API_KEY}"
+            jwtSecret: "${JWT_SECRET}"
+            serviceApiKey: "${SERVICE_API_KEY}"
+            stripeSecretKey: "${STRIPE_SECRET_KEY}"
+            stripeWebhookSecret: "${STRIPE_WEBHOOK_SECRET}"
+            apiKey: "${API_KEY}"
+            modelRoutes: '${MODEL_ROUTES}'
+            upstreamApiKey: "${UPSTREAM_API_KEY}"
+
+          config:
+            environment: "${ENVIRONMENT}"
+            logLevel: "${LOG_LEVEL}"
+            seedPlans: "${SEED_PLANS}"
+            seedPermissions: "${SEED_PERMISSIONS}"
+            orgCpInternalUrl: "${ORG_CP_INTERNAL_URL}"
+            orgTimeoutMs: "${ORG_TIMEOUT_MS}"
+            upstreamUrl: "${UPSTREAM_URL:-http://mock-upstream.multistack.svc.cluster.local:8000}"
+            requestTimeout: "${REQUEST_TIMEOUT}"
+
+            policy:
+              endpoints:
+                - "${POLICY_ENDPOINTS}"
+              timeoutMs: "${POLICY_TIMEOUT_MS}"
+              failMode: "${POLICY_FAIL_MODE}"
+
+            events:
+              backboneUrl: "${EVENT_BACKBONE_URL:-nats://nats.nats.svc.cluster.local:4222}"
+              streamName: "${EVENT_STREAM_NAME}"
+              streamSubject: "${EVENT_STREAM_SUBJECT}"
+              captureBodies: "${EVENT_CAPTURE_BODIES}"
+              maxInflight: "${EVENT_MAX_INFLIGHT}"
+
+            modelRoutes: '${MODEL_ROUTES}'
+
+            adminCpInternalUrl: "${ADMIN_CP_INTERNAL_URL:-http://admin-control-plane.multistack.svc.cluster.local:8000}"
+            adminTimeoutMs: "${ADMIN_TIMEOUT_MS}"
+            redisUrl: "${REDIS_URL}"
+
+            event:
+              durableName: "${EVENT_DURABLE_NAME}"
+              dedupeTtl: "${DEDUPE_TTL_MS}"
+
+            tokenizer:
+              url: "${TOKENIZER_URL}"
+              timeoutMs: "${TOKENIZER_TIMEOUT_MS}"
+
+            tokenizerDefault: "${TOKENIZER_DEFAULT:-cl100k_base}"
+
+            stripe:
+              meterEventName: "${STRIPE_METER_EVENT_NAME}"
+              meterCustomerField: "${STRIPE_METER_CUSTOMER_FIELD}"
+
+            reporter:
+              pollIntervalSeconds: "${REPORTER_POLL_INTERVAL_SECONDS}"
+              batchSize: "${REPORTER_BATCH_SIZE}"
+              maxAttempts: "${REPORTER_MAX_ATTEMPTS}"
+              backoffBaseSeconds: "${REPORTER_BACKOFF_BASE_SECONDS}"
+              backoffMaxSeconds: "${REPORTER_BACKOFF_MAX_SECONDS}"
+          EOF
+
+          echo "Generated Helm values file: $VALUES_FILE"
+
+          # --------------------------------------------------------------
+          # Adopt orphaned resources into the Helm release.
+          # If a Service/ConfigMap/Secret with the same name exists but
+          # isn't Helm-managed (e.g. left over from a manual kubectl
+          # apply, a failed install, or a stripped release), stamp it
+          # with the release metadata Helm expects. Otherwise the next
+          # `helm upgrade` fails with:
+          #   "invalid ownership metadata; ... must be set to Helm"
+          # --------------------------------------------------------------
+          adopt_resource() {
+            local kind="$1"
+            local name="$2"
+            local ns="$3"
+            local release="$4"
+
+            if ! kubectl -n "$ns" get "$kind" "$name" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            local managed
+            managed=$(kubectl -n "$ns" get "$kind" "$name" \
+              -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+
+            if [ "$managed" = "Helm" ]; then
+              return 0
+            fi
+
+            echo "Adopting orphaned ${kind}/${name} into release ${release}..."
+            kubectl -n "$ns" annotate "$kind" "$name" \
+              "meta.helm.sh/release-name=${release}" \
+              "meta.helm.sh/release-namespace=${ns}" \
+              --overwrite
+            kubectl -n "$ns" label "$kind" "$name" \
+              "app.kubernetes.io/managed-by=Helm" \
+              --overwrite
+          }
+
+          adopt_resource service   "$SERVICE" "$NAMESPACE" "$SERVICE"
+          adopt_resource configmap "$SERVICE" "$NAMESPACE" "$SERVICE"
+          adopt_resource secret    "$SERVICE" "$NAMESPACE" "$SERVICE"
+
+          # --------------------------------------------------------------
+          # Build the helm command
+          # --------------------------------------------------------------
+          HELM_LIMIT_ARGS=()
+          if [[ "$SERVICE" == "rate-limiter-rpm" || "$SERVICE" == "rate-limiter-tpm" ]] && [[ -n "$RATE_LIMITS" ]]; then
+            HELM_LIMIT_ARGS+=(--set-json "secret.limits=${RATE_LIMITS}")
+          fi
+
+          helm upgrade --install "$SERVICE" \
+            "oci://ghcr.io/${OWNER}/charts/${SERVICE}" \
+            --version "${CHART_VERSION}" \
+            -n "$NAMESPACE" \
+            --create-namespace \
+            -f "$VALUES_FILE" \
+            "${HELM_LIMIT_ARGS[@]}" \
+            --set-string image.repository="ghcr.io/${OWNER}/m-stack/${SERVICE}" \
+            --set-string image.tag="${IMAGE_TAG}" \
+            --timeout 5m
+
+      # - name: Deploy ${{ matrix.service }}
+      #   if: inputs.service == '' || inputs.service == matrix.service
+      #   env:
+      #     OWNER: ${{ github.repository_owner }}
+      #     SERVICE: ${{ matrix.service }}
+
+      #     # Secrets
+      #     DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      #     REDIS_URL: ${{ secrets.REDIS_URL }}
+      #     ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      #     JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      #     SERVICE_API_KEY: ${{ secrets.SERVICE_API_KEY }}
+      #     STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      #     STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      #     API_KEY: ${{ secrets.API_KEY }}
+      #     UPSTREAM_API_KEY: ${{ secrets.UPSTREAM_API_KEY }}
+
+      #     # Variables
+      #     MODEL_ROUTES: ${{ vars.MODEL_ROUTES }}
+      #     LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+      #     ENVIRONMENT: ${{ vars.ENVIRONMENT }}
+      #     SEED_PLANS: ${{ vars.SEED_PLANS }}
+      #     SEED_PERMISSIONS: ${{ vars.SEED_PERMISSIONS }}
+      #     ORG_CP_INTERNAL_URL: ${{ vars.ORG_CP_INTERNAL_URL }}
+      #     ORG_TIMEOUT_MS: ${{ vars.ORG_TIMEOUT_MS }}
+      #     UPSTREAM_URL: ${{ vars.UPSTREAM_URL }}
+      #     REQUEST_TIMEOUT: ${{ vars.REQUEST_TIMEOUT }}
+      #     POLICY_ENDPOINTS: ${{ vars.POLICY_ENDPOINTS }}
+      #     POLICY_TIMEOUT_MS: ${{ vars.POLICY_TIMEOUT_MS }}
+      #     POLICY_FAIL_MODE: ${{ vars.POLICY_FAIL_MODE }}
+      #     EVENT_BACKBONE_URL: ${{ vars.EVENT_BACKBONE_URL }}
+      #     EVENT_STREAM_NAME: ${{ vars.EVENT_STREAM_NAME }}
+      #     EVENT_STREAM_SUBJECT: ${{ vars.EVENT_STREAM_SUBJECT }}
+      #     EVENT_CAPTURE_BODIES: ${{ vars.EVENT_CAPTURE_BODIES }}
+      #     EVENT_MAX_INFLIGHT: ${{ vars.EVENT_MAX_INFLIGHT }}
+      #     ADMIN_CP_INTERNAL_URL: ${{ vars.ADMIN_CP_INTERNAL_URL }}
+      #     ADMIN_TIMEOUT_MS: ${{ vars.ADMIN_TIMEOUT_MS }}
+      #     RATE_LIMITS: ${{ vars.RATE_LIMITS }}
+      #     EVENT_DURABLE_NAME: ${{ vars.EVENT_DURABLE_NAME }}
+      #     DEDUPE_TTL_MS: ${{ vars.DEDUPE_TTL_MS }}
+      #     TOKENIZER_URL: ${{ vars.TOKENIZER_URL }}
+      #     TOKENIZER_TIMEOUT_MS: ${{ vars.TOKENIZER_TIMEOUT_MS }}
+      #     TOKENIZER_DEFAULT: ${{ vars.TOKENIZER_DEFAULT }}
+      #     STRIPE_METER_EVENT_NAME: ${{ vars.STRIPE_METER_EVENT_NAME }}
+      #     STRIPE_METER_CUSTOMER_FIELD: ${{ vars.STRIPE_METER_CUSTOMER_FIELD }}
+      #     REPORTER_POLL_INTERVAL_SECONDS: ${{ vars.REPORTER_POLL_INTERVAL_SECONDS }}
+      #     REPORTER_BATCH_SIZE: ${{ vars.REPORTER_BATCH_SIZE }}
+      #     REPORTER_MAX_ATTEMPTS: ${{ vars.REPORTER_MAX_ATTEMPTS }}
+      #     REPORTER_BACKOFF_BASE_SECONDS: ${{ vars.REPORTER_BACKOFF_BASE_SECONDS }}
+      #     REPORTER_BACKOFF_MAX_SECONDS: ${{ vars.REPORTER_BACKOFF_MAX_SECONDS }}
+
+      #   run: |
+      #     set -euo pipefail
+
+      #     OWNER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+
+      #     VALUES_FILE="$(mktemp)"
+      #     trap 'rm -f "$VALUES_FILE"' EXIT
+
+      #     cat > "$VALUES_FILE" <<EOF
+      #     secret:
+      #       create: true
+      #       databaseUrl: "${DATABASE_URL}"
+      #       redisUrl: "${REDIS_URL}"
+      #       adminApiKey: "${ADMIN_API_KEY}"
+      #       jwtSecret: "${JWT_SECRET}"
+      #       serviceApiKey: "${SERVICE_API_KEY}"
+      #       stripeSecretKey: "${STRIPE_SECRET_KEY}"
+      #       stripeWebhookSecret: "${STRIPE_WEBHOOK_SECRET}"
+      #       apiKey: "${API_KEY}"
+      #       modelRoutes: '${MODEL_ROUTES}'
+      #       upstreamApiKey: "${UPSTREAM_API_KEY}"
+
+      #     config:
+      #       environment: "${ENVIRONMENT}"
+      #       logLevel: "${LOG_LEVEL}"
+      #       seedPlans: "${SEED_PLANS}"
+      #       seedPermissions: "${SEED_PERMISSIONS}"
+      #       orgCpInternalUrl: "${ORG_CP_INTERNAL_URL}"
+      #       orgTimeoutMs: "${ORG_TIMEOUT_MS}"
+      #       upstreamUrl: "${UPSTREAM_URL:-http://mock-upstream.multistack.svc.cluster.local:8000}"
+      #       requestTimeout: "${REQUEST_TIMEOUT}"
+
+      #       policy:
+      #         endpoints:
+      #           - "${POLICY_ENDPOINTS}"
+      #         timeoutMs: "${POLICY_TIMEOUT_MS}"
+      #         failMode: "${POLICY_FAIL_MODE}"
+
+      #       events:
+      #         backboneUrl: "${EVENT_BACKBONE_URL:-nats://nats.nats.svc.cluster.local:4222}"
+      #         streamName: "${EVENT_STREAM_NAME}"
+      #         streamSubject: "${EVENT_STREAM_SUBJECT}"
+      #         captureBodies: "${EVENT_CAPTURE_BODIES}"
+      #         maxInflight: "${EVENT_MAX_INFLIGHT}"
+
+      #       modelRoutes: '${MODEL_ROUTES}'
+
+      #       adminCpInternalUrl: "${ADMIN_CP_INTERNAL_URL:-http://admin-control-plane.multistack.svc.cluster.local:8000}"
+      #       adminTimeoutMs: "${ADMIN_TIMEOUT_MS}"
+      #       redisUrl: "${REDIS_URL}"
+
+      #       event:
+      #         durableName: "${EVENT_DURABLE_NAME}"
+      #         dedupeTtl: "${DEDUPE_TTL_MS}"
+
+      #       tokenizer:
+      #         url: "${TOKENIZER_URL}"
+      #         timeoutMs: "${TOKENIZER_TIMEOUT_MS}"
+
+      #       tokenizerDefault: "${TOKENIZER_DEFAULT:-cl100k_base}"
+
+      #       stripe:
+      #         meterEventName: "${STRIPE_METER_EVENT_NAME}"
+      #         meterCustomerField: "${STRIPE_METER_CUSTOMER_FIELD}"
+
+      #       reporter:
+      #         pollIntervalSeconds: "${REPORTER_POLL_INTERVAL_SECONDS}"
+      #         batchSize: "${REPORTER_BATCH_SIZE}"
+      #         maxAttempts: "${REPORTER_MAX_ATTEMPTS}"
+      #         backoffBaseSeconds: "${REPORTER_BACKOFF_BASE_SECONDS}"
+      #         backoffMaxSeconds: "${REPORTER_BACKOFF_MAX_SECONDS}"
+      #     EOF
+
+      #     echo "Generated Helm values file: $VALUES_FILE"
+
+      #     HELM_LIMIT_ARGS=()
+      #     if [[ "$SERVICE" == "rate-limiter-rpm" || "$SERVICE" == "rate-limiter-tpm" ]] && [[ -n "$RATE_LIMITS" ]]; then
+      #       HELM_LIMIT_ARGS+=(--set-json "secret.limits=${RATE_LIMITS}")
+      #     fi
+
+      #     helm upgrade --install "$SERVICE" \
+      #       "oci://ghcr.io/${OWNER}/charts/${SERVICE}" \
+      #       --version "${CHART_VERSION}" \
+      #       -n "$NAMESPACE" \
+      #       --create-namespace \
+      #       -f "$VALUES_FILE" \
+      #       "${HELM_LIMIT_ARGS[@]}" \
+      #       --set-string image.repository="ghcr.io/${OWNER}/m-stack/${SERVICE}" \
+      #       --set-string image.tag="${IMAGE_TAG}" \
+      #       --wait \
+      #       --timeout 5m
+
+      # - name: Deploy ${{ matrix.service }}
+      #   env:
+      #     OWNER: ${{ github.repository_owner }}
+      #     SERVICE: ${{ matrix.service }}
+      #   run: |
+      #     set -euo pipefail
+      #     OWNER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+      #     echo "Deploying $SERVICE  image_tag=${IMAGE_TAG}  chart=${CHART_VERSION}"
+      #     helm upgrade --install "$SERVICE" \
+      #       "oci://ghcr.io/${OWNER}/charts/${SERVICE}" \
+      #       --version "${CHART_VERSION}" \
+      #       -n "$NAMESPACE" --create-namespace \
+      #       --set-string image.repository="ghcr.io/${OWNER}/m-stack/${SERVICE}" \
+      #       --set-string image.tag="${IMAGE_TAG}" \
+      #       --wait --timeout 5m
+
+      # - name: Wait for rollout
+      #   if: success() && (inputs.service == '' || inputs.service == matrix.service)
+      #   run: |
+      #     set -euo pipefail
+      #     make rollout-status \
+      #       SERVICE=${{ matrix.service }} \
+      #       NAMESPACE="$NAMESPACE" \
+      #       ROLLOUT_TIMEOUT=5m
+
+      - name: Per-service summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.service }}"
+            echo "- Image: \`ghcr.io/${{ github.repository }}/${{ matrix.service }}:${IMAGE_TAG}\`"
+            echo "- Chart: \`oci://ghcr.io/${{ github.repository_owner }}/charts/${{ matrix.service }}:${CHART_VERSION}\`"
+            echo "- Status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  summary:
+    name: Deploy Summary
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          {
+            echo "## Deploy Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| SHA | \`${{ needs.resolve.outputs.sha }}\` |"
+            echo "| Chart version | \`${{ needs.resolve.outputs.chart_version }}\` |"
+            echo "| Matrix result | \`${{ needs.deploy.result }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
