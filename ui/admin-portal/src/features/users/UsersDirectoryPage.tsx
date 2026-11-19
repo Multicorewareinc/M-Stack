@@ -1,11 +1,13 @@
-import { PageHeader, SearchInput } from '@multistack/ui';
+import { Button, PageHeader, SearchInput } from '@multistack/ui';
 import * as React from 'react';
 import { useOrganizations } from '../organizations/hooks/useOrganizations';
+import { CreateUserDrawer } from './CreateUserDrawer';
 import { UserDirectoryTable } from './UserDirectoryTable';
 import { useUserDirectory } from './hooks/useUserDirectory';
 
 export function UsersDirectoryPage() {
   const [search, setSearch] = React.useState('');
+  const [createOpen, setCreateOpen] = React.useState(false);
   const { data: users, isLoading, error, refetch } = useUserDirectory();
   const { data: organizations } = useOrganizations();
 
@@ -22,6 +24,7 @@ export function UsersDirectoryPage() {
         eyebrow="Platform Control Plane / Users"
         title="Users"
         description="Platform-wide user directory."
+        actions={<Button onClick={() => setCreateOpen(true)}>+ Create User</Button>}
       />
       <SearchInput
         aria-label="Search users"
@@ -36,6 +39,7 @@ export function UsersDirectoryPage() {
         onRetry={() => refetch()}
         organizations={organizations}
       />
+      <CreateUserDrawer open={createOpen} onOpenChange={setCreateOpen} organizations={organizations ?? []} />
     </div>
   );
 }

@@ -20,7 +20,11 @@ function renderDrawer(permission?: (typeof mockPermissions)[number]) {
 describe('PermissionFormDrawer', () => {
   it('blocks submission without a resource', async () => {
     renderDrawer();
-    await userEvent.type(screen.getByLabelText('Action'), 'read');
+    // Action is disabled until a resource is chosen, so an empty resource necessarily means an
+    // empty action too. Type into description only, to dirty the form (enabling Submit) without
+    // touching resource/action, then confirm the resource error surfaces.
+    expect(screen.getByLabelText('Action')).toBeDisabled();
+    await userEvent.type(screen.getByLabelText('Description'), 'test');
     await userEvent.click(screen.getByRole('button', { name: 'Create Permission' }));
     // Must fail if the request fires anyway.
     expect(await screen.findByText('Resource is required.')).toBeInTheDocument();
@@ -28,8 +32,8 @@ describe('PermissionFormDrawer', () => {
 
   it('shows a live slug preview computed from resource + action', async () => {
     renderDrawer();
-    await userEvent.type(screen.getByLabelText('Resource'), 'users');
-    await userEvent.type(screen.getByLabelText('Action'), 'read');
+    await userEvent.selectOptions(screen.getByLabelText('Resource'), 'users');
+    await userEvent.selectOptions(screen.getByLabelText('Action'), 'read');
     // Must fail if the slug is a directly-editable input instead of a server-computed preview.
     expect(screen.queryByLabelText('Slug')).toBeNull();
     expect(await screen.findByText('users.read')).toBeInTheDocument();
@@ -37,8 +41,8 @@ describe('PermissionFormDrawer', () => {
 
   it('shows conflict on the field and preserves input', async () => {
     renderDrawer();
-    await userEvent.type(screen.getByLabelText('Resource'), 'users');
-    await userEvent.type(screen.getByLabelText('Action'), 'read'); // users.read already taken
+    await userEvent.selectOptions(screen.getByLabelText('Resource'), 'users');
+    await userEvent.selectOptions(screen.getByLabelText('Action'), 'read'); // users.read already taken
     await userEvent.click(screen.getByRole('button', { name: 'Create Permission' }));
 
     // Must fail if the error is generic or the form clears.

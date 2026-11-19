@@ -1,3 +1,4 @@
+import { ThemeProvider } from '@multistack/ui';
 import { BrowserRouter } from 'react-router-dom';
 import { AppRoutes } from './app/routes';
 import { ErrorBoundary } from './app/ErrorBoundary';
@@ -14,16 +15,19 @@ export function App() {
   const Provider = shouldUseRealAuth() ? AuthProvider : MockAuthProvider;
 
   return (
-    <ErrorBoundary>
-      <QueryProvider>
-        <Provider>
-          <ToastProvider>
-            <BrowserRouter>
-              <AppRoutes />
-            </BrowserRouter>
-          </ToastProvider>
-        </Provider>
-      </QueryProvider>
-    </ErrorBoundary>
+    // Outermost: even the error screens (ErrorBoundary) should respect the chosen theme.
+    <ThemeProvider>
+      <ErrorBoundary>
+        <QueryProvider>
+          <Provider>
+            <ToastProvider>
+              <BrowserRouter>
+                <AppRoutes />
+              </BrowserRouter>
+            </ToastProvider>
+          </Provider>
+        </QueryProvider>
+      </ErrorBoundary>
+    </ThemeProvider>
   );
 }

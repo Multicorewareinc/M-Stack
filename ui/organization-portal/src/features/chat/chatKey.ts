@@ -6,10 +6,10 @@
 // found, create if absent/revoked.
 //
 // Known simplification vs. a from-scratch chat-key design: this reuses the SAME
-// apikey.manage-gated create/rotate endpoints every other API key goes through, rather than a
-// separate ungated self-provisioning route — so today a user needs apikey.manage to use chat,
-// same as they'd need it to manage any other key. A real follow-up would add a dedicated,
-// permission-free self-mint endpoint for exactly this narrow case.
+// apikey.create/apikey.update-gated create/rotate endpoints every other API key goes through,
+// rather than a separate ungated self-provisioning route — so today a user needs both apikey.create
+// and apikey.update to use chat, same as they'd need them to manage any other key. A real
+// follow-up would add a dedicated, permission-free self-mint endpoint for exactly this narrow case.
 
 import { createApiKey, listApiKeys, rotateApiKey } from '../../api/apiKeys';
 

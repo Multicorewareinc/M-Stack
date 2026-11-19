@@ -1,6 +1,8 @@
 import { DetailDialog } from '@multistack/ui';
 import { useLocation, useNavigate, Route, Routes, type Location } from 'react-router-dom';
+import { AuditLogsPage } from '../features/auditLogs/AuditLogsPage';
 import { DashboardPage } from '../features/dashboard/DashboardPage';
+import { InvitationsPage } from '../features/invitations/InvitationsPage';
 import { OrganizationDetailPage } from '../features/organizations/OrganizationDetailPage';
 import { OrganizationsPage } from '../features/organizations/OrganizationsPage';
 import { PlansPage } from '../features/plans/PlansPage';
@@ -43,6 +45,8 @@ export function AppRoutes() {
           <Route path="/permissions" element={<PermissionsPage />} />
           <Route path="/users" element={<UsersDirectoryPage />} />
           <Route path="/users/:userId" element={<UserDetailPage />} />
+          <Route path="/invitations" element={<InvitationsPage />} />
+          <Route path="/audit-logs" element={<AuditLogsPage />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<NotFound />} />
         </Route>

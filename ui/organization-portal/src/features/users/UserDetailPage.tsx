@@ -1,16 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
-import { Badge, Button, EmptyState, PageHeader, StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from '@multistack/ui';
+import { Badge, Breadcrumbs, Button, EmptyState, FormField, PageHeader, Select, StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from '@multistack/ui';
 import * as React from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ApiError } from '../../api/client';
 import { getUserEffectivePermissions } from '../../api/users';
 import { listPermissions } from '../../api/permissions';
 import { Can } from '../../components/Can';
+import { useToast } from '../../app/ToastProvider';
 import { formatDate } from '../../lib/formatters';
 import { EditUserDrawer } from './EditUserDrawer';
-import { ManageRolesDrawer } from './ManageRolesDrawer';
 import { ResetUserPasswordDrawer } from './ResetUserPasswordDrawer';
 import { useUser } from './hooks/useUser';
-import { useUserRoles } from './hooks/useUserRoles';
+import { useSetUserRoles, useUserRoles } from './hooks/useUserRoles';
 import { useRolesForSelect } from './hooks/useRolesForSelect';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -24,6 +25,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 export function UserDetailPage() {
   const { userId = '' } = useParams();
+  const navigate = useNavigate();
   const { data: user, isLoading, isError } = useUser(userId);
   const { data: userRoles } = useUserRoles(userId);
   const { data: roles } = useRolesForSelect();
@@ -33,10 +35,44 @@ export function UserDetailPage() {
     enabled: Boolean(user),
   });
   const { data: catalog } = useQuery({ queryKey: ['permissions-catalog'], queryFn: () => listPermissions() });
+  const setUserRoles = useSetUserRoles(userId);
+  const toast = useToast();
 
   const [editOpen, setEditOpen] = React.useState(false);
-  const [rolesOpen, setRolesOpen] = React.useState(false);
   const [resetPasswordOpen, setResetPasswordOpen] = React.useState(false);
+
+  // Single-select, mirroring CreateUserDrawer's "one role per user" rule (see its own comment) —
+  // a user's role set here is always 0 or 1 ids, never several.
+  const [roleId, setRoleId] = React.useState('');
+  // The dropdown starts read-only (just the current role shown) — "Edit Role" makes it
+  // accessible, "Save Roles"/"Cancel" leave edit mode again.
+  const [editingRole, setEditingRole] = React.useState(false);
+  // Tracks which role-id set roleId was last synced from, so a subsequent refetch with the same
+  // data doesn't clobber an in-progress, not-yet-saved selection.
+  const syncedForRef = React.useRef<string | null>(null);
+  React.useLayoutEffect(() => {
+    if (!userRoles) return;
+    const key = userRoles.role_ids.join(',');
+    if (syncedForRef.current !== key) {
+      setRoleId(userRoles.role_ids[0] ?? '');
+      syncedForRef.current = key;
+    }
+  }, [userRoles]);
+
+  async function handleSaveRole() {
+    try {
+      await setUserRoles.mutateAsync(roleId ? [roleId] : []);
+      setEditingRole(false);
+      toast.success('Role updated');
+    } catch (err) {
+      toast.error('Unable to update role', err instanceof ApiError ? err.message : undefined);
+    }
+  }
+
+  function handleCancelEditRole() {
+    setRoleId(userRoles?.role_ids[0] ?? '');
+    setEditingRole(false);
+  }
 
   if (isLoading) return <div>Loading…</div>;
 
@@ -53,6 +89,11 @@ export function UserDetailPage() {
 
   return (
     <div>
+      <Breadcrumbs
+        className="mb-2"
+        items={[{ label: 'Users', href: '/users' }, { label: user.display_name ?? user.username }]}
+        onNavigate={navigate}
+      />
       <PageHeader
         title={user.display_name ?? user.username}
         actions={
@@ -94,30 +135,54 @@ export function UserDetailPage() {
         </TabsContent>
 
         <TabsContent value="roles">
-          <div className="flex flex-col gap-3">
-            {assignedRoles.length === 0 ? (
-              <EmptyState
-                title="No roles assigned"
-                description="Assign a role to give this user organization permissions."
-                action={{ label: 'Manage Roles', onClick: () => setRolesOpen(true) }}
-              />
-            ) : (
-              <>
-                <div className="flex flex-col gap-2">
-                  {assignedRoles.map((r) => (
-                    <Badge key={r.id} variant="primary">
-                      {r.name}
-                    </Badge>
-                  ))}
-                </div>
-                <Can permission="users.update">
-                  <Button variant="secondary" className="w-fit" onClick={() => setRolesOpen(true)}>
-                    Manage Roles
+          <Can
+            permission="users.update"
+            fallback={
+              assignedRoles.length === 0 ? (
+                <EmptyState title="No roles assigned" description="This user has no role assigned." />
+              ) : (
+                <Badge variant="primary">{assignedRoles[0].name}</Badge>
+              )
+            }
+          >
+            {editingRole ? (
+              <div className="flex max-w-sm flex-col gap-3">
+                <FormField label="Role" htmlFor="user-detail-role" hint="This user gets exactly one role.">
+                  <Select
+                    id="user-detail-role"
+                    value={roleId}
+                    onValueChange={setRoleId}
+                    options={(roles ?? []).map((r) => ({ value: r.id, label: r.name }))}
+                    placeholder="No role"
+                  />
+                </FormField>
+                <div className="flex gap-2">
+                  <Button
+                    className="w-fit"
+                    disabled={roleId === (userRoles?.role_ids[0] ?? '')}
+                    onClick={handleSaveRole}
+                    loading={setUserRoles.isPending}
+                  >
+                    Save Roles
                   </Button>
-                </Can>
-              </>
+                  <Button variant="secondary" className="w-fit" onClick={handleCancelEditRole}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-start gap-3">
+                {assignedRoles.length === 0 ? (
+                  <p className="text-body text-neutral-500">No role assigned.</p>
+                ) : (
+                  <Badge variant="primary">{assignedRoles[0].name}</Badge>
+                )}
+                <Button variant="secondary" className="w-fit" onClick={() => setEditingRole(true)}>
+                  Edit Role
+                </Button>
+              </div>
             )}
-          </div>
+          </Can>
         </TabsContent>
 
         <TabsContent value="permissions">
@@ -146,7 +211,6 @@ export function UserDetailPage() {
       </Tabs>
 
       <EditUserDrawer open={editOpen} onOpenChange={setEditOpen} user={user} />
-      <ManageRolesDrawer open={rolesOpen} onOpenChange={setRolesOpen} userId={user.id} />
       <ResetUserPasswordDrawer open={resetPasswordOpen} onOpenChange={setResetPasswordOpen} user={user} />
     </div>
   );

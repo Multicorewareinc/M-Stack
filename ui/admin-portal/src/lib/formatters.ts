@@ -37,20 +37,13 @@ export function formatDate(value: string | null | undefined): string {
   return `${day} ${month} ${date.getFullYear()}, ${hours}:${minutes}`;
 }
 
-/** A plan limit, as "Unlimited" or an abbreviated count ("100K", "1M") for a
- * round thousand/million — plan limits are round numbers in practice, and the
- * abbreviation is what PlansPage was built against. Anything else (not a
- * round thousand) falls back to a thousands-separated count rather than
- * guessing at a decimal abbreviation no call site expects. */
+/** A plan limit, as "Unlimited" or a compact count (e.g. "100K", "1M") — call sites are
+ * TPM/RPM/quota cells, where a fixed narrow width matters more than exact precision. */
 export function formatQuota(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—';
   if (value === 0) return 'Unlimited';
 
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
-  if (abs >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`;
-
-  return value.toLocaleString('en-GB');
+  return new Intl.NumberFormat('en', { notation: 'compact', compactDisplay: 'short' }).format(value);
 }
 
 const MONTHS = [

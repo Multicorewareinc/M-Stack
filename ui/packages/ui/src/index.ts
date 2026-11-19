@@ -5,17 +5,33 @@ export { cn } from './styles/cn';
 export {
   tokens,
   colors,
+  lightColors,
+  canvas,
   typography,
   spacing,
   radius,
   borders,
   shadows,
+  lightShadows,
   zIndex,
   breakpoints,
   motion,
   type Tokens,
 } from './tokens/index';
 export { multistackPreset } from './tokens/preset';
+
+// Theme (dark/light toggle)
+export { ThemeProvider, useTheme, type Theme, type ThemeProviderProps } from './theme';
+export { applyAccentColor, deriveAccentShades, type AccentShades } from './accentColor';
+export {
+  applyBackgroundColor,
+  applySurfaceColor,
+  applyTextColor,
+  deriveCanvasColor,
+  deriveSurfaceColor,
+  deriveTextColor,
+} from './themeSurface';
+export { ThemeToggle } from './components/ThemeToggle';
 
 // Inputs & forms
 export {
@@ -97,9 +113,11 @@ export {
   Avatar,
   type PageHeaderProps,
   type Crumb,
+  type BreadcrumbsProps,
   type StatCardProps,
   type AvatarProps,
 } from './components/layout';
+export { BrandLogo, type BrandLogoProps } from './components/BrandLogo';
 
 // Table
 export {

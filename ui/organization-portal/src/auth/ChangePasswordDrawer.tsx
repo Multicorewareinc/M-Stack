@@ -80,7 +80,13 @@ export function ChangePasswordDrawer({ open, onOpenChange }: ChangePasswordDrawe
         <FormField label="Current password" htmlFor="cpd-current" error={errors.current_password?.message} required>
           <Input id="cpd-current" type="password" autoComplete="current-password" {...register('current_password')} />
         </FormField>
-        <FormField label="New password" htmlFor="cpd-new" error={errors.new_password?.message} required>
+        <FormField
+          label="New password"
+          htmlFor="cpd-new"
+          error={errors.new_password?.message}
+          required
+          hint="At least 12 characters."
+        >
           <Input id="cpd-new" type="password" autoComplete="new-password" {...register('new_password')} />
         </FormField>
         <FormField

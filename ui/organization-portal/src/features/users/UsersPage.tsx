@@ -3,9 +3,14 @@ import * as React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Can } from '../../components/Can';
 import type { User } from '../../api/types';
+import { ApiError } from '../../api/client';
+import { useToast } from '../../app/ToastProvider';
+import { usePermission } from '../../hooks/usePermission';
 import { formatDate } from '../../lib/formatters';
 import { CreateUserDrawer } from './CreateUserDrawer';
+import { DeactivateUserDialog } from './DeactivateUserDialog';
 import { DeleteUserDialog } from './DeleteUserDialog';
+import { useReactivateUser } from './hooks/useReactivateUser';
 import { useUsers } from './hooks/useUsers';
 
 const STATUS_OPTIONS = [
@@ -19,10 +24,23 @@ export function UsersPage() {
   const [status, setStatus] = React.useState('');
   const [createOpen, setCreateOpen] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState<User | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = React.useState<User | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
+  const canUpdate = usePermission('users.update');
+  const reactivateUser = useReactivateUser();
+  const toast = useToast();
 
   const { data: users, isLoading, error, refetch } = useUsers();
+
+  async function handleReactivate(user: User) {
+    try {
+      await reactivateUser.mutateAsync(user.id);
+      toast.success('User reactivated', `${user.display_name ?? user.username} can sign in again.`);
+    } catch (err) {
+      toast.error('Unable to reactivate user', err instanceof ApiError ? err.message : undefined);
+    }
+  }
 
   const filtered = React.useMemo(() => {
     if (!users) return [];
@@ -71,6 +89,13 @@ export function UsersPage() {
           const actions: RowAction<User>[] = [
             { label: 'View', onClick: () => navigate(`/users/${u.id}`, { state: { backgroundLocation: location } }) },
           ];
+          if (canUpdate) {
+            if (u.status === 'active') {
+              actions.push({ label: 'Deactivate', destructive: true, onClick: () => setDeactivateTarget(u) });
+            } else {
+              actions.push({ label: 'Activate', onClick: () => handleReactivate(u) });
+            }
+          }
           actions.push({ label: 'Delete', destructive: true, onClick: () => setDeleteTarget(u) });
           return actions;
         }}
@@ -82,6 +107,13 @@ export function UsersPage() {
           open={Boolean(deleteTarget)}
           onOpenChange={(open) => !open && setDeleteTarget(null)}
           user={deleteTarget}
+        />
+      )}
+      {deactivateTarget && (
+        <DeactivateUserDialog
+          open={Boolean(deactivateTarget)}
+          onOpenChange={(open) => !open && setDeactivateTarget(null)}
+          user={deactivateTarget}
         />
       )}
     </div>

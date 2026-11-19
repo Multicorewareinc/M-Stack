@@ -1,3 +1,4 @@
+import { ThemeProvider } from '@multistack/ui';
 import { render, screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
@@ -9,13 +10,15 @@ import { AppRoutes } from './routes';
 
 function renderApp(path = '/') {
   return render(
-    <QueryProvider>
-      <MockAuthProvider>
-        <MemoryRouter initialEntries={[path]}>
-          <AppRoutes />
-        </MemoryRouter>
-      </MockAuthProvider>
-    </QueryProvider>,
+    <ThemeProvider>
+      <QueryProvider>
+        <MockAuthProvider>
+          <MemoryRouter initialEntries={[path]}>
+            <AppRoutes />
+          </MemoryRouter>
+        </MockAuthProvider>
+      </QueryProvider>
+    </ThemeProvider>,
   );
 }
 

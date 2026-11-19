@@ -33,7 +33,43 @@ let rolePermissions: Record<string, string[]> = Object.fromEntries(
 );
 
 /** Test-only: clears mutable mock state between tests (wired in test/setup.ts). */
+// ---- Invitations (modules/invitations, /api/invitations): a small in-memory store so the Invitations page
+// and the public accept page work in mock/dev mode too. Real tokens are random; the mock uses a fixed one.
+interface MockInvitation {
+  id: string;
+  email: string;
+  name: string | null;
+  organization_id: string;
+  role_id: string;
+  role_name: string;
+  invited_by: string | null;
+  created_at: string;
+  expires_at: string;
+}
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MOCK_INVITE_TOKEN = 'mock-invite-token-0123456789';
+function seedInvitations(): MockInvitation[] {
+  const now = Date.now();
+  return [
+    {
+      id: 'inv_seed_1',
+      email: 'priya@example.com',
+      name: 'Priya',
+      organization_id: 'org_001',
+      role_id: 'role_org_user',
+      role_name: 'org_user',
+      invited_by: 'admin@acme.com',
+      created_at: new Date(now - DAY_MS).toISOString(),
+      expires_at: new Date(now + 5.5 * DAY_MS).toISOString(),
+    },
+  ];
+}
+let invitations: MockInvitation[] = seedInvitations();
+let nextInvitationSeq = 1;
+
 export function resetOrgMockState() {
+  invitations = seedInvitations();
+  nextInvitationSeq = 1;
   createdUsers = [];
   userRoles = { ...mockUserRoles };
   createdRoles = [];
@@ -234,4 +270,83 @@ export const handlers = [
   http.get('/v1/usage/timeseries', () =>
     HttpResponse.json(getCurrentMockOrgId() === 'org_002' ? mockUsageTimeseriesB : mockUsageTimeseries),
   ),
+
+  // Mirrors Org CP /api/invitations: list / create / revoke for the signed-in org, plus the PUBLIC
+  // inspect / accept pair behind the invitation link. The email taken@example.com stands in for
+  // "already has an account" (409 on the email field).
+  http.get('/api/invitations', ({ request }) => {
+    const q = new URL(request.url).searchParams;
+    const search = q.get('search')?.toLowerCase();
+    const role = q.get('role');
+    const limit = Number(q.get('limit') ?? 25);
+    const offset = Number(q.get('offset') ?? 0);
+    const matches = invitations.filter(
+      (i) => (!role || i.role_name === role) && (!search || i.email.toLowerCase().includes(search)),
+    );
+    return HttpResponse.json({ items: matches.slice(offset, offset + limit), total: matches.length, limit, offset });
+  }),
+
+  http.post('/api/invitations', async ({ request }) => {
+    const body = (await request.json()) as { email: string; name?: string; role_id?: string };
+    if (body.email === 'taken@example.com') {
+      return HttpResponse.json(
+        { error: { message: 'A user with this email already exists', type: 'conflict', field: 'email' } },
+        { status: 409 },
+      );
+    }
+    const role = [...mockRoles, ...createdRoles].find((r) => r.id === body.role_id);
+    const row: MockInvitation = {
+      id: `inv_${nextInvitationSeq++}`,
+      email: body.email,
+      name: body.name ?? null,
+      organization_id: getCurrentMockOrgId(),
+      role_id: role?.id ?? 'role_org_user',
+      role_name: role?.name ?? 'org_user',
+      invited_by: 'admin@acme.com',
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 7 * DAY_MS).toISOString(),
+    };
+    invitations = [row, ...invitations.filter((i) => i.email !== row.email)]; // a new link replaces the old one
+    return HttpResponse.json(
+      {
+        ...row,
+        organization_name: 'Acme Corporation',
+        invite_path: `/accept-invite?token=${MOCK_INVITE_TOKEN}`,
+        invite_url: null,
+        email_status: 'not_configured', // no mail server in mock mode
+        email_detail: 'SMTP is not configured (SMTP_HOST and SMTP_FROM_ADDRESS).',
+      },
+      { status: 201 },
+    );
+  }),
+
+  http.delete('/api/invitations/:id', ({ params }) => {
+    if (!invitations.some((i) => i.id === params.id)) {
+      return HttpResponse.json({ error: { message: 'Invitation not found', type: 'not_found' } }, { status: 404 });
+    }
+    invitations = invitations.filter((i) => i.id !== params.id);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post('/api/invitations/inspect', async ({ request }) => {
+    const { token } = (await request.json()) as { token: string };
+    if (token !== MOCK_INVITE_TOKEN) {
+      return HttpResponse.json({ error: { message: 'This invitation link is not valid.', type: 'not_found' } }, { status: 404 });
+    }
+    return HttpResponse.json({
+      email: 'jane@example.com',
+      name: 'Jane Doe',
+      organization_name: 'Acme Corporation',
+      role_name: 'org_user',
+      expires_at: new Date(Date.now() + 7 * DAY_MS).toISOString(),
+    });
+  }),
+
+  http.post('/api/invitations/accept', async ({ request }) => {
+    const { token } = (await request.json()) as { token: string };
+    if (token !== MOCK_INVITE_TOKEN) {
+      return HttpResponse.json({ error: { message: 'This invitation link is not valid.', type: 'not_found' } }, { status: 404 });
+    }
+    return new HttpResponse(null, { status: 204 });
+  }),
 ];
