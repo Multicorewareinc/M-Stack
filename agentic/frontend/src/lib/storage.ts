@@ -26,6 +26,16 @@ export interface StoredMessage {
    * re-running the turn would not reproduce it. Absent on user messages,
    * and on assistant messages saved before traces were recorded. */
   trace?: TraceEvent[];
+  /** The script this specific turn produced, if any -- rendered as an
+   * inline code block under this message (see PlanPage's MessageBubble/
+   * InlineCodeBlock) rather than in a page-level panel, so it stays
+   * attached to the reply that generated it once a conversation is
+   * reopened from history. */
+  script?: string;
+  /** When this turn's reply arrived, for the plan summary card's
+   * "Created" row -- captured once at send time rather than read back
+   * from the server, since the API returns no timestamp of its own. */
+  createdAt?: number;
 }
 
 export interface StoredSession {
@@ -70,6 +80,19 @@ export function getStoredSession(sessionId: string): StoredSession | undefined {
   return readAll().find((s) => s.sessionId === sessionId);
 }
 
+/** Sessions whose title or any message text contains `query`
+ * (case-insensitive), most recently updated first -- powers the sidebar's
+ * search box. Matches message content too, not just the title, since the
+ * title is only ever the first message truncated to 64 chars (see
+ * titleFrom); a later turn is otherwise unfindable by its own words. */
+export function searchSessions(query: string): StoredSession[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  return listSessions().filter(
+    (s) => s.title.toLowerCase().includes(q) || s.messages.some((m) => m.content.toLowerCase().includes(q)),
+  );
+}
+
 /** Upserts by sessionId -- called after every turn once a session exists. */
 export function saveSession(session: StoredSession): void {
   const all = readAll();
@@ -77,10 +100,6 @@ export function saveSession(session: StoredSession): void {
   if (idx >= 0) all[idx] = session;
   else all.push(session);
   writeAll(all);
-}
-
-export function deleteSession(sessionId: string): void {
-  writeAll(readAll().filter((s) => s.sessionId !== sessionId));
 }
 
 /** A short, human title from the conversation's first message. */

@@ -5,9 +5,9 @@ description: Use this skill when the user's request mentions an ingress, ingress
 
 # MultiStack SDK — IngressGateway / MetalLBIstioOptions / IngressGatewayBackend
 
-Real class signatures (from `multistack.ingress_gateway` — **not** re-exported
-at the top level, unlike `Gateway`/`Policy`/`Storage`; always import from
-`multistack.ingress_gateway` directly). IngressGateway installs *into an
+Real class signatures (from `multistack.ingress_gateway`, also re-exported
+at the top level; generated scripts import from `multistack.ingress_gateway`,
+which always works). IngressGateway installs *into an
 existing cluster* — it does not create one. "metallb_istio" is the only
 supported implementation today.
 
@@ -65,7 +65,7 @@ class IngressGatewayBackend:
 Rules when generating code:
 - `kubeconfig_path` is required and has no ambient fallback — the SDK deliberately never reads `$KUBECONFIG`/`~/.kube/config`, so a stale default can't silently target the wrong cluster.
 - `build_ingress_gateway_plan` is for adding an ingress to a cluster that **already exists** — it needs a real `kubeconfig_path`. If the cluster is also being created in this same request, use `build_full_stack_plan` instead.
-- IngressGateway depends on a cluster (`REQUIRES = ("cluster",)`) only — nothing else. Don't propose it before a cluster exists, but it needs no other layer (not storage, not MinIO).
+- IngressGateway depends on a cluster (`REQUIRES = ("cluster",)`) only — nothing else. Don't propose it before a cluster exists, but it needs no other layer (not storage, not SeaweedFS).
 - `address_pool` is always a real fact about the network — **never invent an IP range**. If the user hasn't given one, ask; a wrong range means the ingress gateway itself can never get an address and stays `<pending>` forever.
 - **Unlike Gateway/Policy, this tool cannot return a real endpoint value.** `external_endpoint` is `None` on every freshly built spec — MetalLB only assigns a real address once the script actually runs. Never state or imply a specific IP/endpoint before that happens.
 - This capability provisions the front door itself — it does **not** wire any individual service's traffic through it. Routing the Model Gateway (or anything else) through this ingress is a separate step this tool doesn't cover; don't imply otherwise.

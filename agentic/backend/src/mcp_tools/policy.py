@@ -3,7 +3,7 @@
 Policy is a pre-request rate-limiting check the Gateway calls before
 forwarding a request -- it attaches to a Gateway by configuration alone
 (its `endpoint` becomes one of the Gateway's `policy_endpoints`), never
-by changing the gateway image. Like Storage/MinIO/Gateway, it deploys
+by changing the gateway image. Like Storage/SeaweedFS/Gateway, it deploys
 into an EXISTING cluster -- it needs a real kubeconfig_path."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pydantic import validate_call
 from multistack import Policy
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def admin_cp_key_error(policy: Policy) -> str | None:
@@ -42,8 +42,7 @@ def _render_script(policy: Policy) -> str:
     TPMOptions, picked by `type`, like Storage's/Gateway's) and `limits`
     (RateLimits, always present, not Optional) -- both rendered as their
     own constructor calls rather than raw dicts."""
-    fields = {k: v for k, v in dump(policy).items() if k not in ("options", "limits")}
-    field_lines = [f"    {k}={v!r}," for k, v in fields.items()]
+    field_lines = dumped_lines(policy, dump(policy), skip=("options", "limits"))
 
     limits_args = ", ".join(f"{k}={v!r}" for k, v in dump(policy.limits).items())
     field_lines.append(f"    limits=RateLimits({limits_args}),")

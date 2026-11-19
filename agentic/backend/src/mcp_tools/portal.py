@@ -5,7 +5,7 @@ under one capability: `type="admin"` (the admin UI) and
 `type="organization"` (the organization UI). Both are the same chart --
 static files served by nginx, which also reverse-proxies API requests so
 the browser makes same-origin requests -- deployed twice with a
-different image and a different upstream. Like Storage/MinIO/Gateway/
+different image and a different upstream. Like Storage/SeaweedFS/Gateway/
 Policy, it deploys into an EXISTING cluster -- it needs a real
 kubeconfig_path."""
 
@@ -16,7 +16,7 @@ from pydantic import validate_call
 from multistack import Portal
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(portal: Portal) -> str:
@@ -24,7 +24,7 @@ def _render_script(portal: Portal) -> str:
     script that installs it -- same reasoning as
     mcp_tools.rke2._render_script: built from the validated object's own
     fields, not a hand-typed template that could silently drop one."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(portal).items() if k != "options"]
+    field_lines = dumped_lines(portal, dump(portal), skip=("options",))
 
     imports = ["from multistack import Portal, PortalBackend"]
     if portal.options is not None:

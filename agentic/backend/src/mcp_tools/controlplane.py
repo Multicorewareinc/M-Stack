@@ -8,7 +8,7 @@ with a Postgres schema and a migration Job, so a real database (CNPG)
 and a real cache (Valkey) must already exist on the cluster -- not
 auto-wired here, since credentials never travel through the SDK's
 published `database_url`/`cache_url` (see the SECURITY note below).
-Like Storage/MinIO/Gateway/Policy, it deploys into an EXISTING cluster
+Like Storage/SeaweedFS/Gateway/Policy, it deploys into an EXISTING cluster
 -- it needs a real kubeconfig_path.
 
 SECURITY NOTE: `existing_secret` is a Secret *name*, never a value --
@@ -26,7 +26,7 @@ from pydantic import validate_call
 from multistack import ControlPlane
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(control_plane: ControlPlane) -> str:
@@ -34,7 +34,7 @@ def _render_script(control_plane: ControlPlane) -> str:
     Python script that installs it -- same reasoning as
     mcp_tools.rke2._render_script: built from the validated object's own
     fields, not a hand-typed template that could silently drop one."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(control_plane).items() if k != "options"]
+    field_lines = dumped_lines(control_plane, dump(control_plane), skip=("options",))
 
     imports = ["from multistack import ControlPlane, ControlPlaneBackend"]
     if control_plane.options is not None:

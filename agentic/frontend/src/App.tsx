@@ -29,7 +29,13 @@ export function App() {
     <div className="flex h-screen flex-col bg-neutral-50">
       <Header />
       <div className="flex min-h-0 flex-1">
-        <Sidebar active={page} onSelect={setPage} />
+        <Sidebar
+          active={page}
+          onSelect={setPage}
+          onOpenSession={openFromHistory}
+          onNewPlan={startNewPlan}
+          activeSessionId={page === 'plan' ? openSessionId : null}
+        />
         <main className="flex min-h-0 flex-1 flex-col">
           {/* PlanPage stays mounted even while another tab is showing, so
               switching to Capabilities/History and back doesn't lose an

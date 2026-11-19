@@ -7,7 +7,7 @@ description: Use this skill when the user's request mentions a GPU, accelerator,
 
 Real class signature (from `multistack.accelerator` — **not** re-exported
 at the top level, unlike `Gateway`/`Policy`; always import from
-`multistack.accelerator` directly, same as `IngressGateway`).
+`multistack.accelerator` directly).
 
 Kubernetes does not know a node has a GPU. Until something advertises one
 as an extended resource, `nvidia.com/gpu` is not a thing a pod can ask
@@ -16,6 +16,12 @@ card in it looks exactly like a cluster with none. This capability
 installs the thing that does the advertising.
 
 ```python
+class DevicePluginOptions(BaseModel):
+    release_name: str = "nvdp"
+    chart: str = "nvidia-device-plugin"
+    chart_version: Optional[str] = "0.20.0"    # pinned on purpose; a silent bump can change which nodes it runs on
+    runtime_class_name: str = "nvidia"          # the plugin must run under the nvidia runtime to see the card at all
+
 class Accelerator(CapabilitySpec):
     type: str = "nvidia_device_plugin"   # the only implementation today
     kubeconfig_path: str                 # required -- the EXISTING cluster

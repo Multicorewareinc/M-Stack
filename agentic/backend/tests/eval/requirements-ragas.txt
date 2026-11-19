@@ -1,0 +1,6 @@
+# For ragas_score.py and ragas_script_score.py only, in their own
+# environment (see their docstrings).
+# ragas 0.4.3 imports langchain_community.chat_models.vertexai, which
+# langchain-community 0.4 removed.
+ragas==0.4.3
+langchain-community<0.4

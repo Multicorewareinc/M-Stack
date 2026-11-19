@@ -42,7 +42,7 @@ class Observability(CapabilitySpec):
 Rules when generating code:
 - `kubeconfig_path` is required and has no ambient fallback — the SDK
   deliberately never reads `$KUBECONFIG`/`~/.kube/config`.
-- **Persistent by default, same as MinIO**: `REQUIRES = ("cluster",
+- **Persistent by default, same as SeaweedFS**: `REQUIRES = ("cluster",
   "storage")` — a StorageClass must already exist on the cluster.
   Without one, every Prometheus sample and every Grafana dashboard is
   lost on a routine pod reschedule. Don't propose installing this

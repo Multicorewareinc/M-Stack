@@ -1,6 +1,7 @@
 ---
 name: policy
-description: Use this skill when the user's request mentions rate limiting, request quotas, requests-per-minute, tokens-per-minute, throttling, or a policy chain in front of a model gateway. Covers the real MultiStack SDK Policy/RateLimits/RPMOptions/TPMOptions/PolicyBackend classes.
+description: Use this skill when the user's request mentions rate limiting, rate limits, a rate limiter, RPM, TPM, request quotas, requests-per-minute, requests per minute, tokens-per-minute, tokens per minute, throttling, or a policy chain in front of a model gateway. Covers the real MultiStack SDK Policy/RateLimits/RPMOptions/TPMOptions/PolicyBackend classes.
+must_ask: type | Should the limit count requests per minute (rpm) or tokens per minute (tpm)? | rpm = requests per minute, request per minute, requests a minute; tpm = tokens per minute, token per minute, tokens a minute
 ---
 
 # MultiStack SDK — Policy / RateLimits / RPMOptions / TPMOptions / PolicyBackend
@@ -26,10 +27,17 @@ class RateLimits(BaseModel):
     # A request is denied if ANY applicable scope is over its limit in
     # the current 60-second window. 0 = UNLIMITED for that scope, not
     # blocked -- the inverse of what most people assume.
-    user_default: int = 0            # per principal (the caller's bearer token). 0 = unlimited.
-    model_default: int = 0           # per model. 0 = unlimited.
+    user_default: int = 0            # per principal (the caller's bearer token), every caller. 0 = unlimited.
+    model_default: int = 0           # per model, EVERY model. 0 = unlimited.
     user_overrides: dict = {}        # {principal: limit} -- contains credentials, stored in a Secret, not a ConfigMap
-    model_overrides: dict = {}       # {model: limit}
+    model_overrides: dict = {}       # {model: limit} -- a limit on the models named, the others unchanged
+    # Which field depends on who the limit is for:
+    #   one or more models named ("cap mistral-7b at 20000 tokens a minute")
+    #     -> model_overrides={"mistral-7b": 20000}; other models unchanged
+    #   every model alike ("no model may take more than 300 a minute")
+    #     -> model_default=300
+    #   every caller alike ("each API key gets 30 a minute")
+    #     -> user_default=30
     user_model_overrides: dict = {}  # {"<principal>|<model>": limit} -- key MUST contain "|" or the limit silently does nothing
 
 class RPMOptions(BaseModel):
@@ -37,6 +45,7 @@ class RPMOptions(BaseModel):
     chart: str = "api/microservices/rate-limiter-rpm/chart"
     chart_version: Optional[str] = None
     image_tag: Optional[str] = None
+    image_repository: Optional[str] = None   # full image path; None = the chart's own registry. Set it only when the user names a registry or mirror
     dedupe_ttl: int = 120             # >= 60 seconds -- must cover the window it protects, or a redelivered event double-counts
     durable_name: str = "rpm-counter"
 
@@ -45,6 +54,7 @@ class TPMOptions(BaseModel):
     chart: str = "api/microservices/rate-limiter-tpm/chart"
     chart_version: Optional[str] = None
     image_tag: Optional[str] = None
+    image_repository: Optional[str] = None   # full image path; None = the chart's own registry. Set it only when the user names a registry or mirror
     dedupe_ttl: int = 120              # >= 60 seconds, same reasoning as RPMOptions
     # tpm reads a DIFFERENT stream from rpm. The enricher guarantees a
     # token count and republishes to gateway.events.enriched; tpm consumes
@@ -100,6 +110,7 @@ class Policy(BaseModel):
     # to explain it. None (the default) leaves the chart's own default in
     # place; an explicit {} OVERRIDES it with "schedule anywhere", which
     # is a different statement.
+    affinity: Optional[Dict[str, Any]] = None
     node_selector: Optional[Dict[str, str]] = None
     tolerations: Optional[List[Dict[str, Any]]] = None
 
@@ -114,6 +125,7 @@ class PolicyBackend:
 ```
 
 Rules when generating code:
+- **A request about what the gateway does when its rate-limit check can't be reached ("let requests through", "fail open", "fail closed") is about the Gateway's own `policy_fail_mode` field (see the `gateway` skill) — not, by itself, a request to compose this Policy component.** A gateway can set `policy_fail_mode` with no Policy deployed at all; there's simply nothing to time out. Compose a Policy only when the user is actually asking for rate limiting or quota enforcement to be put in place — if they haven't given a limit, don't ask for one just to justify building this; leave it out.
 - `kubeconfig_path` is required and has no ambient fallback — the SDK deliberately never reads `$KUBECONFIG`/`~/.kube/config`, so a stale default can't silently target the wrong cluster.
 - `cache_url` is required and has no safe default — leaving it unset is not an option; ask the user for it if they haven't given one (typically a Valkey/Redis endpoint). If a Valkey deployment is being built in the same whole-stack request (see `build_full_stack_plan`), its real endpoint is wired into `cache_url` automatically — see the `valkey` skill.
 - `event_backbone_url` is required **unless** the user explicitly wants an always-allow policy deployed before the backbone exists — never set `allow_no_backbone=True` on your own judgment. It defeats the entire purpose of deploying this (the limiter would be healthy and enforcing nothing), so only set it when the user explicitly asks for that specific behavior (e.g. "deploy the gateway wiring now, backbone comes later").
@@ -128,4 +140,4 @@ Rules when generating code:
 - **`type="tpm"` no longer calls a tokenizer.** ADR-030 moved token counting into the Enricher, which guarantees a count and republishes to `gateway.events.enriched`; tpm consumes that enriched stream. `TPMOptions.tokenizer_url`/`tokenizer_timeout_ms` were **deleted** from the SDK — passing either now raises `extra_forbidden`, so never construct them, and don't offer a tokenizer as something that wires into a policy.
 - **A `type="tpm"` policy needs an Enricher already running on the cluster.** By default it reads `gateway.events.enriched` (`TPMOptions.event_stream_subject`), and nothing but the Enricher publishes that stream (see the `enricher` skill). Without one, it is deployed, Ready, and **fails open**: every request is silently allowed, since no count ever arrives. This tool has no way to check whether an enricher already exists on a target cluster the way `build_full_stack_plan` can check a same-call composition, so if the user is deploying a fresh `type="tpm"` policy, ask whether an enricher is already running rather than assuming one is. `type="rpm"` has no such dependency — it reads the raw `gateway.events` stream directly.
 - `network_policy_allowed_ingress` locks down who may reach this service's `/check`, and it is **off by default**: an empty list installs no NetworkPolicy at all. Only set it when the user asks to restrict ingress, with real selector labels they gave you (typically the Model Gateway's, e.g. `[{"app": "model-gateway"}]`) — naming the wrong one cuts the gateway off from the limiter it depends on.
-- `node_selector`/`tolerations` pin this service to a particular node. They matter here because there is no in-cluster registry: a service image exists only on the node it was imported to, so a pod scheduled anywhere else sits in `ImagePullBackOff` with nothing in the release to explain it. Leave both unset unless the user tells you which node holds the image — a node name or label is a real fact about their cluster, never one to invent. Note `None` and `{}` are different statements: unset leaves the chart's own default in place, while an explicit `{}` overrides it with "schedule anywhere".
+- `affinity`/`node_selector`/`tolerations` pin this service to a particular node. They matter here because there is no in-cluster registry: a service image exists only on the node it was imported to, so a pod scheduled anywhere else sits in `ImagePullBackOff` with nothing in the release to explain it. Leave both unset unless the user tells you which node holds the image — a node name or label is a real fact about their cluster, never one to invent. Note `None` and `{}` are different statements for `affinity`/`node_selector`: unset leaves the chart's own default in place (pods off the control plane), while an explicit `{}` overrides it with "schedule anywhere" -- the only way a single-node cluster, where the control plane is the only node, can actually schedule these pods.

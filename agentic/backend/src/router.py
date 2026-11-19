@@ -23,43 +23,82 @@ EventSource supports.
 from __future__ import annotations
 
 import uuid
-from typing import Iterator, Literal
+from typing import AsyncIterator, Literal
 
 import json
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from dependencies import require_api_key
 
 router = APIRouter()
+
+# A file attached to a message is spliced into the model's context for that
+# one turn (see orchestration/graph.py's _with_reference) -- it rides in
+# the same request body, as text, rather than a multipart upload, since
+# every session endpoint already accepts a plain JSON body and the console
+# only ever attaches text-like files (YAML/JSON/.py/.md; see the frontend's
+# accept list). Capped well under a typical model's context window: a large
+# attachment competes with the system prompt and tool schemas for the same
+# budget (see llm.py's LLM_PROMPT_BUDGET_TOKENS), and a silently-truncated
+# multi-turn conversation is worse than an upfront 422.
+MAX_ATTACHMENT_CHARS = 20_000
 
 
 class MessageRequest(BaseModel):
     """Body for starting or continuing a conversation."""
 
     message: str
+    # The attached file's content and name, if the caller sent one --
+    # both optional, and both absent on every existing caller.
+    attachment: str | None = None
+    attachment_name: str | None = None
+
+    @field_validator("attachment")
+    @classmethod
+    def _attachment_size(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > MAX_ATTACHMENT_CHARS:
+            raise ValueError(f"attachment exceeds {MAX_ATTACHMENT_CHARS} characters")
+        return value
 
 
 class SessionResponse(BaseModel):
     """The one response shape every session endpoint returns. `status`
     tells the caller what to do next: "needs_input" -> send another
-    message, "resolved" -> a script was generated, read `script`."""
+    message, "resolved" -> a script was generated, read `script`.
+
+    A paused human-in-the-loop turn (orchestration/graph.py's
+    confirm_selection, or the model's own ask_user tool call) is also
+    "needs_input" -- the same send-another-message action resumes it,
+    this time with the human's answer rather than a new request. `options`
+    is only ever set then, for a UI that wants to render real choices
+    instead of a free-text box; it's never set for an ordinary question."""
 
     session_id: str
     status: Literal["needs_input", "resolved"]
     message: str | None = None  # the model's question or final reply text
     script: str | None = None  # the generated script, once status == "resolved"
+    options: list[str] | None = None  # set only when a human-in-the-loop question offers a fixed choice
 
 
 def _to_response(session_id: str, state: dict) -> SessionResponse:
     """Maps a graph state dict -- fresh from send_message() or a read-only
-    get_state() snapshot, both carry the same reply/script shape -- onto
-    SessionResponse. "resolved" means a script was produced during this
-    conversation; "needs_input" means the model is still asking or has
-    nothing to hand back yet."""
+    get_state() snapshot, both carry the same reply/script/ask_user
+    shape -- onto SessionResponse. "resolved" means a script was produced
+    during this conversation; "needs_input" means the model is still
+    asking (an ordinary question, or a paused human-in-the-loop one) or
+    has nothing to hand back yet."""
+    ask_user = state.get("ask_user")
+    if ask_user:
+        return SessionResponse(
+            session_id=session_id,
+            status="needs_input",
+            message=ask_user.get("question"),
+            options=ask_user.get("options") or None,
+        )
     script = state.get("script")
     return SessionResponse(
         session_id=session_id,
@@ -85,18 +124,22 @@ async def metrics() -> Response:
     dependencies=[Depends(require_api_key)],
     tags=["sessions"],
 )
-def start_session(body: MessageRequest, request: Request) -> SessionResponse:
+async def start_session(body: MessageRequest, request: Request) -> SessionResponse:
     """Starts a new conversation. Returns a session_id -- use it for
     every subsequent call for this conversation.
 
-    Plain `def`, as are the other two routes that call the service
-    directly: the model call is synchronous and can run for a minute, and
-    FastAPI runs a `def` route in its thread pool but an `async def` one on
-    the event loop, where it stalled every other request -- /health took
-    53s behind a single turn. The /stream routes return a lazy generator,
-    which Starlette already iterates in a thread."""
+    `async def`, unlike this route's earlier form: the model call used to
+    be a genuinely blocking one (`invoke`, running in a thread pool),
+    which stalled every other request if this ran on the event loop
+    instead -- /health took 53s behind a single turn. Now that
+    call_model awaits the model with `ainvoke` (see orchestration/graph.py),
+    the wait is real async I/O, not a blocking call, so awaiting it here
+    on the event loop is correct rather than the mistake it would have
+    been before."""
     session_id = uuid.uuid4().hex
-    state = request.app.state.service.start_session(session_id, body.message)
+    state = await request.app.state.service.start_session(
+        session_id, body.message, attachment=body.attachment, attachment_name=body.attachment_name
+    )
     return _to_response(session_id, state)
 
 
@@ -106,9 +149,11 @@ def start_session(body: MessageRequest, request: Request) -> SessionResponse:
     dependencies=[Depends(require_api_key)],
     tags=["sessions"],
 )
-def continue_session(session_id: str, body: MessageRequest, request: Request) -> SessionResponse:
+async def continue_session(session_id: str, body: MessageRequest, request: Request) -> SessionResponse:
     """Sends another message on an existing conversation."""
-    state = request.app.state.service.continue_session(session_id, body.message)
+    state = await request.app.state.service.continue_session(
+        session_id, body.message, attachment=body.attachment, attachment_name=body.attachment_name
+    )
     return _to_response(session_id, state)
 
 
@@ -125,19 +170,36 @@ def get_session(session_id: str, request: Request) -> SessionResponse:
     return _to_response(session_id, state)
 
 
-def _ndjson(session_id: str, events) -> Iterator[str]:
+async def _ndjson(session_id: str, events: AsyncIterator[dict]) -> AsyncIterator[str]:
     """Renders graph events as newline-delimited JSON.
 
     The "final" event carries the whole graph state, which includes the
     full LangChain message history -- far more than a caller needs and
     not JSON-serializable anyway -- so it is mapped through the same
-    _to_response() the blocking endpoints use. Everything else passes
-    through as-is.
-    """
-    for event in events:
+    _to_response() the blocking endpoints use.
+
+    "ask_user" gets `session_id` added too, same as "final" -- on a
+    brand-new session (POST /v1/sessions/stream, no id yet from the
+    caller), a turn that pauses on a question never reaches "final" at
+    all (the two are mutually exclusive), so this is the only event
+    that would ever tell the caller which thread to resume. Without it,
+    resuming started a second, unrelated session instead of answering
+    the one actually paused -- confirmed live: the paused thread just
+    sat there, and the UI looked like the question had vanished.
+
+    An async generator, not a plain one: StreamingResponse then drives it
+    directly on the event loop instead of Starlette's iterate_in_threadpool,
+    which is what lets a client disconnect actually cancel the in-flight
+    turn (down through stream_events -> call_model's `ainvoke`) rather
+    than leaving it to run unread in an abandoned worker thread.
+
+    Everything else passes through as-is."""
+    async for event in events:
         if event.get("type") == "final":
             payload = _to_response(session_id, event).model_dump()
             payload["type"] = "final"
+        elif event.get("type") == "ask_user":
+            payload = {**event, "session_id": session_id}
         else:
             payload = event
         yield json.dumps(payload) + "\n"
@@ -151,7 +213,9 @@ def _ndjson(session_id: str, events) -> Iterator[str]:
 async def start_session_streaming(body: MessageRequest, request: Request) -> StreamingResponse:
     """Starts a new conversation, streaming progress as it happens."""
     session_id = uuid.uuid4().hex
-    events = request.app.state.service.stream_session(session_id, body.message)
+    events = request.app.state.service.stream_session(
+        session_id, body.message, attachment=body.attachment, attachment_name=body.attachment_name
+    )
     return StreamingResponse(
         _ndjson(session_id, events),
         media_type="application/x-ndjson",
@@ -171,7 +235,9 @@ async def continue_session_streaming(
     session_id: str, body: MessageRequest, request: Request
 ) -> StreamingResponse:
     """Sends another message on an existing conversation, streamed."""
-    events = request.app.state.service.stream_session(session_id, body.message)
+    events = request.app.state.service.stream_session(
+        session_id, body.message, attachment=body.attachment, attachment_name=body.attachment_name
+    )
     return StreamingResponse(
         _ndjson(session_id, events),
         media_type="application/x-ndjson",

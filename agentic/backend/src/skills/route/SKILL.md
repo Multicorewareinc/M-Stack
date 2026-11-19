@@ -12,6 +12,15 @@ Istio ingress gateway — and deliberately stops there. **This is the
 capability that routes one service through it.**
 
 ```python
+class HTTPRouteOptions(BaseModel):        # type="httproute" (Gateway API)
+    gateway_class_name: str = "istio"     # the GatewayClass the parent Gateway asks for; "istio" is what istiod registers
+    path_match_type: str = "PathPrefix"   # "PathPrefix" or "Exact" only
+    listener_port: int = 80               # listener port on the parent Gateway
+
+class VirtualServiceOptions(BaseModel):   # type="virtualservice" (Istio)
+    gateway_selector: Dict[str, str] = {"istio": "ingressgateway"}   # Istio's Gateway is selected by label; must not be empty
+    listener_port: int = 80
+
 class Route(CapabilitySpec):
     type: str = "httproute"           # or "virtualservice" -- see rules
     kubeconfig_path: str              # required -- the EXISTING cluster

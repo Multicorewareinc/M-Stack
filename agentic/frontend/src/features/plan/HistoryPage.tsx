@@ -1,7 +1,7 @@
-import { Badge, Button, EmptyState, PageHeader } from '@multistack/ui';
-import { FileCode2, Trash2 } from 'lucide-react';
+import { Badge, EmptyState, PageHeader } from '@multistack/ui';
+import { FileCode2 } from 'lucide-react';
 import * as React from 'react';
-import { deleteSession, listSessions, type StoredSession } from '../../lib/storage';
+import { listSessions, type StoredSession } from '../../lib/storage';
 
 function relativeTime(ts: number): string {
   const minutes = Math.round((Date.now() - ts) / 60_000);
@@ -15,13 +15,7 @@ function relativeTime(ts: number): string {
 export function HistoryPage({ onOpen }: { onOpen: (sessionId: string) => void }) {
   // Read fresh every time this page mounts (App only mounts it while
   // active -- see App.tsx), so a plan saved a moment ago always shows up.
-  const [sessions, setSessions] = React.useState<StoredSession[]>(() => listSessions());
-
-  function remove(sessionId: string, event: React.MouseEvent) {
-    event.stopPropagation();
-    deleteSession(sessionId);
-    setSessions(listSessions());
-  }
+  const [sessions] = React.useState<StoredSession[]>(() => listSessions());
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-6">
@@ -70,14 +64,6 @@ export function HistoryPage({ onOpen }: { onOpen: (sessionId: string) => void })
               ) : (
                 <Badge variant="warning">needs input</Badge>
               )}
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={(e) => remove(s.sessionId, e)}
-                aria-label={`Delete "${s.title}"`}
-              >
-                <Trash2 className="h-4 w-4" aria-hidden="true" />
-              </Button>
             </button>
           ))}
         </div>

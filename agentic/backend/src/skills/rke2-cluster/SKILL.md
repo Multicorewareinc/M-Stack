@@ -1,6 +1,7 @@
 ---
 name: rke2-cluster
 description: Use this skill when the user's request mentions a cluster, nodes, RKE2, CNI, kube-proxy, or provisioning compute. Covers the real MultiStack SDK RKE2Cluster/RKE2Node/RKE2Backend classes.
+options: role | server, agent
 ---
 
 # MultiStack SDK — RKE2Cluster / RKE2Node / RKE2Backend
@@ -8,9 +9,9 @@ description: Use this skill when the user's request mentions a cluster, nodes, R
 Real class signatures (from `multistack.core.rke2` and
 `multistack.backends.rke2_client`, re-exported at the top level as
 `from multistack import RKE2Cluster, RKE2Node`). This is the *only*
-resource this skill covers — the SDK has since grown other resources
-(Storage, MinIO, vLLM) that this agent doesn't have tools for yet; don't
-assume this skill's rules apply to them. There is no GPU-type or region
+resource this skill covers — the other resources (storage, object storage,
+model serving and the rest) have their own skills and tools; don't assume
+this skill's rules apply to them. There is no GPU-type or region
 field on a cluster itself, unlike what earlier planning documents
 assumed. A cluster is a flat list of nodes, each provisioned over SSH
 (or locally, for 127.0.0.1/localhost/::1).

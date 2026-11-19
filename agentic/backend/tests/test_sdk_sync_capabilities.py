@@ -23,6 +23,7 @@ import typing
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
 from multistack import (
     Billing,
@@ -32,17 +33,18 @@ from multistack import (
     Database,
     Gateway,
     Inference,
-    MinIOTenant,
     Observability,
     Policy,
     Portal,
-    Queue,
     RKE2Cluster,
+    SeaweedFSCluster,
     Storage,
     Tokenizer,
     Cache,
+    Vault,
 )
 from multistack.accelerator import Accelerator
+from multistack.queue.spec import Queue
 from multistack.ingress_gateway import IngressGateway
 
 from mcp_tools import accelerator as mcp_accelerator
@@ -55,15 +57,16 @@ from mcp_tools import full_stack as mcp_full_stack
 from mcp_tools import gateway as mcp_gateway
 from mcp_tools import inference as mcp_inference
 from mcp_tools import ingress_gateway as mcp_ingress_gateway
-from mcp_tools import minio as mcp_minio
 from mcp_tools import observability as mcp_observability
 from mcp_tools import policy as mcp_policy
 from mcp_tools import portal as mcp_portal
 from mcp_tools import queue as mcp_queue
 from mcp_tools import rke2 as mcp_rke2
+from mcp_tools import seaweedfs as mcp_seaweedfs
 from mcp_tools import storage as mcp_storage
 from mcp_tools import tokenizer as mcp_tokenizer
 from mcp_tools import valkey as mcp_valkey
+from mcp_tools import vault as mcp_vault
 from orchestration.tools import ALL_TOOLS
 
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "src" / "skills"
@@ -78,8 +81,8 @@ CAPABILITIES = [
      {"name": "c", "nodes": NODES}),
     ("storage", mcp_storage.build_storage_plan, "storage", Storage, "storage",
      {"type": "longhorn", "kubeconfig_path": KC}),
-    ("minio", mcp_minio.build_minio_plan, "tenant", MinIOTenant, "minio",
-     {"kubeconfig_path": KC, "name": "t", "servers": 2, "volumes_per_server": 2}),
+    ("seaweedfs", mcp_seaweedfs.build_seaweedfs_plan, "cluster", SeaweedFSCluster, "seaweedfs",
+     {"kubeconfig_path": KC, "name": "s"}),
     ("inference", mcp_inference.build_inference_plan, "inference", Inference, "inference",
      {"kubeconfig_path": KC}),
     ("gateway", mcp_gateway.build_gateway_plan, "gateway", Gateway, "gateway",
@@ -111,6 +114,8 @@ CAPABILITIES = [
     ("accelerator", mcp_accelerator.build_accelerator_plan, "accelerator", Accelerator, "accelerator",
      {"kubeconfig_path": KC}),
     ("queue", mcp_queue.build_queue_plan, "queue", Queue, "queue",
+     {"kubeconfig_path": KC, "storage_class": "longhorn"}),
+    ("vault", mcp_vault.build_vault_plan, "vault", Vault, "vault",
      {"kubeconfig_path": KC, "storage_class": "longhorn"}),
 ]
 
@@ -155,6 +160,38 @@ def test_every_spec_field_is_documented_in_skill_md(cap):
     text = _skill_text(skill)
     undocumented = [f for f in spec.model_fields if f not in text]
     assert not undocumented, f"{spec.__name__} fields missing from {skill}/SKILL.md: {undocumented}"
+
+
+def _nested_models(annotation, seen: set) -> list:
+    """Every Pydantic model reachable from a field's annotation, through
+    Optional/List/Dict/Union, each once."""
+    found = []
+    for arg in typing.get_args(annotation):
+        found += _nested_models(arg, seen)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel) and annotation not in seen:
+        seen.add(annotation)
+        found.append(annotation)
+        for field in annotation.model_fields.values():
+            found += _nested_models(field.annotation, seen)
+    return found
+
+
+@pytest.mark.parametrize("cap", CAPABILITIES, ids=IDS)
+def test_every_nested_options_field_is_documented_in_skill_md(cap):
+    """The spec-level check above stops at the spec's own fields, so the
+    fields inside its options classes drifted unnoticed: the SDK added
+    `image_repository` to seven options models and six SKILL.md files
+    never mentioned it. The tool schema still offers such a field, but
+    the model has no description of when to set it. If this fails,
+    document the field in the options class block of SKILL.md."""
+    _name, _func, _argname, spec, skill, _minimal = cap
+    text = _skill_text(skill)
+    seen = {spec}
+    models = [m for f in spec.model_fields.values() for m in _nested_models(f.annotation, seen)]
+    for options in getattr(spec, "OPTIONS_FOR_TYPE", {}).values():
+        models += _nested_models(options, seen)
+    undocumented = [f"{m.__name__}.{f}" for m in models for f in m.model_fields if f not in text]
+    assert not undocumented, f"fields missing from {skill}/SKILL.md: {undocumented}"
 
 
 @pytest.mark.parametrize("cap", CAPABILITIES, ids=IDS)

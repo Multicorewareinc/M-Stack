@@ -27,6 +27,14 @@ class NatsQueueOptions(BaseModel):
     file_store_max_size: str = "15Gi"
     memory_store_max_size: str = "2Gi"
     image_tag: str = "2.14.6-alpine"
+    nack: NackOptions = NackOptions()       # the controller that actually creates the streams/consumers
+    extra_values: Dict[str, Any] = {}
+
+class NackOptions(BaseModel):
+    enabled: bool = True                    # on by default -- a backbone with no streams isn't one
+    release_name: str = "nack"
+    chart: str = "nack"
+    chart_version: Optional[str] = None
     extra_values: Dict[str, Any] = {}
 ```
 
@@ -58,3 +66,8 @@ queue, the gateway, the Enricher and the Tokenizer.
   below 3 on your own: JetStream loses its quorum.
 - `namespace` defaults to `platform`, where every consumer's default
   `event_backbone_url` already points. Only change it when the user asks.
+- `options.nack` deploys NACK, the controller that actually creates the
+  `gateway.events`/`gateway.events.enriched` streams and their consumers
+  -- the NATS servers alone come up healthy and empty. Leave `nack.enabled`
+  at its default `True`; only set it `False` when the user says those
+  JetStream resources already exist, owned by something else.

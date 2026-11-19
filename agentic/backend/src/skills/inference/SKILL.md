@@ -1,6 +1,6 @@
 ---
 name: inference
-description: Use this skill when the user's request mentions serving a model, vLLM, an inference deployment, GPU/CPU model serving, or what a model gateway should proxy to. Covers the real MultiStack SDK Inference/VLLMOptions/InferenceBackend classes.
+description: Use this skill when the user's request mentions serving a model, vLLM, llama.cpp, llamacpp, GGUF, KServe, an InferenceService, scale-to-zero, canary traffic splitting, an inference deployment, GPU/CPU model serving, or what a model gateway should proxy to. Covers the real MultiStack SDK Inference/VLLMOptions/LlamaCppOptions/KServeOptions/InferenceBackend classes.
 ---
 
 # MultiStack SDK — Inference / VLLMOptions / InferenceBackend
@@ -20,20 +20,76 @@ a model actually receives, not retyped by hand.
 
 ```python
 class VLLMOptions(BaseModel):
-    s3_mirror_image: str = "quay.io/minio/mc:RELEASE.2025-07-16T15-35-03Z"
+    s3_mirror_image: str = "amazon/aws-cli:2.37.4@sha256:fdd8d1fcbea9c371678dee5a40df8b178c7a781b4586605756ee28114c97ead6"
     ready_timeout: int = 1800    # generous -- a cold CPU deploy pulls ~2GB and compiles the model, minutes not seconds
     warmup_timeout: int = 600
 
-# `type` selects the options class. LlamaCppOptions is the second
-# implementation; its fields are not documented here yet, so prefer
-# type="vllm" unless the user explicitly asks for llama.cpp.
-class LlamaCppOptions(BaseModel): ...
+# `type` selects the options class. type="llamacpp" runs quantised GGUF
+# weights, so a 7B model fits a consumer card, and it can use a GPU below
+# compute capability 7.0, which no vLLM build supports. Use it when the
+# user asks for llama.cpp or for GPU serving on such a card; otherwise
+# type="vllm".
+class LlamaCppOptions(BaseModel):
+    image: str = "ghcr.io/ggml-org/llama.cpp@sha256:..."   # pinned by digest; leave the default
+    n_gpu_layers: int = 99              # layers offloaded to the GPU; 99 = all of them, 0 = CPU only
+    cache_type_k: Optional[str] = "q8_0"   # quantised K cache so a long context fits; None = llama.cpp's f16
+    ubatch_size: int = 256              # -ub; lowered so a 64k-context KV cache fits an 11GB card
+    batch_size: int = 512               # -b
+    model_cache_path: str = "/var/lib/llamacpp-models"   # hostPath on the node where downloaded GGUF files are kept across restarts and rebuilds
+    runtime_class_name: Optional[str] = "nvidia"   # the RuntimeClass the container needs to see the card; None = the cluster's default runtime
+    service_type: str = "NodePort"      # "ClusterIP", "NodePort" or "LoadBalancer"
+    node_port: Optional[int] = None     # pin it so the published address survives a rebuild; not allowed with ClusterIP
+    ready_timeout: int = 1800
+
+class KServePlatform(BaseModel):
+    """KServe itself, installed by this driver when missing -- unlike the
+    vllm/llamacpp drivers, which never install anything beyond the model
+    server they render."""
+    install: bool = True              # False refuses on a missing platform instead of installing it
+    namespace: str = "kserve"
+    chart_version: Optional[str] = "v0.20.0"
+    crd_chart: str = "oci://ghcr.io/kserve/charts/kserve-crd"
+    controller_chart: str = "oci://ghcr.io/kserve/charts/kserve-resources"
+    install_runtime_configs: bool = True   # the built-in ClusterServingRuntimes -- off only if the cluster already has its own
+    runtime_configs_chart: str = "oci://ghcr.io/kserve/charts/kserve-runtime-configs"
+    cert_manager: bool = True         # KServe's webhooks need TLS cert-manager issues -- off only if the cluster already runs one
+    cert_manager_namespace: str = "cert-manager"
+    cert_manager_chart_version: Optional[str] = None
+    knative_operator_namespace: str = "knative-operator"
+    knative_serving_namespace: str = "knative-serving"
+    knative_chart_version: Optional[str] = None
+    knative_ingress: str = "kourier"  # or "istio" -- only matters for deployment_mode="Serverless"
+    knative_ingress_service_type: Optional[str] = None   # "LoadBalancer"/"NodePort"/"ClusterIP"; None leaves Knative's own default
+    install_timeout: int = 900        # generous -- three or four chart installs, each pulling images
+
+class KServeOptions(BaseModel):
+    """Deployment mechanics for type="kserve": KServe owns the workload
+    (it takes an InferenceService and produces the Deployment/Service/
+    autoscaler itself) instead of this SDK rendering one directly, which
+    is what buys scale-to-zero, canary traffic splitting and S3/HF
+    fetching with no mirror init container. Trade-off: KServe must exist
+    on the cluster first -- platform.install=True (the default) makes
+    this driver install it rather than requiring someone did already."""
+    deployment_mode: str = "RawDeployment"   # or "Serverless"/"Knative" (needs Knative Serving too -- see platform)
+    model_format: str = "huggingface"  # selects the ClusterServingRuntime KServe matches against
+    runtime: Optional[str] = None      # pins a specific ClusterServingRuntime by name, bypassing model_format
+    min_replicas: Optional[int] = None  # 0 = scale-to-zero, needs Serverless (or RawDeployment+KEDA on newer KServe)
+    max_replicas: Optional[int] = None
+    canary_traffic_percent: Optional[int] = None   # traffic the new revision takes; None deploys replacing outright
+    openai_path_prefix: str = "/openai"   # where the huggingface runtime mounts the OpenAI routes -- NOT "/v1" like plain vLLM
+    predictor_service_port: int = 80   # KServe's own fixed port for its generated Service -- not Inference.port
+    metrics_port_name: Optional[str] = None   # ServiceMonitor port-name match; None derives it from KServe's own naming
+    predictor_container_port: int = 8080   # what the predictor container actually listens on -- not Inference.port
+    service_account_name: Optional[str] = None   # attached to the predictor pod so KServe's storage-initializer can read a private bucket
+    platform: KServePlatform = KServePlatform()
+    ready_timeout: int = 1800
+    warmup_timeout: int = 600
 
 class Inference(BaseModel):
-    type: str = "vllm"                # or "llamacpp"
+    type: str = "vllm"                # or "llamacpp" or "kserve"
     kubeconfig_path: str              # required -- the EXISTING cluster this installs onto
     namespace: Optional[str] = None
-    options: Optional[VLLMOptions] = None   # auto-filled from `type` if left unset
+    options: Optional[Union[VLLMOptions, LlamaCppOptions, KServeOptions]] = None   # auto-filled from `type` if left unset
 
     model: str = "Qwen/Qwen2.5-0.5B-Instruct"   # the only model this deployment is sized/tested for by default -- override freely, it's a normal field
     name: str = "vllm"
@@ -44,6 +100,7 @@ class Inference(BaseModel):
     dtype: Optional[str] = None       # None = pick from the node's CPU flags; "auto"/"float32"/"float16"/"bfloat16"
     max_model_len: int = 4096
     gpu_count: int = 0                # only meaningful with device="gpu" -- never set on a cpu device
+    gpu_resource: str = "nvidia.com/gpu"   # the extended resource a GPU is requested as -- AMD's ROCm plugin advertises "amd.com/gpu" instead; never invent a value other than what the cluster's device plugin actually advertises
 
     cpu_cores: int = 6
     memory_gb: int = 12               # must exceed kv_cache_gb + shm_gb -- both live inside this limit
@@ -93,9 +150,14 @@ class InferenceBackend:
 Rules when generating code:
 - `kubeconfig_path` is required and has no ambient fallback — the SDK deliberately never reads `$KUBECONFIG`/`~/.kube/config`, so a stale default can't silently target the wrong cluster.
 - `build_inference_plan` is for adding a model server to a cluster that **already exists**. If the cluster is also being created in this same request, use `build_full_stack_plan` instead.
-- Inference depends on a cluster (`REQUIRES = ("cluster",)`) only — it does NOT require Storage/MinIO to exist, unless the user specifically wants weights served from an `s3://` object-store path.
+- Inference depends on a cluster (`REQUIRES = ("cluster",)`) only — it does NOT require Storage/SeaweedFS to exist, unless the user specifically wants weights served from an `s3://` object-store path.
 - `model` defaults to a small CPU-sized model (`Qwen/Qwen2.5-0.5B-Instruct`) if the user doesn't specify one — that default is only right for casual/testing use; if the user describes any real capability or size need, ask which model rather than silently using the default.
 - Never set `gpu_count` unless `device="gpu"`, and never invent a `gpu_count` the user didn't give — ask if they want GPU serving but haven't said how many.
+- `gpu_resource` only matters on `device="gpu"`, and only needs changing from its NVIDIA default when the user says the cluster uses AMD (ROCm advertises `amd.com/gpu`) or otherwise names a non-NVIDIA resource — never guess a vendor the user hasn't stated.
+- **`type="kserve"` is for scale-to-zero, canary traffic splitting, or S3/HF weight fetching with no mirror container** — ask for it only when the user wants one of those, not as a default over vllm/llamacpp. Unlike those two, this driver does not render its own Deployment: it hands KServe an `InferenceService` and KServe produces everything else. `KServePlatform.install` defaults to `True`, so this driver installs KServe itself (cert-manager, CRDs, the controller) if it isn't already on the cluster — never tell the user KServe must be pre-installed unless they've explicitly set `install=False`.
+- `deployment_mode="RawDeployment"` (the default) needs nothing but KServe itself. `"Serverless"` additionally needs Knative Serving — on a cluster without it, the InferenceService is silently accepted and never becomes ready, with no error on the object itself. **`min_replicas=0` (scale-to-zero) alone is not a reason to switch**: RawDeployment supports it too on newer KServe (with KEDA), and whether a given cluster's KServe version does is exactly what this spec can't tell offline — leave `deployment_mode` at its default and let `check_prerequisites` warn if it can't confirm scale-to-zero support. Only switch to Serverless when the user names something RawDeployment can't do at all: canary traffic splitting.
+- `KServeOptions.predictor_service_port` and `.predictor_container_port` are KServe's own fixed ports for what it generates — **never** write `Inference.port` for a kserve deployment; nothing forwards it, and a NetworkPolicy written against it would open a port the pod never serves.
+- `KServeOptions.openai_path_prefix` defaults to `/openai`, not `/v1` like plain vLLM — a Gateway's `upstream_url` pointed at a kserve deployment needs the prefix included, or the chat endpoint is at the wrong path.
 - The three S3 fields (`model` as `s3://...`, `s3_endpoint_url`, `s3_secret_name`) travel together — set all three or none. `s3_secret_name` is a Secret **name**, never a real access key.
 - `nodes` is optional (unlike `build_storage_plan`'s, which is required) — pass it when the user has given real node details and wants prerequisite checking; it's fine to omit if they haven't.
 - Once deployed, this Inference's `endpoint` is what a Gateway's `upstream_url` should point at (see the `gateway` skill / `build_gateway_plan`) — deploying inference alone serves nothing to end users until a Gateway (or another client) actually calls it.

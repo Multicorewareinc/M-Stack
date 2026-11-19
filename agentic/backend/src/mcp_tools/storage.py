@@ -5,7 +5,7 @@ cluster -- it needs a real kubeconfig_path and a node list to check
 prerequisites against, unlike RKE2Cluster which creates the cluster
 those nodes belong to. This tool is for "add storage to a cluster I
 already have"; see mcp_tools/full_stack.py for composing this together
-with RKE2/MinIO via Stack, for a cluster that doesn't exist yet."""
+with RKE2/SeaweedFS via Stack, for a cluster that doesn't exist yet."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pydantic import validate_call
 from multistack import RKE2Node, Storage
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(storage: Storage, nodes: List[RKE2Node]) -> str:
@@ -28,7 +28,7 @@ def _render_script(storage: Storage, nodes: List[RKE2Node]) -> str:
     `options` (a nested model -- LonghornOptions today) is rendered as
     its own constructor call rather than a raw dict, so the generated
     script actually constructs it rather than just showing its values."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(storage).items() if k != "options"]
+    field_lines = dumped_lines(storage, dump(storage), skip=("options",))
     if storage.options is not None:
         opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(storage.options).items())
         field_lines.append(f"    options={type(storage.options).__name__}({opt_args}),")
