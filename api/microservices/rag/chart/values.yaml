@@ -1,0 +1,172 @@
+# rag
+#
+# Two workloads: the search service (a stateless Deployment) and its own
+# vector database, Qdrant (a single-replica StatefulSet with a volume).
+# Qdrant belongs to this release and nothing else: a NetworkPolicy admits
+# only the search pods, so no other component can come to depend on it.
+#
+# The index is written by the indexer, not by the service. After the
+# first install, and whenever the SDK or service source changes, run it
+# from a checkout (see the README).
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/multicorewareinc/m-stack/rag
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-creds
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Must match the port the image's uvicorn command binds (8000).
+containerPort: 8000
+
+# --- configuration -> ConfigMap -> envFrom -------------------------------
+# Nothing here is a credential.
+config:
+  logLevel: INFO
+
+  embedding:
+    # http://<embedding-server>/v1/embeddings. Required: without it every
+    # search fails.
+    url: ""
+    model: qwen3-embedding-0.6b
+    dimension: 1024
+    batchSize: 32
+    # How the model wants each side wrapped; these are Qwen3-Embedding's.
+    queryTemplate: "Instruct: {instruction}\nQuery:{query}"
+    documentTemplate: "{text}"
+    maxInputTokens: 4096
+
+  # The longest chunk, and what consecutive parts of a longer unit share.
+  chunking:
+    maxTokens: 512
+    overlapTokens: 64
+
+  search:
+    topK: 8
+    # The whole reference block: instructions, examples and passages.
+    budgetTokens: 6000
+    minScore: 0.64
+    minQueryTerms: 2
+    stubPenalty: 0.5
+    capabilityBoost: 1.0
+    # Of topK, how many are held for the named capabilities' own skill
+    # notes, so matching code can't crowd out the rule an answer needs.
+    skillSlots: 2
+    # A cross-encoder behind vLLM's /v1/rerank. Empty url: no reranking.
+    # Any failure falls back to the merged order.
+    rerank:
+      url: ""
+      model: ""
+      candidates: 10
+      # Also reranked: the top this many of each ranking on its own.
+      perRanking: 20
+      timeoutSeconds: 5
+      # Below this score a passage isn't sent; the best `keep` always are.
+      minScore: 0.05
+      keep: 3
+      queryTemplate: "{query}"
+      documentTemplate: "{document}"
+    # Each clause of a question also searched on its own; its best
+    # `candidates` are reranked against it too, and its best `slots` reach
+    # the chat-model ranking.
+    clauses:
+      enabled: true
+      candidates: 5
+      max: 6
+      slots: 1
+    # A chat model (OpenAI-compatible /v1/chat/completions) as the last
+    # ranking step. Empty url: the reranker's order is final. Any failure
+    # keeps that order.
+    llmRerank:
+      url: ""
+      model: ""
+      candidates: 15
+      timeoutSeconds: 15
+      subject: "the Multistack platform"
+      # Send only what it called useful, at least minPassages of them.
+      onlyUseful: false
+      minPassages: 3
+    # An identical search within this many seconds gets the same result.
+    cacheSeconds: 600
+    cacheSize: 256
+
+  collection: multistack_reference
+
+# --- credentials -> Secret -> envFrom -------------------------------------
+# SERVICE_API_KEY (what callers send) and QDRANT_API_KEY (what this service
+# and Qdrant share). Use an existing Secret with those two keys, or let the
+# chart create one -- the latter for local work only, since the values end
+# up in your shell history and the release's stored values.
+secret:
+  existingSecret: ""
+  create: false
+  serviceApiKey: ""
+  qdrantApiKey: ""
+
+qdrant:
+  image:
+    repository: qdrant/qdrant
+    tag: v1.19.1
+    pullPolicy: IfNotPresent
+  persistence:
+    size: 2Gi
+    # Empty uses the cluster's default StorageClass.
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 384Mi
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  # /ready fails until Qdrant answers and an index exists, so a fresh
+  # install stays unready until the indexer has run once.
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    failureThreshold: 3
+
+metrics:
+  scrapeAnnotations: true
+
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Keeps pods off the control plane, which nothing else enforces.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}

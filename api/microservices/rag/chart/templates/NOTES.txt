@@ -1,0 +1,17 @@
+{{ include "rag.fullname" . }} is deployed, with its own vector database at
+{{ include "rag.qdrantName" . }}:6333 (reachable only from the search pods).
+
+The service stays unready until an index exists. Build it from a checkout of
+the repository, with the database port-forwarded:
+
+  kubectl port-forward -n {{ .Release.Namespace }} statefulset/{{ include "rag.qdrantName" . }} 6333:6333
+  cd api/microservices/rag/src
+  QDRANT_URL=http://localhost:6333 QDRANT_API_KEY=<key> \
+  EMBEDDING_URL={{ .Values.config.embedding.url }} EMBEDDING_MODEL={{ .Values.config.embedding.model }} \
+    python indexer.py --repo-root ../../../..
+
+Callers search with:
+
+  POST http://{{ include "rag.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1/search
+  Authorization: Bearer <SERVICE_API_KEY>
+  {"query": "...", "capabilities": ["..."]}
