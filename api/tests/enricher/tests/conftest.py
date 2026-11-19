@@ -1,13 +1,9 @@
-"""Test helpers for the enricher: a fake JetStream publisher that captures republishes and
-honors Nats-Msg-Id dedup, a MockTransport tokenizer client with an invocation counter, and
-the start()/reconnect fakes (mirroring rate-limiter-tpm) — so tests never touch live NATS or
-a real tokenizer service."""
+"""Test helpers for the enricher: a fake multistack.queue Queue that captures republishes and
+honors the message_id dedup a real backbone applies, a MockTransport tokenizer client with an
+invocation counter, and the start()/retry fakes — so tests never touch a live backbone, the
+real SDK driver, or a real tokenizer service (ADR-033)."""
 
 from __future__ import annotations
-
-import json
-import sys
-import types
 
 import httpx
 import pytest
@@ -18,26 +14,6 @@ from main import create_app
 from settings import Settings
 
 
-class FakeMsg:
-    """A delivered JetStream message. `num_delivered` drives the terminal-exhaustion path
-    (extends rate-limiter-tpm's FakeMsg, which had no metadata)."""
-
-    def __init__(self, event: dict, *, num_delivered: int = 1) -> None:
-        self.data = json.dumps(event).encode()
-        self.acked = False
-        self.metadata = types.SimpleNamespace(num_delivered=num_delivered)
-
-    async def ack(self) -> None:
-        self.acked = True
-
-
-def raw_msg(data: bytes, *, num_delivered: int = 1) -> FakeMsg:
-    """A message whose body is arbitrary bytes (for the un-parseable path)."""
-    msg = FakeMsg({}, num_delivered=num_delivered)
-    msg.data = data
-    return msg
-
-
 class FakeSub:
     def __init__(self) -> None:
         self.unsubscribed = False
@@ -46,76 +22,67 @@ class FakeSub:
         self.unsubscribed = True
 
 
-class FakeJS:
-    """Captures publishes and simulates JetStream's Nats-Msg-Id dedup within a window."""
+class FakeQueue:
+    """A fake multistack.queue.Queue: captures publish() calls and simulates the message_id
+    dedup a real backbone applies within its window; records subscribe calls/bindings.
+
+    Note the enricher uses ONE Queue for both roles, which this mirrors."""
+
+    name = "nats"
 
     def __init__(self, *, publish_error: Exception | None = None, subscribe_error: Exception | None = None) -> None:
         self._publish_error = publish_error
         self._subscribe_error = subscribe_error
-        self.published: list[tuple[str, dict, dict]] = []  # (subject, event, headers)
+        self.published: list[tuple[str, dict, str | None]] = []  # (subject, event, message_id)
         self._seen_msg_ids: set[str] = set()
         self.subscribe_calls = 0
+        self.bindings: list = []
+        self.closed = False
+        self.connected = True
 
-    async def add_stream(self, **kwargs):
+    async def connect(self) -> None:
         return None
 
-    async def publish(self, subject: str, data: bytes, headers: dict | None = None):
+    async def publish(self, destination: str, message: dict, *, options=None):
         if self._publish_error is not None:
-            raise self._publish_error
-        headers = headers or {}
-        msg_id = headers.get("Nats-Msg-Id")
+            raise self._publish_error  # propagates -> enricher re-raises -> no ack (redelivery)
+        msg_id = options.message_id if options is not None else None
         if msg_id is not None and msg_id in self._seen_msg_ids:
             return None  # dedup: duplicate within the window is dropped
         if msg_id is not None:
             self._seen_msg_ids.add(msg_id)
-        self.published.append((subject, json.loads(data), headers))
+        self.published.append((destination, message, msg_id))
         return None
 
-    async def subscribe(self, *args, **kwargs):
+    async def subscribe(self, binding, handler):
         self.subscribe_calls += 1
+        self.bindings.append(binding)
         if self._subscribe_error is not None:
             raise self._subscribe_error
         return FakeSub()
 
-
-class FakeNC:
-    def __init__(self, *, connected: bool = True, js: FakeJS | None = None) -> None:
-        self.is_connected = connected
-        self._js = js or FakeJS()
-
-    def jetstream(self) -> FakeJS:
-        return self._js
-
-    async def drain(self) -> None:
-        pass
+    async def close(self) -> None:
+        self.closed = True
 
 
-def _install_fake_nats(monkeypatch, *, nc=None, connect_error=None) -> dict:
-    mod = types.ModuleType("nats")
-    captured: dict = {}
+def _install_fake_queue(monkeypatch, *, queue=None, connect_error=None) -> None:
+    """Patch multistack.queue.Queue so start()/_retry_connect resolve to our fake Queue (or
+    raise) — no live backbone needed. The consumer imports it lazily inside those methods."""
+    import multistack.queue as mq
 
-    async def connect(url, **kwargs):
-        captured.update(kwargs)
-        if connect_error is not None:
-            raise connect_error
-        return nc
+    class _FakeQueueFactory:
+        def __init__(self, config):
+            self._q = queue
 
-    mod.connect = connect
-    js_api = types.ModuleType("nats.js.api")
+        async def connect(self):
+            if connect_error is not None:
+                raise connect_error
+            return None
 
-    class DeliverPolicy:
-        NEW = "new"
+        def __getattr__(self, item):
+            return getattr(self._q, item)
 
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
-            pass
-
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
-    return captured
+    monkeypatch.setattr(mq, "Queue", _FakeQueueFactory)
 
 
 def make_tokenizer_client(*, tokens: int = 0, status_code: int = 200, raises: bool = False):
@@ -149,16 +116,16 @@ def make_consumer(
     tokenizer_tokens: int = 0,
     tokenizer_raises: bool = False,
     publish_error: Exception | None = None,
-    js: FakeJS | None = None,
+    queue: FakeQueue | None = None,
     **settings_kwargs,
 ):
-    """Build an EnricherConsumer wired to a capturing FakeJS publisher and a MockTransport
-    tokenizer client. Returns (consumer, fake_js, tokenizer_calls)."""
+    """Build an EnricherConsumer wired to a capturing FakeQueue and a MockTransport
+    tokenizer client. Returns (consumer, fake_queue, tokenizer_calls)."""
     settings = Settings(**settings_kwargs)
     client, calls = make_tokenizer_client(tokens=tokenizer_tokens, raises=tokenizer_raises)
-    fake_js = js or FakeJS(publish_error=publish_error)
-    consumer = EnricherConsumer(settings, http_client=client, js=fake_js)
-    return consumer, fake_js, calls
+    fake_queue = queue or FakeQueue(publish_error=publish_error)
+    consumer = EnricherConsumer(settings, http_client=client, queue=fake_queue)
+    return consumer, fake_queue, calls
 
 
 def make_client(*, consumer=None, **settings_kwargs) -> TestClient:

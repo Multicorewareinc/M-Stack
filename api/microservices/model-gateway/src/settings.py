@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     # gateway compromise must not also yield tenant-wide read/write access on Org CP's /v1 surface
     # (council review, least-privilege fix). Must be provisioned as Org CP's `mg_service_api_key`.
     org_verify_api_key: str = "change-me"
-    apikey_cache_ttl_seconds: int = 300  # verify-cache TTL ceiling (capped at the key's remaining life)
+    apikey_cache_ttl_seconds: int = (
+        300  # verify-cache TTL ceiling (capped at the key's remaining life)
+    )
 
     log_level: str = "INFO"
 
@@ -41,13 +43,16 @@ class Settings(BaseSettings):
     policy_timeout_ms: int = 50
     policy_fail_mode: str = "closed"  # "closed" (block on policy error) | "open" (allow)
 
-    # Event backbone (ADR-007/008/009). Empty EVENT_BACKBONE_URL => inert:
-    # no publisher built, request/response path byte-identical to no feature.
-    event_backbone_url: str = ""            # e.g. "nats://nats:4222"
+    # Event backbone (ADR-007/008/009), reached through the multistack.queue SDK seam
+    # (ADR-033). Empty EVENT_BACKBONE_URL => inert: no publisher built, request/response
+    # path byte-identical to no feature. QUEUE_BACKEND selects which backend the seam maps
+    # to (AD-04); the service code is identical across backends.
+    queue_backend: str = "nats"  # env QUEUE_BACKEND; SDK maps this to a driver
+    event_backbone_url: str = ""  # e.g. "nats://nats:4222" (the seam's connection url)
     event_stream_name: str = "GATEWAY_EVENTS"
     event_stream_subject: str = "gateway.events"
-    event_capture_bodies: bool = False       # off => events carry no prompt/response text
-    event_max_inflight: int = 1000           # bounded background publishes; drop over cap
+    event_capture_bodies: bool = False  # off => events carry no prompt/response text
+    event_max_inflight: int = 1000  # bounded background publishes; drop over cap
 
     def routes(self) -> dict[str, str]:
         return json.loads(self.model_routes)

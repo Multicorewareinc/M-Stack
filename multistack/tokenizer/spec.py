@@ -18,13 +18,14 @@ or `Enricher.FROM_STACK`.
 SentencePiece-based service for models tiktoken does not cover -- would be
 another `type` behind this same spec.
 """
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("tiktoken",)
+SUPPORTED_TYPES: tuple[str, ...] = ("tiktoken",)
 
 DEFAULT_PORT = 8000
 
@@ -36,8 +37,13 @@ class TiktokenOptions(BaseModel):
 
     release_name: str = "tokenizer"
     chart: str = "api/microservices/tokenizer/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     # The encoding used when a request does not name one. cl100k_base
     # covers the GPT-3.5/4 family; a model outside it that falls through
@@ -64,24 +70,24 @@ class Tokenizer(CapabilitySpec):
     """A token-counting service on an existing Kubernetes cluster."""
 
     CAPABILITY: ClassVar[str] = "tokenizer"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = OPTIONS_FOR_TYPE
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {"tiktoken": "policy"}
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = OPTIONS_FOR_TYPE
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {"tiktoken": "policy"}
 
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster",)
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
     }
     # Consumed by the enricher service's TOKENIZER_URL (ADR-030), which
     # has no SDK capability of its own yet -- so there is no
     # Enricher.FROM_STACK to fill in automatically, and a caller wires
     # this by hand into whatever installs that chart.
-    PROVIDES: ClassVar[Dict[str, str]] = {"tokenizer_url": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"tokenizer_url": "endpoint"}
 
     type: str = "tiktoken"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[TokenizerOptions] = None
+    namespace: str | None = None
+    options: TokenizerOptions | None = None
 
     replicas: int = Field(default=2, ge=1)
     service_port: int = Field(default=DEFAULT_PORT, gt=0, le=65535)
@@ -91,8 +97,14 @@ class Tokenizer(CapabilitySpec):
     # anywhere else stays ImagePullBackOff with nothing in the release to
     # explain it. The chart's own affinity already keeps pods off the
     # control plane; this is how a caller says *which* worker.
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Dict[str, Any]]] = None
+    # The charts' own default keeps pods off the control plane, which is
+    # right for a multi-node cluster and impossible to satisfy on a
+    # single-node one, where the only node is the control plane. Absent
+    # leaves that default alone; an explicit {} means "schedule
+    # anywhere", which is how a one-node cluster says so deliberately.
+    affinity: dict[str, Any] | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[dict[str, Any]] | None = None
 
     @field_validator("kubeconfig_path")
     @classmethod

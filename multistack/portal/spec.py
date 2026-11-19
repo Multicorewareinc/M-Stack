@@ -14,13 +14,14 @@ fall through to the SPA, and a path missing from that list does not fail:
 it returns 200 with the index.html body, and the caller sees a JSON parse
 error somewhere else entirely.
 """
-from typing import ClassVar, Dict, List, Optional, Tuple
+
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("admin", "organization")
+SUPPORTED_TYPES: tuple[str, ...] = ("admin", "organization")
 
 DEFAULT_PORT = 80
 
@@ -28,7 +29,7 @@ DEFAULT_PORT = 80
 # most routes but hits /api/auth/refresh directly, and a refresh that
 # falls through to the SPA returns 200 with HTML -- a logged-out user with
 # no error anywhere.
-DEFAULT_API_PREFIXES: Tuple[str, ...] = ("/v1/", "/api/")
+DEFAULT_API_PREFIXES: tuple[str, ...] = ("/v1/", "/api/")
 
 # The cluster DNS Service IP. nginx resolves its own `resolver` at
 # startup and `nginx -t` rejects a name here, so this must be an address.
@@ -43,8 +44,8 @@ class PortalOptions(BaseModel):
     release_name: str
     image_repository: str
     chart: str = "ui/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
 
     @field_validator("release_name", "chart", "image_repository")
     @classmethod
@@ -63,12 +64,12 @@ class PortalOptions(BaseModel):
 # Keep these in step with the chart's own `image.repository`.
 class AdminPortalOptions(PortalOptions):
     release_name: str = "admin-portal"
-    image_repository: str = "ghcr.io/multicorewareinc/admin-portal"
+    image_repository: str = "ghcr.io/multicorewareinc/m-stack/admin-portal"
 
 
 class OrganizationPortalOptions(PortalOptions):
     release_name: str = "organization-portal"
-    image_repository: str = "ghcr.io/multicorewareinc/organization-portal"
+    image_repository: str = "ghcr.io/multicorewareinc/m-stack/organization-portal"
 
 
 OPTIONS_FOR_TYPE = {
@@ -81,26 +82,27 @@ class Portal(CapabilitySpec):
     """A single-page portal served by nginx on a Kubernetes cluster."""
 
     CAPABILITY: ClassVar[str] = "portal"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = OPTIONS_FOR_TYPE
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {
-        "admin": "frontend", "organization": "frontend",
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = OPTIONS_FOR_TYPE
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {
+        "admin": "frontend",
+        "organization": "frontend",
     }
 
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster",)
     # api_upstream is filled from a recorded ControlPlane when there is
     # one. It is optional rather than required because a portal can be
     # deployed ahead of its API -- see allow_no_api.
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
         "api_upstream": "controlplane_endpoint",
     }
-    PROVIDES: ClassVar[Dict[str, str]] = {"portal_endpoint": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"portal_endpoint": "endpoint"}
 
     type: str = "admin"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[PortalOptions] = None
+    namespace: str | None = None
+    options: PortalOptions | None = None
 
     # Where nginx proxies API requests. Empty is allowed only with
     # allow_no_api, because the silent failure is worse than the loud one:
@@ -108,9 +110,7 @@ class Portal(CapabilitySpec):
     # HTML with a 200.
     api_upstream: str = ""
     allow_no_api: bool = False
-    api_prefixes: List[str] = Field(
-        default_factory=lambda: list(DEFAULT_API_PREFIXES)
-    )
+    api_prefixes: list[str] = Field(default_factory=lambda: list(DEFAULT_API_PREFIXES))
 
     # Where nginx proxies /mg/* -- the organization portal's chat feature
     # calls the model gateway directly (a separate upstream from
@@ -131,7 +131,7 @@ class Portal(CapabilitySpec):
 
     # The image is built locally and sideloaded into one node's
     # containerd, so the pod has to land on that node or it cannot pull.
-    node_selector: Optional[Dict[str, str]] = None
+    node_selector: dict[str, str] | None = None
 
     @field_validator("kubeconfig_path")
     @classmethod
@@ -162,7 +162,7 @@ class Portal(CapabilitySpec):
 
     @field_validator("api_prefixes")
     @classmethod
-    def _prefixes_are_paths(cls, value: List[str]) -> List[str]:
+    def _prefixes_are_paths(cls, value: list[str]) -> list[str]:
         for prefix in value:
             if not prefix.startswith("/"):
                 raise ValueError(

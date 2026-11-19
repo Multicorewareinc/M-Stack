@@ -30,9 +30,12 @@ DEFAULT_PERMISSIONS: list[tuple[str, str]] = [
     ("roles", "delete"),
     ("organizations", "read"),
     ("organizations", "update"),
-    # API-key lifecycle mutation gate — org roles compose this to allow key create/rotate/revoke
-    # (ADR-027; enforced server-side in org-CP via the RBAC can() seam).
-    ("apikey", "manage"),
+    # API-key lifecycle mutation gates — org roles compose these to allow key create/rotate/revoke
+    # (ADR-027, split into granular actions per ADR-033; enforced server-side in org-CP via the
+    # RBAC can() seam). rotate reuses "update".
+    ("apikey", "create"),
+    ("apikey", "update"),
+    ("apikey", "delete"),
 ]
 
 
@@ -44,9 +47,7 @@ async def seed_plans(session: AsyncSession, enabled: bool = True) -> None:
     for name, (tpm, rpm, quota) in DEFAULT_PLANS.items():
         if name in existing:
             continue  # insert-missing only — never overwrite edited values
-        session.add(
-            Plan(name=name, tpm=tpm, rpm=rpm, quota_monthly_tokens=quota, is_default=True)
-        )
+        session.add(Plan(name=name, tpm=tpm, rpm=rpm, quota_monthly_tokens=quota, is_default=True))
         added = True
     if added:
         await session.commit()

@@ -26,7 +26,7 @@ internal_router = APIRouter(
 async def init(
     body: OrgInit,
     response: Response,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     admin_client: httpx.AsyncClient = Depends(get_admin_client),
 ) -> OrgOut:
     org, created = await service.init_org(session, body)
@@ -40,7 +40,7 @@ async def init(
 
 @internal_router.get("/{organization_id}", response_model=OrgOut)
 async def get_one(
-    organization_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    organization_id: uuid.UUID, session: AsyncSession = Depends(get_session, scope="function")
 ) -> OrgOut:
     return await service.get_org(session, organization_id)
 
@@ -53,7 +53,7 @@ router = APIRouter(
 @router.get("/summary", response_model=OrgSummary)
 async def get_summary(
     org_id: uuid.UUID = Depends(require_org_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     admin_client: httpx.AsyncClient = Depends(get_admin_client),
 ) -> OrgSummary:
     return await service.get_org_summary(session, admin_client, org_id)

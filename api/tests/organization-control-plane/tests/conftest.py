@@ -34,7 +34,8 @@ MG_KEY = "test-mg-verify-key"
 DEFAULT_PERMISSION_SLUGS = (
     "users.read", "users.create", "users.update", "users.delete",
     "roles.read", "roles.create", "roles.update", "roles.delete",
-    "organizations.read", "organizations.update", "apikey.manage",
+    "organizations.read", "organizations.update",
+    "apikey.create", "apikey.update", "apikey.delete",
 )
 
 
@@ -142,7 +143,7 @@ def make_client(*, engine=None, admin_client=None, billing_client=None, **settin
     kwargs = {
         "service_api_key": SERVICE_KEY,
         "mg_service_api_key": MG_KEY,
-        "database_url": "sqlite+aiosqlite://",
+        "database_url_org": "sqlite+aiosqlite://",
     }
     kwargs.update(settings_kwargs)
     app = create_app(
@@ -189,7 +190,7 @@ def make_auth_app(*, engine=None, admin_client=None, **settings_kwargs):
     kwargs = {
         "service_api_key": SERVICE_KEY,
         "mg_service_api_key": MG_KEY,
-        "database_url": "sqlite+aiosqlite://",
+        "database_url_org": "sqlite+aiosqlite://",
         "jwt_secret": JWT_SECRET,
     }
     kwargs.update(settings_kwargs)

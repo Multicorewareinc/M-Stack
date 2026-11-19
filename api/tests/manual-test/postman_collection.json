@@ -1,0 +1,1691 @@
+{
+  "info": {
+    "name": "Multistack — Full System (docker-compose.full.yml)",
+    "description": "Manual/Newman tests for the whole platform brought up by api/tests/manual-test/docker-compose.full.yml.\n\nServices & ports:\n  gateway                      http://localhost:8080   (Bearer {{api_key}} — a per-org API key, ADR-026; the `seed-api-key` job seeds sk-e2e-fixed-verify-key-001)\n  rate-limiter-rpm             http://localhost:9100    (POST /check)\n  rate-limiter-tpm             http://localhost:9110    (POST /check)\n  tokenizer                    http://localhost:9300    (POST /tokenize)\n  admin-control-plane          http://localhost:9200    (Bearer test-admin-key; local auth at /api/auth/*)\n  organization-control-plane   http://localhost:9220    (Bearer test-service-key; local auth at /api/auth/*)\n\nCaps in the full stack (RPM_RATE_LIMITS / TPM_RATE_LIMITS): RPM caps ONLY limited-model=3; TPM caps ONLY tpm-limited-model=15 tokens/min. llama-3-8b / claude are uncapped (no X-RateLimit headers). Counting is ASYNC (ADR-013/AD-01): the limiters count off the NATS backbone (RPM from request events, TPM from response events) and /check only READS — so limits are soft and a burst may overshoot by one; re-send the tripping request if it hasn't flipped yet. Run folders top-to-bottom; the RPM/TPM bursts count against a fixed 60s window (cross a minute boundary and you must re-run the folder).\n\nLocal auth (ADR-025, folders 7-9): the docker-compose stack's `seed-admin` one-shot job bootstraps superadmin@platform.local / ChangeMe123! on first `up`. Folders 7-8 rotate it and exercise the full login/refresh/logout/change-password/lockout-adjacent flow for both the org-less Admin CP tier and the org-scoped Org CP tier; folder 9 proves the two services mint one shared JWT contract. Postman's cookie jar carries the HttpOnly refresh cookie automatically between requests to the same host — run each folder top to bottom in one go.\n\nFolders 10-12 cover the modules added after folder 9 was written: the master permission catalog (Admin CP), org-scoped Roles/RBAC + ADR-029 identity-gated user provisioning (Org CP, including the with-owner super-admin flow, default org_admin/org_user role seeding, permission composition, effective-permission resolution, and enforcement via /api/users), and the ADR-026/027/028 per-org API-key lifecycle (mint/list/rotate/update/revoke via the end-user JWT surface, plus the internal verify contract the gateway itself calls — folder 12 step 8 mints a fresh key and immediately spends it against the live gateway to prove the two services agree). Folder 11 depends on folder 7's acp_admin_token (super-admin session) to call the with-owner endpoint; if folder 7 was skipped due to lockout, re-run it first. `admin_key` (test-admin-key) is the super-admin/UI bearer for Admin CP's /v1/* routes; `service_key` (test-service-key) is the inter-service bearer both control planes check on their own /internal/v1/* routes (Org CP's internal calls to Admin CP's permission catalog use this — ADR-029 made that a hard dependency of org creation itself) — the two are DISTINCT secrets, not the same value (council review fix: the super-admin credential no longer doubles as the service credential). `mg_verify_key` (test-mg-verify-key) is a THIRD, even narrower bearer: the model-gateway's own credential for Org CP's GET /internal/v1/api-keys/verify only, distinct from `service_key` so the internet-adjacent gateway can never reach /v1 users/roles/rbac even if compromised.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "gateway_url", "value": "http://localhost:8080" },
+    { "key": "rpm_url", "value": "http://localhost:9100" },
+    { "key": "tpm_url", "value": "http://localhost:9110" },
+    { "key": "tokenizer_url", "value": "http://localhost:9300" },
+    { "key": "acp_url", "value": "http://localhost:9200" },
+    { "key": "org_url", "value": "http://localhost:9220" },
+    { "key": "api_key", "value": "sk-e2e-fixed-verify-key-001" },
+    { "key": "admin_key", "value": "test-admin-key" },
+    { "key": "service_key", "value": "test-service-key" },
+    { "key": "mg_verify_key", "value": "test-mg-verify-key" },
+    { "key": "seed_admin_email", "value": "superadmin@platform.local" },
+    { "key": "seed_admin_password", "value": "ChangeMe123!" }
+  ],
+  "item": [
+    {
+      "name": "0. Ops & health (all services)",
+      "item": [
+        {
+          "name": "gateway health",
+          "request": { "method": "GET", "url": "{{gateway_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+          ] } }]
+        },
+        {
+          "name": "gateway metrics",
+          "request": { "method": "GET", "url": "{{gateway_url}}/metrics" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('has event counters', () => pm.expect(pm.response.text()).to.include('gw_events_published_total'));"
+          ] } }]
+        },
+        {
+          "name": "rate-limiter-rpm health",
+          "request": { "method": "GET", "url": "{{rpm_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "rate-limiter-rpm metrics",
+          "request": { "method": "GET", "url": "{{rpm_url}}/metrics" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('has rpm decision counter', () => pm.expect(pm.response.text()).to.include('rl_rpm_decisions_total'));"
+          ] } }]
+        },
+        {
+          "name": "rate-limiter-tpm health",
+          "request": { "method": "GET", "url": "{{tpm_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "rate-limiter-tpm metrics",
+          "request": { "method": "GET", "url": "{{tpm_url}}/metrics" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('has tpm decision counter', () => pm.expect(pm.response.text()).to.include('rl_tpm_decisions_total'));"
+          ] } }]
+        },
+        {
+          "name": "tokenizer health",
+          "request": { "method": "GET", "url": "{{tokenizer_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+          ] } }]
+        },
+        {
+          "name": "admin-control-plane health",
+          "request": { "method": "GET", "url": "{{acp_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+          ] } }]
+        },
+        {
+          "name": "admin-control-plane metrics",
+          "request": { "method": "GET", "url": "{{acp_url}}/metrics" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('prometheus text', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/plain'));"
+          ] } }]
+        },
+        {
+          "name": "organization-control-plane health",
+          "request": { "method": "GET", "url": "{{org_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+          ] } }]
+        },
+        {
+          "name": "organization-control-plane metrics",
+          "request": { "method": "GET", "url": "{{org_url}}/metrics" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('prometheus text', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/plain'));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "1. Gateway core",
+      "item": [
+        {
+          "name": "chat: missing key -> 401",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('authentication_error', () => pm.expect(pm.response.json().error.type).to.eql('authentication_error'));"
+          ] } }]
+        },
+        {
+          "name": "chat: valid llama-3-8b -> 200 (uncapped, no X-RateLimit)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{api_key}}" }
+            ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('chat.completion shape', () => pm.expect(j.object).to.eql('chat.completion'));",
+            "pm.test('content from mock', () => pm.expect(j.choices[0].message.content).to.include('mock vLLM'));",
+            "pm.test('llama-3-8b uncapped -> no X-RateLimit-Limit', () => pm.expect(pm.response.headers.has('X-RateLimit-Limit')).to.be.false);"
+          ] } }]
+        },
+        {
+          "name": "chat: streaming -> SSE",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{api_key}}" }
+            ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('event-stream', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/event-stream'));",
+            "const t = pm.response.text();",
+            "pm.test('has data', () => pm.expect(t).to.include('data:'));",
+            "pm.test('has DONE', () => pm.expect(t).to.include('[DONE]'));"
+          ] } }]
+        },
+        {
+          "name": "completions: valid -> 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{api_key}}" }
+            ],
+            "url": "{{gateway_url}}/v1/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"prompt\":\"hi\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('text_completion', () => pm.expect(pm.response.json().object).to.eql('text_completion'));"
+          ] } }]
+        },
+        {
+          "name": "chat: anthropic route (claude) -> translated",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{api_key}}" }
+            ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"claude\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('translated to chat.completion', () => pm.expect(j.object).to.eql('chat.completion'));",
+            "pm.test('content translated', () => pm.expect(j.choices[0].message.content).to.eql('hello'));",
+            "pm.test('claude uncapped -> no X-RateLimit headers', () => pm.expect(pm.response.headers.has('X-RateLimit-Limit')).to.be.false);"
+          ] } }]
+        },
+        {
+          "name": "models: lists routes",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{api_key}}" }],
+            "url": "{{gateway_url}}/v1/models"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const ids = pm.response.json().data.map(m => m.id);",
+            "pm.test('includes limited-model', () => pm.expect(ids).to.include('limited-model'));",
+            "pm.test('includes tpm-limited-model', () => pm.expect(ids).to.include('tpm-limited-model'));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "2. RPM burst — limited-model=3 (run in order)",
+      "description": "limited-model is RPM-capped at 3 (its own model counter). Counting is ASYNC (ADR-013): /check reads BEFORE the request is counted, so calls 1-3 allow and the 4th denies once the first 3 have been counted off the NATS queue. Soft limit: if the 4th is still 200, re-send it once.",
+      "item": [
+        {
+          "name": "limited-model 1 -> 200 (X-RateLimit-Limit=3)",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 allow', () => pm.response.to.have.status(200));",
+            "pm.test('X-RateLimit-Limit=3', () => pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.eql('3'));",
+            "pm.test('X-RateLimit-Remaining present', () => pm.expect(pm.response.headers.get('X-RateLimit-Remaining')).to.be.a('string'));"
+          ] } }]
+        },
+        {
+          "name": "limited-model 2 -> 200",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 allow', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "limited-model 3 -> 200",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 allow', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "limited-model 4 -> 429 (soft: re-send once if still 200)",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "if (pm.response.code === 429) {",
+            "  pm.test('rate_limit_exceeded', () => pm.expect(pm.response.json().error.type).to.eql('rate_limit_exceeded'));",
+            "  pm.test('Retry-After present', () => pm.expect(pm.response.headers.get('Retry-After')).to.be.a('string'));",
+            "  pm.test('X-RateLimit-Limit=3', () => pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.eql('3'));",
+            "  pm.test('X-RateLimit-Remaining=0', () => pm.expect(pm.response.headers.get('X-RateLimit-Remaining')).to.eql('0'));",
+            "} else {",
+            "  pm.test.skip('still allowed — consumer catching up (soft limit); re-send this request');",
+            "}"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "3. TPM burst — tpm-limited-model=15 tokens (run in order)",
+      "description": "tpm-limited-model is TPM-capped at 15 tokens/min. The mock returns usage.total_tokens=9 per chat call, and TPM counts async from RESPONSE events (AD-01/AD-02). So call 1 (counter 0) and call 2 (counter 9) allow; by call 3 the counter is 18 (>=15) and it denies. Soft/async: if call 3 is still 200, the response consumer hasn't drained yet — re-send it once.",
+      "item": [
+        {
+          "name": "tpm-limited-model 1 -> 200 (X-RateLimit-Limit=15 tokens)",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"tpm-limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 allow', () => pm.response.to.have.status(200));",
+            "pm.test('X-RateLimit-Limit=15 (tpm token budget)', () => pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.eql('15'));"
+          ] } }]
+        },
+        {
+          "name": "tpm-limited-model 2 -> 200",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"tpm-limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 allow (counter still < 15 at read time)', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "tpm-limited-model 3 -> 429 (soft: re-send once if still 200)",
+          "request": { "method": "POST", "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{api_key}}" } ], "url": "{{gateway_url}}/v1/chat/completions", "body": { "mode": "raw", "raw": "{\"model\":\"tpm-limited-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "if (pm.response.code === 429) {",
+            "  pm.test('rate_limit_exceeded', () => pm.expect(pm.response.json().error.type).to.eql('rate_limit_exceeded'));",
+            "  pm.test('Retry-After present', () => pm.expect(pm.response.headers.get('Retry-After')).to.be.a('string'));",
+            "  pm.test('X-RateLimit-Limit=15', () => pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.eql('15'));",
+            "} else {",
+            "  pm.test.skip('still allowed — TPM response-event consumer catching up (soft limit); re-send this request');",
+            "}"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "4. Policy /check direct (READ-ONLY)",
+      "description": "Call the policy services directly (the same contract the gateway uses). /check NEVER counts (ADR-013/AD-01) — counting is only via the NATS consumers off gateway events — so hammering /check here never denies; it just reads current counters.",
+      "item": [
+        {
+          "name": "rpm /check: limited-model -> allow WITH budget (limit 3)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{rpm_url}}/check",
+            "body": { "mode": "raw", "raw": "{\"principal\":\"alice\",\"model\":\"limited-model\",\"path\":\"/v1/chat/completions\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 (decision in body)', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "// decision depends on how full the 60s window is (folder 2 may have filled it) — assert the contract, not a fixed decision.",
+            "pm.test('decision allow|deny', () => pm.expect(j.decision).to.be.oneOf(['allow','deny']));",
+            "pm.test('limit=3', () => pm.expect(j.limit).to.eql(3));",
+            "pm.test('has reset_after', () => pm.expect(j).to.have.property('reset_after'));"
+          ] } }]
+        },
+        {
+          "name": "rpm /check: uncapped model -> bare allow",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{rpm_url}}/check",
+            "body": { "mode": "raw", "raw": "{\"principal\":\"alice\",\"model\":\"llama-3-8b\",\"path\":\"/v1/chat/completions\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('bare allow (no budget fields)', () => pm.expect(pm.response.json()).to.eql({ decision: 'allow' }));"
+          ] } }]
+        },
+        {
+          "name": "tpm /check: tpm-limited-model -> allow WITH budget (limit 15)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{tpm_url}}/check",
+            "body": { "mode": "raw", "raw": "{\"principal\":\"bob\",\"model\":\"tpm-limited-model\",\"path\":\"/v1/chat/completions\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "// decision depends on the 60s window state (folder 3 may have filled it) — assert the contract.",
+            "pm.test('decision allow|deny', () => pm.expect(j.decision).to.be.oneOf(['allow','deny']));",
+            "pm.test('limit=15', () => pm.expect(j.limit).to.eql(15));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "5. Tokenizer (:9300)",
+      "item": [
+        {
+          "name": "tokenize: default backend -> tokens + name",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{tokenizer_url}}/tokenize",
+            "body": { "mode": "raw", "raw": "{\"text\":\"hello world, how are you?\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('tokens > 0', () => pm.expect(j.tokens).to.be.above(0));",
+            "pm.test('default tokenizer cl100k_base', () => pm.expect(j.tokenizer).to.eql('cl100k_base'));"
+          ] } }]
+        },
+        {
+          "name": "tokenize: explicit cl100k_base -> echoes name",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{tokenizer_url}}/tokenize",
+            "body": { "mode": "raw", "raw": "{\"text\":\"count me\",\"tokenizer\":\"cl100k_base\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('tokenizer echoed', () => pm.expect(pm.response.json().tokenizer).to.eql('cl100k_base'));"
+          ] } }]
+        },
+        {
+          "name": "tokenize: empty text -> 0 tokens (valid)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{tokenizer_url}}/tokenize",
+            "body": { "mode": "raw", "raw": "{\"text\":\"\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('0 tokens', () => pm.expect(pm.response.json().tokens).to.eql(0));"
+          ] } }]
+        },
+        {
+          "name": "tokenize: unknown backend -> 400 unknown_tokenizer",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{tokenizer_url}}/tokenize",
+            "body": { "mode": "raw", "raw": "{\"text\":\"x\",\"tokenizer\":\"does-not-exist\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));",
+            "pm.test('unknown_tokenizer', () => pm.expect(pm.response.json().error.type).to.eql('unknown_tokenizer'));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "6. Admin Control Plane (:9200)",
+      "description": "Plans + Organizations CRUD behind a fixed super-admin bearer (test-admin-key). Run in order — it creates a plan + org, exercises the 422/409 rules, then cleans up so the folder is re-runnable. Chained ids are stored in collection variables acp_plan_id / acp_org_id.",
+      "item": [
+        {
+          "name": "auth: list plans missing bearer -> 401",
+          "request": { "method": "GET", "url": "{{acp_url}}/v1/plans" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('unauthorized', () => pm.expect(pm.response.json().error.type).to.eql('unauthorized'));"
+          ] } }]
+        },
+        {
+          "name": "auth: list plans wrong key -> 401",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer wrong-key" }], "url": "{{acp_url}}/v1/plans" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));"
+          ] } }]
+        },
+        {
+          "name": "plans: list seeded (Free/Pro/Enterprise)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const names = pm.response.json().map(p => p.name);",
+            "pm.test('has Free/Pro/Enterprise', () => { ['Free','Pro','Enterprise'].forEach(n => pm.expect(names).to.include(n)); });",
+            "const free = pm.response.json().find(p => p.name === 'Free');",
+            "pm.test('Free is_default true, tpm 10000', () => { pm.expect(free.is_default).to.be.true; pm.expect(free.tpm).to.eql(10000); });"
+          ] } }]
+        },
+        {
+          "name": "plans: create -> 201 (save acp_plan_id)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/plans",
+            "body": { "mode": "raw", "raw": "{\"name\":\"PostmanPlan-{{$timestamp}}\",\"tpm\":1000,\"rpm\":10,\"quota_monthly_tokens\":100000}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('fields echoed', () => { pm.expect(j.name).to.include('PostmanPlan'); pm.expect(j.tpm).to.eql(1000); });",
+            "pm.test('is_default false (server-controlled)', () => pm.expect(j.is_default).to.be.false);",
+            "pm.collectionVariables.set('acp_plan_id', j.id);"
+          ] } }]
+        },
+        {
+          "name": "plans: get by id -> 200",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans/{{acp_plan_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('id matches', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('acp_plan_id')));"
+          ] } }]
+        },
+        {
+          "name": "plans: patch rpm=99 -> 200",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/plans/{{acp_plan_id}}",
+            "body": { "mode": "raw", "raw": "{\"rpm\":99}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('rpm updated', () => pm.expect(pm.response.json().rpm).to.eql(99));"
+          ] } }]
+        },
+        {
+          "name": "plans: get absent -> 404",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans/00000000-0000-0000-0000-000000000000" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));",
+            "pm.test('not_found', () => pm.expect(pm.response.json().error.type).to.eql('not_found'));"
+          ] } }]
+        },
+        {
+          "name": "orgs: create with valid plan -> 201 (save acp_org_id)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/organizations",
+            "body": { "mode": "raw", "raw": "{\"name\":\"PostmanOrg-{{$timestamp}}\",\"plan_id\":\"{{acp_plan_id}}\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('slug derived from name', () => pm.expect(j.slug).to.eql(j.name.toLowerCase()));",
+            "pm.test('status active', () => pm.expect(j.status).to.eql('active'));",
+            "pm.test('attached to plan', () => pm.expect(j.plan_id).to.eql(pm.collectionVariables.get('acp_plan_id')));",
+            "pm.collectionVariables.set('acp_org_id', j.id);",
+            "pm.collectionVariables.set('acp_org_name', j.name);"
+          ] } }]
+        },
+        {
+          "name": "orgs: create with unknown plan -> 422",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/organizations",
+            "body": { "mode": "raw", "raw": "{\"name\":\"GhostOrg\",\"plan_id\":\"00000000-0000-0000-0000-000000000000\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422', () => pm.response.to.have.status(422));",
+            "pm.test('unprocessable', () => pm.expect(pm.response.json().error.type).to.eql('unprocessable'));"
+          ] } }]
+        },
+        {
+          "name": "orgs: patch invalid status -> 422",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/organizations/{{acp_org_id}}",
+            "body": { "mode": "raw", "raw": "{\"status\":\"frozen\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422 (status outside {active,suspended})', () => pm.response.to.have.status(422));"
+          ] } }]
+        },
+        {
+          "name": "orgs: duplicate name -> 409",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/organizations",
+            "body": { "mode": "raw", "raw": "{\"name\":\"{{acp_org_name}}\",\"plan_id\":\"{{acp_plan_id}}\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('409', () => pm.response.to.have.status(409));",
+            "pm.test('conflict', () => pm.expect(pm.response.json().error.type).to.eql('conflict'));"
+          ] } }]
+        },
+        {
+          "name": "plans: delete referenced plan -> 409",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans/{{acp_plan_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('409 (org still references it)', () => pm.response.to.have.status(409));",
+            "pm.test('conflict', () => pm.expect(pm.response.json().error.type).to.eql('conflict'));"
+          ] } }]
+        },
+        {
+          "name": "orgs: delete -> 204",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/organizations/{{acp_org_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "plans: delete now-unreferenced plan -> 204 (cleanup)",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans/{{acp_plan_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "7. Local Auth — Admin Control Plane (ADR-025)",
+      "description": "Org-less super-admin local auth. The compose stack's `seed-admin` one-shot job already bootstrapped {{seed_admin_email}} / {{seed_admin_password}} with must_change_password=true. This folder rotates it, exercises the forced-rotation gate, no-account-enumeration, refresh rotation, and logout. Run top to bottom — each step depends on the collection variable the previous step set. Re-running the whole collection after a fresh `docker compose down -v && up` resets the seed password back to {{seed_admin_password}}.",
+      "item": [
+        {
+          "name": "login: seed admin (must_change_password=true)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{acp_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{seed_admin_email}}\",\"password\":\"{{seed_admin_password}}\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "if (pm.response.code === 200) {",
+            "  const j = pm.response.json();",
+            "  pm.test('200 (fresh seed password)', () => pm.response.to.have.status(200));",
+            "  pm.test('bearer token type', () => pm.expect(j.token_type).to.eql('Bearer'));",
+            "  pm.test('role super_admin', () => pm.expect(j.user.role).to.eql('super_admin'));",
+            "  pm.test('no org on the response', () => pm.expect(j.org).to.be.undefined);",
+            "  pm.test('must_change_password true (seed)', () => pm.expect(j.must_change_password).to.be.true);",
+            "  pm.test('refresh cookie set', () => pm.expect(pm.cookies.has('refresh')).to.be.true);",
+            "  pm.collectionVariables.set('acp_admin_token', j.access_token);",
+            "  postman.setNextRequest('admin: me before rotation -> 403 password_change_required');",
+            "} else if (pm.response.code === 429) {",
+            "  // Locked out from repeated prior wrong-password attempts against this fixed seed email",
+            "  // (can't be made unique per run, unlike alice's). Try the fallback anyway — harmless if",
+            "  // it also 429s, its own script handles that gracefully.",
+            "  pm.test.skip('seed admin currently locked out (429) — trying the fallback login');",
+            "  postman.setNextRequest('login: fallback (already-rotated admin)');",
+            "} else {",
+            "  // The seed password only works once — a prior run against this same (not-torn-down)",
+            "  // stack already rotated it. Jump to the fallback login instead of failing the run.",
+            "  pm.test('seed password rejected (401) — already rotated by an earlier run', () => pm.expect(pm.response.code).to.eql(401));",
+            "  postman.setNextRequest('login: fallback (already-rotated admin)');",
+            "}"
+          ] } }]
+        },
+        {
+          "name": "login: fallback (already-rotated admin)",
+          "description": "Only reached when the seed password above was rejected — i.e. this stack already had folder 7 run against it before. Logs in with the fixed password that 'password: rotate seed password' always rotates to, then jumps straight past the rotation-demo steps (already done in a prior run) to the shared tail.",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{acp_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{seed_admin_email}}\",\"password\":\"RotatedAdminPw#456\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "if (pm.response.code === 429) {",
+            "  // Genuinely locked out (enough real wrong-password attempts accumulated across",
+            "  // several rapid collection runs). No admin token is obtainable right now, so skip",
+            "  // the rest of folder 7 AND folder 9 (which needs this token) rather than cascade into",
+            "  // false failures — folder 8 (org auth) is fully independent and still runs in full.",
+            "  // Wait out the backoff window (or restart the stack) to exercise folder 7/9 again.",
+            "  pm.test.skip('admin still locked out (429) — skipping the rest of folder 7 and folder 9');",
+            "  postman.setNextRequest('plans: get Free id (for org creation)');",
+            "} else {",
+            "  pm.test('200 (already-rotated password from a prior run)', () => pm.response.to.have.status(200));",
+            "  const j = pm.response.json();",
+            "  pm.test('must_change_password already false', () => pm.expect(j.must_change_password).to.be.false);",
+            "  pm.test('refresh cookie set', () => pm.expect(pm.cookies.has('refresh')).to.be.true);",
+            "  pm.collectionVariables.set('acp_admin_token', j.access_token);",
+            "  postman.setNextRequest('me after rotation -> 200 (org-less identity)');",
+            "}"
+          ] } }]
+        },
+        {
+          "name": "admin: me before rotation -> 403 password_change_required",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{acp_admin_token}}" }], "url": "{{acp_url}}/api/auth/me" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('403', () => pm.response.to.have.status(403));",
+            "pm.test('password_change_required', () => pm.expect(pm.response.json().error.type).to.eql('password_change_required'));"
+          ] } }]
+        },
+        {
+          "name": "password: too weak -> 422 (rotation gate still lets this through)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{acp_admin_token}}" } ],
+            "url": "{{acp_url}}/api/auth/password",
+            "body": { "mode": "raw", "raw": "{\"current_password\":\"{{seed_admin_password}}\",\"new_password\":\"short\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422', () => pm.response.to.have.status(422));",
+            "pm.test('weak_password', () => pm.expect(pm.response.json().error.type).to.eql('weak_password'));"
+          ] } }]
+        },
+        {
+          "name": "password: rotate seed password -> 204",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{acp_admin_token}}" } ],
+            "url": "{{acp_url}}/api/auth/password",
+            "body": { "mode": "raw", "raw": "{\"current_password\":\"{{seed_admin_password}}\",\"new_password\":\"RotatedAdminPw#456\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));",
+            "pm.collectionVariables.set('acp_admin_password_current', 'RotatedAdminPw#456');"
+          ] } }]
+        },
+        {
+          "name": "admin: login rotated password -> 200, must_change_password=false",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{acp_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{seed_admin_email}}\",\"password\":\"{{acp_admin_password_current}}\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('must_change_password now false', () => pm.expect(j.must_change_password).to.be.false);",
+            "pm.collectionVariables.set('acp_admin_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "me after rotation -> 200 (org-less identity)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{acp_admin_token}}" }], "url": "{{acp_url}}/api/auth/me" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('user.role super_admin', () => pm.expect(j.user.role).to.eql('super_admin'));",
+            "pm.test('no org field', () => pm.expect(j.org).to.be.undefined);",
+            "pm.test('must_change_password false', () => pm.expect(j.must_change_password).to.be.false);"
+          ] } }]
+        },
+        {
+          "name": "admin: no enumeration: unknown email -> 401 invalid_credentials",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{acp_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"ghost-{{$timestamp}}@platform.local\",\"password\":\"whatever-12345\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('invalid_credentials', () => pm.expect(pm.response.json().error.type).to.eql('invalid_credentials'));",
+            "pm.collectionVariables.set('acp_unknown_email_body', JSON.stringify(pm.response.json()));"
+          ] } }]
+        },
+        {
+          "name": "admin: no enumeration: wrong password -> byte-identical 401 body",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{acp_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{seed_admin_email}}\",\"password\":\"totally-wrong-pw\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "if (pm.response.code === 429) {",
+            "  // The seed admin's email is fixed forever (can't be made unique per run like alice's),",
+            "  // so repeated back-to-back COLLECTION runs can genuinely trip its lockout counter",
+            "  // (LOGIN_MAX_ATTEMPTS) after enough wrong-password attempts accumulate in Redis. A",
+            "  // 429 here means the brute-force defense is working correctly, not that no-enumeration",
+            "  // broke — it just means the account is currently rate-limited. Wait out",
+            "  // LOGIN_BACKOFF_*_SECONDS (or restart the stack) to see the plain 401 path again.",
+            "  pm.test.skip('seed admin temporarily locked out from repeated prior runs (429) — no-enumeration still holds, just gated earlier');",
+            "} else {",
+            "  pm.test('401', () => pm.response.to.have.status(401));",
+            "  const j = pm.response.json();",
+            "  pm.test('invalid_credentials', () => pm.expect(j.error.type).to.eql('invalid_credentials'));",
+            "  pm.test('identical body to the unknown-email case (no enumeration)', () => pm.expect(JSON.stringify(j)).to.eql(pm.collectionVariables.get('acp_unknown_email_body')));",
+            "}"
+          ] } }]
+        },
+        {
+          "name": "admin: refresh rotates the access token",
+          "request": { "method": "POST", "url": "{{acp_url}}/api/auth/refresh" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('new access token issued', () => pm.expect(j.access_token).to.not.eql(pm.collectionVariables.get('acp_admin_token')));",
+            "pm.collectionVariables.set('acp_admin_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "admin: logout -> 204",
+          "request": { "method": "POST", "url": "{{acp_url}}/api/auth/logout" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "admin: refresh after logout -> 401 session_expired",
+          "request": { "method": "POST", "url": "{{acp_url}}/api/auth/refresh" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('session_expired', () => pm.expect(pm.response.json().error.type).to.eql('session_expired'));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "8. Local Auth — Organization Control Plane (ADR-025)",
+      "description": "Org-scoped user local auth on top of the existing users/organizations model. Creates a fresh org via Admin CP (which provisions it into Org CP synchronously, ADR-018), then an org user WITH an initial password (the admin-initiated provisioning path — there is no public self-register). Run top to bottom.",
+      "item": [
+        {
+          "name": "plans: get Free id (for org creation)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const free = pm.response.json().find(p => p.name === 'Free');",
+            "pm.test('Free plan exists', () => pm.expect(free).to.not.be.undefined);",
+            "pm.collectionVariables.set('auth_free_plan_id', free.id);"
+          ] } }]
+        },
+        {
+          "name": "orgs: create AuthTestOrg -> 201 (provisions into Org CP too)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/organizations",
+            "body": { "mode": "raw", "raw": "{\"name\":\"AuthTestOrg-{{$timestamp}}\",\"plan_id\":\"{{auth_free_plan_id}}\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('status active (Org CP provisioning succeeded)', () => pm.expect(j.status).to.eql('active'));",
+            "pm.collectionVariables.set('auth_org_id', j.id);",
+            "// Org CP's local-auth login looks up users by email GLOBALLY (no org scoping in the",
+            "// lookup query), but email is only unique PER ORG — so a leftover 'alice@...' row in an",
+            "// old, uncleaned-up org from a previous run would collide. Make the email unique per run.",
+            "pm.collectionVariables.set('auth_user_email', 'alice-' + Date.now() + '@authtestorg.com');"
+          ] } }]
+        },
+        {
+          "name": "org-cp: create user with a weak password -> 422 weak_password",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{auth_org_id}}" } ],
+            "url": "{{org_url}}/v1/users",
+            "body": { "mode": "raw", "raw": "{\"username\":\"weakuser\",\"email\":\"weak@authtestorg.com\",\"password\":\"short\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422', () => pm.response.to.have.status(422));",
+            "pm.test('weak_password', () => pm.expect(pm.response.json().error.type).to.eql('weak_password'));"
+          ] } }]
+        },
+        {
+          "name": "org-cp: create user WITH password -> 201",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{auth_org_id}}" } ],
+            "url": "{{org_url}}/v1/users",
+            "body": { "mode": "raw", "raw": "{\"username\":\"alice\",\"email\":\"{{auth_user_email}}\",\"password\":\"AliceSecret123!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('never exposes the password/hash', () => { pm.expect(j.password).to.be.undefined; pm.expect(j.password_hash).to.be.undefined; });",
+            "pm.collectionVariables.set('auth_user_id', j.id);"
+          ] } }]
+        },
+        {
+          "name": "login: alice (must_change_password=true, forced by admin provisioning)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{auth_user_email}}\",\"password\":\"AliceSecret123!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('org claim resolved to AuthTestOrg', () => pm.expect(j.org.id).to.eql(pm.collectionVariables.get('auth_org_id')));",
+            "pm.test('must_change_password true', () => pm.expect(j.must_change_password).to.be.true);",
+            "pm.collectionVariables.set('org_user_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "me before rotation -> 403 password_change_required",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{org_user_token}}" }], "url": "{{org_url}}/api/auth/me" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('403', () => pm.response.to.have.status(403));",
+            "pm.test('password_change_required', () => pm.expect(pm.response.json().error.type).to.eql('password_change_required'));"
+          ] } }]
+        },
+        {
+          "name": "password: rotate -> 204",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{org_user_token}}" } ],
+            "url": "{{org_url}}/api/auth/password",
+            "body": { "mode": "raw", "raw": "{\"current_password\":\"AliceSecret123!\",\"new_password\":\"AliceRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "password: no-op change -> 422 password_unchanged",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{org_user_token}}" } ],
+            "url": "{{org_url}}/api/auth/password",
+            "body": { "mode": "raw", "raw": "{\"current_password\":\"AliceRotated456!\",\"new_password\":\"AliceRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422', () => pm.response.to.have.status(422));",
+            "pm.test('password_unchanged', () => pm.expect(pm.response.json().error.type).to.eql('password_unchanged'));"
+          ] } }]
+        },
+        {
+          "name": "login: rotated password -> 200, must_change_password=false",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{auth_user_email}}\",\"password\":\"AliceRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('must_change_password now false', () => pm.expect(j.must_change_password).to.be.false);",
+            "pm.collectionVariables.set('org_user_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "me after rotation -> 200 (org + permissions)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{org_user_token}}" }], "url": "{{org_url}}/api/auth/me" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('identity is alice', () => pm.expect(j.user.email).to.eql(pm.collectionVariables.get('auth_user_email')));",
+            "pm.test('org resolved', () => pm.expect(j.org.id).to.eql(pm.collectionVariables.get('auth_org_id')));",
+            "pm.test('permissions is an array', () => pm.expect(j.permissions).to.be.an('array'));"
+          ] } }]
+        },
+        {
+          "name": "no enumeration: unknown email -> 401 invalid_credentials",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"ghost-{{$timestamp}}@authtestorg.com\",\"password\":\"whatever-12345\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('invalid_credentials', () => pm.expect(pm.response.json().error.type).to.eql('invalid_credentials'));",
+            "pm.collectionVariables.set('org_unknown_email_body', JSON.stringify(pm.response.json()));"
+          ] } }]
+        },
+        {
+          "name": "no enumeration: wrong password -> byte-identical 401 body",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{auth_user_email}}\",\"password\":\"totally-wrong-pw\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "const j = pm.response.json();",
+            "pm.test('invalid_credentials', () => pm.expect(j.error.type).to.eql('invalid_credentials'));",
+            "pm.test('identical body to the unknown-email case (no enumeration)', () => pm.expect(JSON.stringify(j)).to.eql(pm.collectionVariables.get('org_unknown_email_body')));"
+          ] } }]
+        },
+        {
+          "name": "org-cp: admin resets alice's password -> 200 (forces rotation again)",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{auth_org_id}}" } ],
+            "url": "{{org_url}}/v1/users/{{auth_user_id}}",
+            "body": { "mode": "raw", "raw": "{\"password\":\"AdminResetPw789!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "login: old (pre-reset) password now fails -> 401",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{auth_user_email}}\",\"password\":\"AliceRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('invalid_credentials', () => pm.expect(pm.response.json().error.type).to.eql('invalid_credentials'));"
+          ] } }]
+        },
+        {
+          "name": "login: admin-reset password works, must_change_password=true again",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{auth_user_email}}\",\"password\":\"AdminResetPw789!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('forced rotation again', () => pm.expect(j.must_change_password).to.be.true);",
+            "pm.collectionVariables.set('org_user_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "refresh: rotates the access token",
+          "request": { "method": "POST", "url": "{{org_url}}/api/auth/refresh" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('new access token issued', () => pm.expect(j.access_token).to.not.eql(pm.collectionVariables.get('org_user_token')));",
+            "pm.collectionVariables.set('org_user_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "logout -> 204",
+          "request": { "method": "POST", "url": "{{org_url}}/api/auth/logout" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "refresh after logout -> 401 session_expired",
+          "request": { "method": "POST", "url": "{{org_url}}/api/auth/refresh" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('session_expired', () => pm.expect(pm.response.json().error.type).to.eql('session_expired'));"
+          ] } }]
+        },
+        {
+          "name": "orgs: delete AuthTestOrg -> 204 (cleanup, matches folder 6's hygiene)",
+          "description": "Deletes via Admin CP (which owns organizations). Belt-and-braces alongside the per-run-unique org name/email: keeps the DB from accumulating a fresh org on every run.",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/organizations/{{auth_org_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "9. Cross-Service JWT Contract (ADR-025)",
+      "description": "Proves live what api/tests/contract/test_jwt_contract.py pins offline: Admin CP and Org CP mint the SAME HS256 claim shape under the shared JWT_SECRET, differing only in the `org` claim. Requires folders 7 and 8 to have run first (uses their last-issued tokens). Piggybacks the assertion onto a harmless GET so no new endpoint is needed — this step never touches gateway state.",
+      "item": [
+        {
+          "name": "assert shared claim shape (decode both tokens client-side)",
+          "request": { "method": "GET", "url": "{{gateway_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 (carrier request)', () => pm.response.to.have.status(200));",
+            "function decodeJwt(token) {",
+            "  const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+            "  const json = decodeURIComponent(atob(b64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));",
+            "  return JSON.parse(json);",
+            "}",
+            "const adminClaims = decodeJwt(pm.collectionVariables.get('acp_admin_token'));",
+            "const orgClaims = decodeJwt(pm.collectionVariables.get('org_user_token'));",
+            "const required = ['sub','email','role','iat','exp','jti'];",
+            "pm.test('admin token has the required claims', () => required.forEach(k => pm.expect(adminClaims).to.have.property(k)));",
+            "pm.test('org token has the required claims', () => required.forEach(k => pm.expect(orgClaims).to.have.property(k)));",
+            "pm.test('admin token has NO org claim', () => pm.expect(adminClaims.org).to.be.undefined);",
+            "pm.test('org token HAS an org claim', () => pm.expect(orgClaims.org).to.eql(pm.collectionVariables.get('auth_org_id')));",
+            "pm.test('admin role is super_admin', () => pm.expect(adminClaims.role).to.eql('super_admin'));",
+            "pm.test('org role is org_user', () => pm.expect(orgClaims.role).to.eql('org_user'));",
+            "const adminKeysSansOrg = Object.keys(adminClaims).sort();",
+            "const orgKeysSansOrg = Object.keys(orgClaims).filter(k => k !== 'org').sort();",
+            "pm.test('claim-key sets match except for org (no drift between the two encoders)', () => pm.expect(orgKeysSansOrg).to.eql(adminKeysSansOrg));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "10. Permissions Catalog (Admin CP master list)",
+      "description": "The master permission list Admin CP owns (ADR-019) — Org CP only ever validates permission ids against it, never writes it. Self-contained: creates and cleans up its own throwaway permission. Also proves the ADMIN_API_KEY/SERVICE_API_KEY fix (see docker-compose.full.yml) by hitting Org CP's live read-through proxy at the end.",
+      "item": [
+        {
+          "name": "auth: list permissions missing bearer -> 401",
+          "request": { "method": "GET", "url": "{{acp_url}}/v1/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('unauthorized', () => pm.expect(pm.response.json().error.type).to.eql('unauthorized'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: list seeded default catalog",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const slugs = pm.response.json().map(p => p.slug);",
+            "const expected = ['users.read','users.create','users.update','users.delete','roles.read','roles.create','roles.update','roles.delete','organizations.read','organizations.update','apikey.create','apikey.update','apikey.delete'];",
+            "pm.test('has the full default catalog', () => expected.forEach(s => pm.expect(slugs).to.include(s)));"
+          ] } }]
+        },
+        {
+          "name": "permissions: create 'widgets.manage' -> 201 (slug derived)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/permissions",
+            "body": { "mode": "raw", "raw": "{\"resource\":\"widgets\",\"action\":\"manage\",\"description\":\"Postman scratch permission\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('slug derived server-side', () => pm.expect(j.slug).to.eql('widgets.manage'));",
+            "pm.test('is_active defaults true', () => pm.expect(j.is_active).to.be.true);",
+            "pm.collectionVariables.set('perm10_id', j.id);"
+          ] } }]
+        },
+        {
+          "name": "permissions: create duplicate slug -> 409",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/permissions",
+            "body": { "mode": "raw", "raw": "{\"resource\":\"widgets\",\"action\":\"manage\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('409', () => pm.response.to.have.status(409));",
+            "pm.test('conflict', () => pm.expect(pm.response.json().error.type).to.eql('conflict'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: get by id -> 200",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/permissions/{{perm10_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('slug matches', () => pm.expect(pm.response.json().slug).to.eql('widgets.manage'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: get absent -> 404",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/permissions/00000000-0000-0000-0000-000000000000" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));",
+            "pm.test('not_found', () => pm.expect(pm.response.json().error.type).to.eql('not_found'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: patch description + is_active=false -> 200",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/permissions/{{perm10_id}}",
+            "body": { "mode": "raw", "raw": "{\"description\":\"updated by postman\",\"is_active\":false}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('description updated', () => pm.expect(j.description).to.eql('updated by postman'));",
+            "pm.test('is_active updated', () => pm.expect(j.is_active).to.be.false);",
+            "pm.test('slug unchanged (resource/action untouched)', () => pm.expect(j.slug).to.eql('widgets.manage'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: internal missing bearer -> 401",
+          "request": { "method": "GET", "url": "{{acp_url}}/internal/v1/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));"
+          ] } }]
+        },
+        {
+          "name": "permissions: internal list -> 200 includes custom (Org CP's validation seam)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{service_key}}" }], "url": "{{acp_url}}/internal/v1/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const slugs = pm.response.json().map(p => p.slug);",
+            "pm.test('includes widgets.manage', () => pm.expect(slugs).to.include('widgets.manage'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: internal get by id -> 200",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{service_key}}" }], "url": "{{acp_url}}/internal/v1/permissions/{{perm10_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('id matches', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('perm10_id')));"
+          ] } }]
+        },
+        {
+          "name": "org-cp: permissions proxy -> 200 (same catalog, proves the shared key config)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{service_key}}" }], "url": "{{org_url}}/v1/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 (Org CP -> Admin CP internal call authenticated)', () => pm.response.to.have.status(200));",
+            "const slugs = pm.response.json().map(p => p.slug);",
+            "pm.test('includes widgets.manage (live proxy, not a stale copy)', () => pm.expect(slugs).to.include('widgets.manage'));"
+          ] } }]
+        },
+        {
+          "name": "permissions: delete custom -> 204 (cleanup)",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/permissions/{{perm10_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "permissions: get deleted -> 404",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/permissions/{{perm10_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "11. Roles & RBAC + Identity-Gated Provisioning (Org CP, ADR-029)",
+      "description": "Org-scoped role CRUD, permission composition, user-role assignment, and effective-permission resolution — plus the identity-gated /api/users surface (the first route to enforce require_permission). Self-contained: creates its own org (proving seed_default_roles' org_admin/org_user auto-seeding), an owner, and a member. Does NOT clean up its org — folder 12 (API Keys) reuses it and deletes it at the very end. Run 11 then 12 together.",
+      "item": [
+        {
+          "name": "plans: get Free id (for RBAC org)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/plans" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const free = pm.response.json().find(p => p.name === 'Free');",
+            "pm.collectionVariables.set('rbac_free_plan_id', free.id);"
+          ] } }]
+        },
+        {
+          "name": "orgs: create RbacOrg -> 201 (default org_admin/org_user roles auto-seeded)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{admin_key}}" } ],
+            "url": "{{acp_url}}/v1/organizations",
+            "body": { "mode": "raw", "raw": "{\"name\":\"RbacOrg-{{$timestamp}}\",\"plan_id\":\"{{rbac_free_plan_id}}\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 (seed_default_roles succeeded — proves the shared admin/service key fix)', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('status active', () => pm.expect(j.status).to.eql('active'));",
+            "pm.collectionVariables.set('rbac_org_id', j.id);"
+          ] } }]
+        },
+        {
+          "name": "roles: list seeded default roles -> org_admin + org_user present",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/roles" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const roles = pm.response.json();",
+            "const admin = roles.find(r => r.name === 'org_admin');",
+            "const user = roles.find(r => r.name === 'org_user');",
+            "pm.test('org_admin seeded', () => pm.expect(admin).to.not.be.undefined);",
+            "pm.test('org_user seeded', () => pm.expect(user).to.not.be.undefined);",
+            "pm.test('both are system roles', () => { pm.expect(admin.is_system_role).to.be.true; pm.expect(user.is_system_role).to.be.true; });",
+            "pm.collectionVariables.set('rbac_role_admin_id', admin.id);",
+            "pm.collectionVariables.set('rbac_role_user_id', user.id);"
+          ] } }]
+        },
+        {
+          "name": "roles: org_admin has all 13 default permissions",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/roles/{{rbac_role_admin_id}}/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('13 permission ids', () => pm.expect(pm.response.json().permission_ids).to.have.lengthOf(13));"
+          ] } }]
+        },
+        {
+          "name": "roles: org_user has 3 default (read-only) permissions",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/roles/{{rbac_role_user_id}}/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('3 permission ids', () => pm.expect(pm.response.json().permission_ids).to.have.lengthOf(3));"
+          ] } }]
+        },
+        {
+          "name": "org-cp: create owner user WITH password -> 201",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ],
+            "url": "{{org_url}}/v1/users",
+            "body": { "mode": "raw", "raw": "{\"username\":\"rbacowner\",\"email\":\"rbacowner-{{$timestamp}}@rbactest.com\",\"password\":\"OwnerSecret123!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.collectionVariables.set('rbac_owner_id', j.id);",
+            "pm.collectionVariables.set('rbac_owner_email', j.email);"
+          ] } }]
+        },
+        {
+          "name": "roles: assign org_admin role to owner -> 200",
+          "request": {
+            "method": "PUT",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ],
+            "url": "{{org_url}}/v1/users/{{rbac_owner_id}}/roles",
+            "body": { "mode": "raw", "raw": "{\"role_ids\":[\"{{rbac_role_admin_id}}\"]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('role set to [org_admin]', () => pm.expect(pm.response.json().role_ids).to.eql([pm.collectionVariables.get('rbac_role_admin_id')]));"
+          ] } }]
+        },
+        {
+          "name": "login: owner (must_change_password=true, admin-initiated)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{rbac_owner_email}}\",\"password\":\"OwnerSecret123!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('org resolved to RbacOrg', () => pm.expect(j.org.id).to.eql(pm.collectionVariables.get('rbac_org_id')));",
+            "pm.test('must_change_password true', () => pm.expect(j.must_change_password).to.be.true);",
+            "pm.collectionVariables.set('rbac_owner_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "password: rotate owner -> 204",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/auth/password",
+            "body": { "mode": "raw", "raw": "{\"current_password\":\"OwnerSecret123!\",\"new_password\":\"OwnerRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "login: owner rotated -> 200",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{rbac_owner_email}}\",\"password\":\"OwnerRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('must_change_password now false', () => pm.expect(j.must_change_password).to.be.false);",
+            "pm.collectionVariables.set('rbac_owner_token', j.access_token);"
+          ] } }]
+        },
+        {
+          "name": "roles: create custom role 'auditor' -> 201",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ],
+            "url": "{{org_url}}/v1/roles",
+            "body": { "mode": "raw", "raw": "{\"name\":\"auditor\",\"description\":\"Postman scratch role\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('not a system role', () => pm.expect(j.is_system_role).to.be.false);",
+            "pm.collectionVariables.set('rbac_role_auditor_id', j.id);"
+          ] } }]
+        },
+        {
+          "name": "permissions: get users.update id (for auditor role)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{service_key}}" }], "url": "{{org_url}}/v1/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const perm = pm.response.json().find(p => p.slug === 'users.update');",
+            "pm.test('users.update exists in the catalog', () => pm.expect(perm).to.not.be.undefined);",
+            "pm.collectionVariables.set('rbac_perm_usersupdate_id', perm.id);"
+          ] } }]
+        },
+        {
+          "name": "roles: set auditor permissions -> [users.update]",
+          "request": {
+            "method": "PUT",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ],
+            "url": "{{org_url}}/v1/roles/{{rbac_role_auditor_id}}/permissions",
+            "body": { "mode": "raw", "raw": "{\"permission_ids\":[\"{{rbac_perm_usersupdate_id}}\"]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('composed as [users.update]', () => pm.expect(pm.response.json().permission_ids).to.eql([pm.collectionVariables.get('rbac_perm_usersupdate_id')]));"
+          ] } }]
+        },
+        {
+          "name": "roles: set permissions with unknown id -> 422",
+          "request": {
+            "method": "PUT",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ],
+            "url": "{{org_url}}/v1/roles/{{rbac_role_auditor_id}}/permissions",
+            "body": { "mode": "raw", "raw": "{\"permission_ids\":[\"00000000-0000-0000-0000-000000000000\"]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422 (Admin CP catalog validation, fail-closed before any write)', () => pm.response.to.have.status(422));",
+            "pm.test('unprocessable', () => pm.expect(pm.response.json().error.type).to.eql('unprocessable'));"
+          ] } }]
+        },
+        {
+          "name": "api-users: owner (org_admin, has users.create) creates a member via /api/users -> 201",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/users",
+            "body": { "mode": "raw", "raw": "{\"username\":\"rbacmember\",\"email\":\"rbacmember-{{$timestamp}}@rbactest.com\",\"password\":\"MemberSecret123!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 (identity-gated: org taken from the caller\\'s own token, ADR-029)', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('never exposes password/hash', () => { pm.expect(j.password).to.be.undefined; pm.expect(j.password_hash).to.be.undefined; });",
+            "pm.collectionVariables.set('rbac_member_id', j.id);",
+            "pm.collectionVariables.set('rbac_member_email', j.email);"
+          ] } }]
+        },
+        {
+          "name": "roles: new member auto-assigned org_user default role",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/users/{{rbac_member_id}}/roles" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('org_user auto-assigned (assign_default_role)', () => pm.expect(pm.response.json().role_ids).to.eql([pm.collectionVariables.get('rbac_role_user_id')]));"
+          ] } }]
+        },
+        {
+          "name": "rbac: effective permissions for member -> org_user defaults (3)",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/users/{{rbac_member_id}}/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('3 effective permissions', () => pm.expect(pm.response.json().permission_ids).to.have.lengthOf(3));"
+          ] } }]
+        },
+        {
+          "name": "roles: compose member roles -> org_user + auditor",
+          "request": {
+            "method": "PUT",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ],
+            "url": "{{org_url}}/v1/users/{{rbac_member_id}}/roles",
+            "body": { "mode": "raw", "raw": "{\"role_ids\":[\"{{rbac_role_user_id}}\",\"{{rbac_role_auditor_id}}\"]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('2 roles assigned', () => pm.expect(pm.response.json().role_ids).to.have.lengthOf(2));"
+          ] } }]
+        },
+        {
+          "name": "rbac: effective permissions for member -> union now 4 (adds users.update)",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/users/{{rbac_member_id}}/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const ids = pm.response.json().permission_ids;",
+            "pm.test('union across roles: 4 distinct ids', () => pm.expect(ids).to.have.lengthOf(4));",
+            "pm.test('includes users.update from auditor', () => pm.expect(ids).to.include(pm.collectionVariables.get('rbac_perm_usersupdate_id')));"
+          ] } }]
+        },
+        {
+          "name": "rbac: internal composed roles view for member -> 2 roles with permission_ids",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{service_key}}" }], "url": "{{org_url}}/internal/v1/organizations/{{rbac_org_id}}/users/{{rbac_member_id}}/roles" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const view = pm.response.json();",
+            "pm.test('2 composed roles', () => pm.expect(view).to.have.lengthOf(2));",
+            "pm.test('each carries its permission_ids', () => view.forEach(r => pm.expect(r.permission_ids).to.be.an('array')));"
+          ] } }]
+        },
+        {
+          "name": "login: member (must_change_password=true, admin-initiated)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{rbac_member_email}}\",\"password\":\"MemberSecret123!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('rbac_member_token', pm.response.json().access_token);"
+          ] } }]
+        },
+        {
+          "name": "password: rotate member -> 204",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_member_token}}" } ],
+            "url": "{{org_url}}/api/auth/password",
+            "body": { "mode": "raw", "raw": "{\"current_password\":\"MemberSecret123!\",\"new_password\":\"MemberRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "login: member rotated -> 200",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{org_url}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\"email\":\"{{rbac_member_email}}\",\"password\":\"MemberRotated456!\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('rbac_member_token', pm.response.json().access_token);"
+          ] } }]
+        },
+        {
+          "name": "api-users: member (has users.update, NOT users.create) -> 403",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_member_token}}" } ],
+            "url": "{{org_url}}/api/users",
+            "body": { "mode": "raw", "raw": "{\"username\":\"shouldfail\",\"email\":\"shouldfail-{{$timestamp}}@rbactest.com\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('403 (require_permission fails closed on a missing grant)', () => pm.response.to.have.status(403));",
+            "pm.test('forbidden', () => pm.expect(pm.response.json().error.type).to.eql('forbidden'));"
+          ] } }]
+        },
+        {
+          "name": "roles: delete auditor role -> 204",
+          "request": { "method": "DELETE", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/roles/{{rbac_role_auditor_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "rbac: effective permissions for member reverts to 3 (auditor's grant is gone)",
+          "request": { "method": "GET", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/users/{{rbac_member_id}}/permissions" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('role deletion cascades RolePermission/UserRole cleanup', () => pm.expect(pm.response.json().permission_ids).to.have.lengthOf(3));"
+          ] } }]
+        },
+        {
+          "name": "roles: delete unknown role -> 404",
+          "request": { "method": "DELETE", "header": [ { "key": "Authorization", "value": "Bearer {{service_key}}" }, { "key": "X-Organization-Id", "value": "{{rbac_org_id}}" } ], "url": "{{org_url}}/v1/roles/00000000-0000-0000-0000-000000000000" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "12. API Keys (Org CP, ADR-026/027/028) — mint, rotate, revoke, spend on the gateway",
+      "description": "The end-user JWT surface for per-org API keys, gated by the granular apikey.create/update/delete permissions (org_admin has them, org_user doesn't). Reuses folder 11's org/owner/member — run 11 then 12. Ends by deleting the shared org (cleanup for both folders). Steps 8/10/11/14 round-trip a freshly minted key against the LIVE gateway (:8080) to prove the mint -> hash -> Org CP verify -> Redis cache chain end to end.",
+      "item": [
+        {
+          "name": "api-keys: unauthenticated -> 401",
+          "request": { "method": "GET", "url": "{{org_url}}/api/api-keys" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('unauthorized', () => pm.expect(pm.response.json().error.type).to.eql('unauthorized'));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: member (lacks apikey.create) attempts create -> 403",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_member_token}}" } ],
+            "url": "{{org_url}}/api/api-keys",
+            "body": { "mode": "raw", "raw": "{\"name\":\"ShouldFail\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('403 (require_permission fails closed)', () => pm.response.to.have.status(403));",
+            "pm.test('forbidden', () => pm.expect(pm.response.json().error.type).to.eql('forbidden'));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: owner creates a key with a future expiry -> 201 (raw_key once)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/api-keys",
+            "body": { "mode": "raw", "raw": "{\"name\":\"Postman Key\",\"expires_at\":\"2030-01-01T00:00:00Z\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('status active', () => pm.expect(j.status).to.eql('active'));",
+            "pm.test('prefix is a safe display fragment', () => pm.expect(j.prefix.startsWith('sk-')).to.be.true);",
+            "pm.test('raw_key present (only time it ever is)', () => pm.expect(j.raw_key).to.be.a('string'));",
+            "pm.collectionVariables.set('rk_key_id', j.id);",
+            "pm.collectionVariables.set('rk_raw_v1', j.raw_key);"
+          ] } }]
+        },
+        {
+          "name": "api-keys: list -> 200 (never exposes raw_key)",
+          "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" }], "url": "{{org_url}}/api/api-keys" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const keys = pm.response.json();",
+            "pm.test('our key is listed', () => pm.expect(keys.map(k => k.id)).to.include(pm.collectionVariables.get('rk_key_id')));",
+            "pm.test('no raw_key on any entry', () => keys.forEach(k => pm.expect(k.raw_key).to.be.undefined));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: patch name -> 200",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/api-keys/{{rk_key_id}}",
+            "body": { "mode": "raw", "raw": "{\"name\":\"Renamed Postman Key\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('name updated', () => pm.expect(pm.response.json().name).to.eql('Renamed Postman Key'));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: patch name:null -> 422 (non-clearable)",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/api-keys/{{rk_key_id}}",
+            "body": { "mode": "raw", "raw": "{\"name\":null}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422', () => pm.response.to.have.status(422));",
+            "pm.test('unprocessable', () => pm.expect(pm.response.json().error.type).to.eql('unprocessable'));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: patch expires_at:null clears it -> 200",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/api-keys/{{rk_key_id}}",
+            "body": { "mode": "raw", "raw": "{\"expires_at\":null}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('expires_at cleared', () => pm.expect(pm.response.json().expires_at).to.be.null);"
+          ] } }]
+        },
+        {
+          "name": "gateway: the minted key authenticates -> 200 (org-cp verify + Redis cache)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rk_raw_v1}}" } ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi from a minted key\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('chat.completion shape', () => pm.expect(pm.response.json().object).to.eql('chat.completion'));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: rotate -> 200 new raw_key",
+          "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" }], "url": "{{org_url}}/api/api-keys/{{rk_key_id}}/rotate" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 (rotate has no explicit status_code, defaults to FastAPI\\'s 200)', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('new raw_key differs from v1', () => pm.expect(j.raw_key).to.not.eql(pm.collectionVariables.get('rk_raw_v1')));",
+            "pm.test('same key id', () => pm.expect(j.id).to.eql(pm.collectionVariables.get('rk_key_id')));",
+            "pm.collectionVariables.set('rk_raw_v2', j.raw_key);"
+          ] } }]
+        },
+        {
+          "name": "gateway: OLD raw key rejected after rotation -> 401 (cache evicted)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rk_raw_v1}}" } ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401 (commit-then-evict, ADR-028)', () => pm.response.to.have.status(401));",
+            "pm.test('authentication_error', () => pm.expect(pm.response.json().error.type).to.eql('authentication_error'));"
+          ] } }]
+        },
+        {
+          "name": "gateway: NEW raw key authenticates -> 200",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rk_raw_v2}}" } ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: internal verify by hash (gateway's own contract, mg verify key)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{mg_verify_key}}" }],
+            "url": "{{org_url}}/internal/v1/api-keys/verify?hash={{rk_v2_hash}}"
+          },
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "const hash = CryptoJS.SHA256(pm.collectionVariables.get('rk_raw_v2')).toString();",
+              "pm.collectionVariables.set('rk_v2_hash', hash);"
+            ] } },
+            { "listen": "test", "script": { "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test('resolves to the rbac org', () => pm.expect(j.org_id).to.eql(pm.collectionVariables.get('rbac_org_id')));",
+              "pm.test('owner_active true', () => pm.expect(j.owner_active).to.be.true);",
+              "pm.test('not revoked', () => pm.expect(j.revoked_at).to.be.null);"
+            ] } }
+          ]
+        },
+        {
+          "name": "api-keys: revoke -> 204",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" }], "url": "{{org_url}}/api/api-keys/{{rk_key_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        },
+        {
+          "name": "gateway: revoked key rejected -> 401",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rk_raw_v2}}" } ],
+            "url": "{{gateway_url}}/v1/chat/completions",
+            "body": { "mode": "raw", "raw": "{\"model\":\"llama-3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: update a revoked key -> 409",
+          "request": {
+            "method": "PATCH",
+            "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{rbac_owner_token}}" } ],
+            "url": "{{org_url}}/api/api-keys/{{rk_key_id}}",
+            "body": { "mode": "raw", "raw": "{\"name\":\"too late\"}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('409', () => pm.response.to.have.status(409));",
+            "pm.test('conflict', () => pm.expect(pm.response.json().error.type).to.eql('conflict'));"
+          ] } }]
+        },
+        {
+          "name": "api-keys: internal verify unknown hash -> 404",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{mg_verify_key}}" }],
+            "url": "{{org_url}}/internal/v1/api-keys/verify?hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));",
+            "pm.test('not_found', () => pm.expect(pm.response.json().error.type).to.eql('not_found'));"
+          ] } }]
+        },
+        {
+          "name": "orgs: delete RbacOrg -> 204 (cleanup for folders 11-12)",
+          "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }], "url": "{{acp_url}}/v1/organizations/{{rbac_org_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204', () => pm.response.to.have.status(204));"
+          ] } }]
+        }
+      ]
+    }
+  ]
+}

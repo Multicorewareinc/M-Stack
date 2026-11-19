@@ -22,9 +22,19 @@ from .schemas import OrgInit, OrgSummary, OrgSummaryOrganization, OrgSummaryPlan
 # must exist in that catalog (Admin CP seed.py), else seeding fails closed. org_user is read-only.
 DEFAULT_ROLE_SLUGS: dict[str, tuple[str, ...]] = {
     "org_admin": (
-        "users.read", "users.create", "users.update", "users.delete",
-        "roles.read", "roles.create", "roles.update", "roles.delete",
-        "organizations.read", "organizations.update", "apikey.manage",
+        "users.read",
+        "users.create",
+        "users.update",
+        "users.delete",
+        "roles.read",
+        "roles.create",
+        "roles.update",
+        "roles.delete",
+        "organizations.read",
+        "organizations.update",
+        "apikey.create",
+        "apikey.update",
+        "apikey.delete",
     ),
     "org_user": ("users.read", "roles.read", "organizations.read"),
 }
@@ -70,8 +80,7 @@ async def seed_default_roles(
         raise UpstreamError(f"Admin CP catalog missing permissions: {sorted(missing)}")
 
     existing = {
-        r.name: r
-        for r in await session.scalars(select(Role).where(Role.organization_id == org_id))
+        r.name: r for r in await session.scalars(select(Role).where(Role.organization_id == org_id))
     }
     for name, slugs in DEFAULT_ROLE_SLUGS.items():
         role = existing.get(name)
@@ -128,7 +137,9 @@ async def get_org_summary(
     )
     plan = await _get_org_plan(admin_client, org_id)
     return OrgSummary(
-        organization=OrgSummaryOrganization(name=org.name, slug=slugify(org.name), status=org.status),
+        organization=OrgSummaryOrganization(
+            name=org.name, slug=slugify(org.name), status=org.status
+        ),
         user_count=user_count or 0,
         role_count=role_count or 0,
         plan=plan,

@@ -1,5 +1,6 @@
 """The first-party tokenizer, installed from its chart via the Helm layer."""
-from typing import Any, Dict, List
+
+from typing import Any
 
 from ...helm import HelmRunner
 from ...kube import require_cli, require_cluster
@@ -14,26 +15,38 @@ class TiktokenDriver:
     def _helm(self, tokenizer: Tokenizer) -> HelmRunner:
         return HelmRunner(tokenizer.kubeconfig_path, error_cls=TokenizerError)
 
-    def _values(self, tokenizer: Tokenizer) -> Dict[str, Any]:
+    def _values(self, tokenizer: Tokenizer) -> dict[str, Any]:
         options = tokenizer.options
-        values: Dict[str, Any] = {
+        values: dict[str, Any] = {
             "replicaCount": tokenizer.replicas,
             "service": {"port": tokenizer.service_port},
             "config": {"tokenizerDefault": options.default_encoding},
         }
-        if options.image_tag:
-            values["image"] = {"tag": options.image_tag}
+        if options.image_tag or options.image_repository:
+            image: dict[str, Any] = {}
+            if options.image_repository:
+                image["repository"] = options.image_repository
+            if options.image_tag:
+                image["tag"] = options.image_tag
+            values["image"] = image
         # Absent leaves the chart's own default in place; an explicit {}
         # overrides it with "schedule anywhere", which is a different
         # statement and sometimes the intended one.
+        if tokenizer.affinity is not None:
+            # null, not {}, for the empty case: Helm merges user values
+            # into the chart's recursively, so an empty map adds nothing and
+            # the chart's own affinity survives -- the release installs and
+            # the pod stays Pending with the default still in force. An
+            # explicit null is what Helm treats as "delete this key".
+            values["affinity"] = tokenizer.affinity or None
         if tokenizer.node_selector is not None:
             values["nodeSelector"] = tokenizer.node_selector
         if tokenizer.tolerations is not None:
             values["tolerations"] = tokenizer.tolerations
         return values
 
-    def check_prerequisites(self, tokenizer: Tokenizer) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, tokenizer: Tokenizer) -> list[str]:
+        warnings: list[str] = []
         require_cli("helm", error_cls=TokenizerPrerequisiteError)
         require_cluster(tokenizer.kubeconfig_path, capability="a tokenizer")
 

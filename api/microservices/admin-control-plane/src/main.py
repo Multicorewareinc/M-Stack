@@ -18,11 +18,14 @@ from db import Base, build_engine, build_sessionmaker
 from fastapi import FastAPI
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from seed import seed_permissions, seed_plans
+from seed_admin import AlreadyBootstrappedError, bootstrap_super_admin
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import Response
 
 from errors import install_error_handlers
+from modules.audit.router import router as audit_router
 from modules.auth.router import router as auth_router
+from modules.invitations.router import router as invitations_router
 from modules.organizations.router import internal_router as organizations_internal_router
 from modules.organizations.router import router as organizations_router
 from modules.permissions.router import internal_router as permissions_internal_router
@@ -70,7 +73,7 @@ def create_app(
     # one is not injected. Offline tests inject an aiosqlite engine and own its lifecycle.
     owns_engine = engine is None
     if engine is None:
-        engine = build_engine(settings.database_url)
+        engine = build_engine(settings.database_url_admin)
     sessionmaker = build_sessionmaker(engine)
 
     # Owns-it outbound client to Org CP's internal API (org-creation workflow, ADR-018/AD-03).
@@ -103,6 +106,18 @@ def create_app(
         async with sessionmaker() as session:
             await seed_plans(session, settings.seed_plans)
             await seed_permissions(session, settings.seed_permissions)
+        # e2e/CI only: bootstrap a login-able super-admin. Single-use (advisory lock + empty-table
+        # guard), so a concurrent replica or a reboot is a harmless AlreadyBootstrappedError. A no-op
+        # unless both settings are set (never in production).
+        if settings.seed_admin_email and settings.seed_admin_password:
+            try:
+                await bootstrap_super_admin(
+                    settings.seed_admin_email,
+                    settings.seed_admin_password,
+                    sessionmaker=sessionmaker,
+                )
+            except AlreadyBootstrappedError:
+                pass
         yield
         if owns_engine:
             await engine.dispose()
@@ -125,11 +140,13 @@ def create_app(
     app.include_router(organizations_router)
     app.include_router(organizations_internal_router)
     app.include_router(user_provisioning_router)
+    app.include_router(invitations_router)
     app.include_router(permissions_router)
     app.include_router(permissions_internal_router)
     app.include_router(user_directory_router)
     app.include_router(user_directory_platform_router)
     app.include_router(platform_summary_router)
+    app.include_router(audit_router)
 
     @app.get("/health", tags=["ops"])
     async def health() -> dict:

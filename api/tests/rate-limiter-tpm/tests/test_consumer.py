@@ -1,14 +1,15 @@
 """Covers specs/rate-limiter-tpm/spec.md: the consumer's plain usage-read decision tree
 (ADR-030 — no tokenizer fallback in this service), that non-response events are ignored,
-start/reconnect resilience (ADR-016), and the AD-07 startup validation of the
-enriched-subject dependency."""
+start resilience (ADR-016), and the AD-07 startup validation of the enriched-subject
+dependency.
+
+Post-ADR-033 the handler receives an already-deserialized dict and never acknowledges — the
+multistack.queue SDK owns deserialization and ack (AckMode.ALWAYS here), so these tests call
+`_on_msg(event)` directly with a plain dict."""
 
 from __future__ import annotations
 
-import json
-import sys
 import time
-import types
 
 import pytest
 
@@ -16,21 +17,12 @@ from main import create_app
 from settings import Settings
 
 
-class FakeMsg:
-    def __init__(self, event: dict) -> None:
-        self.data = json.dumps(event).encode()
-        self.acked = False
-
-    async def ack(self) -> None:
-        self.acked = True
-
-
 def _minute() -> int:
     return int(time.time()) // 60
 
 
 async def test_usage_present_counts_total_tokens(consumer_factory):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}')
     event = {
         "type": "response",
         "request_id": "req-1",
@@ -38,14 +30,12 @@ async def test_usage_present_counts_total_tokens(consumer_factory):
         "model": "m1",
         "usage": {"total_tokens": 150, "source": "provider"},
     }
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
+    await consumer._on_msg(event)
     assert redis.store[f"rl:tpm:user:u1:{_minute()}"] == 150
-    assert msg.acked
 
 
 async def test_usage_estimated_source_counts_same_as_provider(consumer_factory):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}')
     event = {
         "type": "response",
         "request_id": "req-2b",
@@ -53,15 +43,13 @@ async def test_usage_estimated_source_counts_same_as_provider(consumer_factory):
         "model": "m1",
         "usage": {"total_tokens": 42, "source": "estimated"},
     }
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
+    await consumer._on_msg(event)
     # Identical treatment to a source:"provider" event — the consumer never branches on source.
     assert redis.store[f"rl:tpm:user:u1:{_minute()}"] == 42
-    assert msg.acked
 
 
 async def test_usage_source_none_skips_counting(consumer_factory):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}')
     event = {
         "type": "response",
         "request_id": "req-3",
@@ -69,23 +57,19 @@ async def test_usage_source_none_skips_counting(consumer_factory):
         "model": "m1",
         "usage": {"total_tokens": None, "source": "none", "reason": "no_body"},
     }
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
+    await consumer._on_msg(event)
     assert redis.store == {}
-    assert msg.acked
 
 
 async def test_usage_key_missing_entirely_skips_counting(consumer_factory):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}')
     event = {"type": "response", "request_id": "req-3b", "principal": "u1", "model": "m1"}
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
+    await consumer._on_msg(event)
     assert redis.store == {}
-    assert msg.acked
 
 
 async def test_total_tokens_non_numeric_skips_counting(consumer_factory):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}')
     event = {
         "type": "response",
         "request_id": "req-3c",
@@ -93,10 +77,8 @@ async def test_total_tokens_non_numeric_skips_counting(consumer_factory):
         "model": "m1",
         "usage": {"total_tokens": "not-a-number", "source": "none"},
     }
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
+    await consumer._on_msg(event)
     assert redis.store == {}
-    assert msg.acked
 
 
 def test_no_tokenizer_dependency_exists():
@@ -115,89 +97,69 @@ def test_no_tokenizer_dependency_exists():
 
 
 async def test_request_event_is_not_counted_but_acked(consumer_factory):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}')
     event = {
         "type": "request",
         "request_id": "req-5",
         "principal": "u1",
         "model": "m1",
     }
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
+    await consumer._on_msg(event)
     assert redis.store == {}
-    assert msg.acked
 
 
-# --- start()/reconnect fakes (ADR-016) ------------------------------------------------------
+# --- start() fakes (ADR-016) over the multistack.queue SDK (ADR-033) -----------------------
 
-class FakeSub:
-    def __init__(self):
-        self.unsubscribed = False
+class FakeQueue:
+    """A fake multistack.queue.Queue: subscribe succeeds or raises to exercise the
+    durable-conflict / transient classification."""
 
-    async def unsubscribe(self):
-        self.unsubscribed = True
+    name = "nats"
 
-
-class FakeJS:
     def __init__(self, *, subscribe_error=None):
         self._subscribe_error = subscribe_error
         self.subscribe_calls = 0
+        self.bindings = []
+        self.closed = False
+        self.connected = True
 
-    async def add_stream(self, **kwargs):
+    async def connect(self):
         return None
 
-    async def subscribe(self, *args, **kwargs):
+    async def subscribe(self, binding, handler):
         self.subscribe_calls += 1
+        self.bindings.append(binding)
         if self._subscribe_error is not None:
             raise self._subscribe_error
-        return FakeSub()
+        return object()
+
+    async def close(self):
+        self.closed = True
 
 
-class FakeNC:
-    def __init__(self, *, connected=True, js=None):
-        self.is_connected = connected
-        self._js = js or FakeJS()
+def _install_fake_queue(monkeypatch, *, queue=None, connect_error=None):
+    """Patch multistack.queue.Queue so start()/_retry_connect resolve without a live
+    backbone. The consumer imports Queue/QueueConfig lazily inside those methods."""
+    import multistack.queue as mq
 
-    def jetstream(self):
-        return self._js
+    class _FakeQueueFactory:
+        def __init__(self, config):
+            self._q = queue
 
-    async def drain(self):
-        pass
+        async def connect(self):
+            if connect_error is not None:
+                raise connect_error
+            return None
 
+        def __getattr__(self, item):
+            return getattr(self._q, item)
 
-def _install_fake_nats(monkeypatch, *, nc=None, connect_error=None):
-    mod = types.ModuleType("nats")
-    captured = {}
-
-    async def connect(url, **kwargs):
-        captured.update(kwargs)
-        if connect_error is not None:
-            raise connect_error
-        return nc
-
-    mod.connect = connect
-    js_api = types.ModuleType("nats.js.api")
-
-    class DeliverPolicy:
-        NEW = "new"
-
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
-            pass
-
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
-    return captured
+    monkeypatch.setattr(mq, "Queue", _FakeQueueFactory)
 
 
 async def test_durable_conflict_is_classified_and_inactive(consumer_factory, monkeypatch, caplog):
-    consumer, _service, _redis = consumer_factory(rate_limits='{"user_default":1000}')
-    _install_fake_nats(
-        monkeypatch, nc=FakeNC(connected=True, js=FakeJS(subscribe_error=Exception("consumer already exists")))
-    )
+    consumer, _service, _redis = consumer_factory(tpm_rate_limits='{"user_default":1000}', event_backbone_url="nats://test")
+    _install_fake_queue(monkeypatch, queue=FakeQueue(subscribe_error=Exception("consumer already exists")))
     with caplog.at_level("WARNING"):
         await consumer.start()  # must not raise
     assert consumer.active is False
@@ -206,48 +168,38 @@ async def test_durable_conflict_is_classified_and_inactive(consumer_factory, mon
 
 
 async def test_start_leaves_inactive_on_connect_failure_without_crashing(consumer_factory, monkeypatch):
-    # nats-py has no first-connect retry option (retry_on_failed_connect was never a real
-    # parameter, at any version) -- connect() raises immediately when the backbone is down.
-    # start() must swallow that, stay inactive, and schedule a background retry rather than
-    # crash or give up forever.
-    consumer, _service, _redis = consumer_factory(rate_limits='{"user_default":1000}')
-    _install_fake_nats(monkeypatch, connect_error=ConnectionRefusedError("nats down"))
+    # A backbone that fails to connect must be swallowed: stay inactive, schedule a
+    # background retry, never crash or give up forever.
+    consumer, _service, _redis = consumer_factory(tpm_rate_limits='{"user_default":1000}', event_backbone_url="nats://test")
+    _install_fake_queue(monkeypatch, connect_error=ConnectionRefusedError("backbone down"))
     scheduled = []
     monkeypatch.setattr("consumer.asyncio.create_task", lambda coro: scheduled.append(coro) or coro.close())
     await consumer.start()
     assert consumer.active is False
-    assert consumer._nc is None
+    assert consumer._queue is None
     assert len(scheduled) == 1
 
 
 async def test_retry_connect_recovers_after_repeated_failures(consumer_factory, monkeypatch):
-    consumer, _service, _redis = consumer_factory(rate_limits='{"user_default":1000}')
-    js = FakeJS()
-    nc = FakeNC(connected=True, js=js)
+    consumer, _service, _redis = consumer_factory(tpm_rate_limits='{"user_default":1000}', event_backbone_url="nats://test")
+    queue = FakeQueue()
     calls = {"n": 0}
 
-    async def flaky_connect(url, **kwargs):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise ConnectionRefusedError("nats down")
-        return nc
-
-    mod = types.ModuleType("nats")
-    mod.connect = flaky_connect
-    js_api = types.ModuleType("nats.js.api")
-
-    class DeliverPolicy:
-        NEW = "new"
-
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
+    class _FlakyQueue:
+        def __init__(self, config):
             pass
 
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
+        async def connect(self):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionRefusedError("backbone down")
+
+        def __getattr__(self, item):
+            return getattr(queue, item)
+
+    import multistack.queue as mq
+
+    monkeypatch.setattr(mq, "Queue", _FlakyQueue)
 
     async def instant_sleep(_seconds):
         return None
@@ -260,32 +212,29 @@ async def test_retry_connect_recovers_after_repeated_failures(consumer_factory, 
     assert consumer.active is True
 
 
-async def test_reconnect_rebinds_and_restores_active(consumer_factory, monkeypatch):
-    consumer, _service, redis = consumer_factory(rate_limits='{"user_default":1000}')
-    js = FakeJS()
-    nc = FakeNC(connected=False, js=js)
-    _install_fake_nats(monkeypatch, nc=nc)
+async def test_bind_uses_the_nack_provisioned_consumer(consumer_factory, monkeypatch):
+    """The binding names the enriched stream + durable and asks for ALWAYS ack (soft-ack);
+    the subject/deliver policy/max_deliver live in the NACK consumer, not here."""
+    from multistack.queue.drivers.nats.messaging import AckMode
+
+    consumer, _service, redis = consumer_factory(tpm_rate_limits='{"user_default":1000}', event_backbone_url="nats://test")
+    queue = FakeQueue()
+    _install_fake_queue(monkeypatch, queue=queue)
+
     await consumer.start()
-    assert consumer.active is False
-
-    nc.is_connected = True
-    await consumer._on_reconnected()
     assert consumer.active is True
+    assert queue.subscribe_calls == 1
+    binding = queue.bindings[0]
+    assert binding.stream == "GATEWAY_EVENTS_ENRICHED"
+    assert binding.durable == "tpm-counter-enriched"
+    assert binding.ack_mode is AckMode.ALWAYS
 
-    # Counting resumes: a response event with usage is now counted.
+    # Counting works once bound.
     await consumer._on_msg(
-        FakeMsg({"type": "response", "request_id": "r1", "principal": "u1", "model": "m1",
-                 "usage": {"total_tokens": 150, "source": "provider"}})
+        {"type": "response", "request_id": "r1", "principal": "u1", "model": "m1",
+         "usage": {"total_tokens": 150, "source": "provider"}}
     )
     assert redis.store[f"rl:tpm:user:u1:{_minute()}"] == 150
-
-    # A later reconnect drains the live sub before rebinding (no duplicate JS push binding).
-    live = consumer._sub
-    await consumer._on_reconnected()
-    assert live.unsubscribed is True
-    assert consumer.active is True
-    assert js.subscribe_calls == 2
-
 
 # --- AD-07 startup validation of the enriched-subject dependency ---------------------------
 

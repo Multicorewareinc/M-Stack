@@ -24,7 +24,7 @@ bare `namespace` field.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ...helm import HelmRelease, HelmRunner
 from ...kube import (
@@ -35,6 +35,7 @@ from ...kube import (
     wait_for,
     wait_for_absent,
 )
+from ...vault.client import default_vault_client
 from ..base import (
     DatabaseClusterNotFoundError,
     DatabaseError,
@@ -42,7 +43,6 @@ from ..base import (
     DatabaseTimeoutError,
 )
 from ..spec import Database
-
 
 CLUSTER_GROUP = "postgresql.cnpg.io"
 CLUSTER_VERSION = "v1"
@@ -204,6 +204,7 @@ class CNPGDriver:
                 f"[{self.log_prefix}] cluster {cnpg.name} already exists "
                 f"in {cnpg.resolved_namespace}"
             )
+            self._store_vault_secret(cnpg)
             return cnpg
 
         self._ensure_namespace(cnpg)
@@ -218,6 +219,7 @@ class CNPGDriver:
             f"{cnpg.resolved_namespace} at {cnpg.endpoint}"
         )
 
+        self._store_vault_secret(cnpg)
         return cnpg
 
     def update_cluster(
@@ -283,8 +285,7 @@ class CNPGDriver:
             )
 
             print(
-                f"[{self.log_prefix}] deleting cluster {cnpg.name} from "
-                f"{cnpg.resolved_namespace}"
+                f"[{self.log_prefix}] deleting cluster {cnpg.name} from {cnpg.resolved_namespace}"
             )
 
             if wait:
@@ -315,7 +316,7 @@ class CNPGDriver:
 
         return bool(output.strip())
 
-    def cluster_status(self, cnpg: Database) -> Dict[str, Any]:
+    def cluster_status(self, cnpg: Database) -> dict[str, Any]:
         """Return the PostgreSQL Cluster resource as a dictionary."""
         cnpg.validate_cluster_identity()
 
@@ -341,8 +342,7 @@ class CNPGDriver:
             return json.loads(output)
         except json.JSONDecodeError as exc:
             raise DatabaseError(
-                f"Failed to parse status for CloudNativePG "
-                f"Cluster '{cnpg.name}'."
+                f"Failed to parse status for CloudNativePG Cluster '{cnpg.name}'."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -367,9 +367,7 @@ class CNPGDriver:
                 _is_ready,
                 timeout=cnpg.ready_timeout,
                 interval=cnpg.ready_poll_interval,
-                description=(
-                    f"CNPG Cluster '{cnpg.name}' to become ready"
-                ),
+                description=(f"CNPG Cluster '{cnpg.name}' to become ready"),
             )
         except TimeoutError as exc:
             raise DatabaseTimeoutError(
@@ -464,9 +462,7 @@ class CNPGDriver:
         )
 
         if not output.strip():
-            raise DatabasePrerequisiteError(
-                f"CloudNativePG CRD '{cnpg.crd_name}' was not found."
-            )
+            raise DatabasePrerequisiteError(f"CloudNativePG CRD '{cnpg.crd_name}' was not found.")
 
     def _ensure_namespace(self, cnpg: Database) -> None:
         """Create the PostgreSQL Cluster namespace if necessary."""
@@ -508,10 +504,7 @@ class CNPGDriver:
         )
 
         if not output.strip():
-            print(
-                f"[{self.log_prefix}] namespace {cnpg.operator_namespace} "
-                f"is already absent"
-            )
+            print(f"[{self.log_prefix}] namespace {cnpg.operator_namespace} is already absent")
             return
 
         self._kubectl(
@@ -522,16 +515,13 @@ class CNPGDriver:
             "--ignore-not-found=true",
         )
 
-        print(
-            f"[{self.log_prefix}] deleted namespace {cnpg.operator_namespace}"
-        )
+        print(f"[{self.log_prefix}] deleted namespace {cnpg.operator_namespace}")
 
     def _apply_secret(self, cnpg: Database) -> None:
         """Create or update the PostgreSQL bootstrap Secret."""
         if cnpg.database is None:
             raise DatabaseError(
-                "Database configuration is required to create "
-                "the PostgreSQL bootstrap Secret."
+                "Database configuration is required to create the PostgreSQL bootstrap Secret."
             )
 
         manifest = {
@@ -555,6 +545,30 @@ class CNPGDriver:
             manifest,
             timeout=self.command_timeout,
             error_cls=DatabaseError,
+        )
+
+    def _store_vault_secret(self, cnpg: Database) -> None:
+        """Pushes this cluster's owner/password into Vault, keyed by the
+        cluster's own name -- a no-op when no Vault exists at all (see
+        multistack/vault/client.py). Called on both paths out of
+        create_cluster(): the one that just bootstrapped the role and
+        the one that found a cluster already there, so a Vault stood up
+        *after* this database still ends up holding its credential on
+        the next create_cluster() call rather than only on the first
+        one ever to run.
+        """
+        default_vault_client().store_secret(
+            f"database/{cnpg.name}",
+            {
+                "owner": cnpg.database.owner,
+                "password": cnpg.database.password.get_secret_value(),
+            },
+            # Same name DatabaseBackend's own
+            # @track_create("database", name_of=lambda database: database.name)
+            # records this cluster under (registry.py), so
+            # StateManager.mark_secret_stored lands on the row that
+            # call already owns.
+            deployment_name=cnpg.name,
         )
 
     def _delete_secret(self, cnpg: Database) -> None:
@@ -583,17 +597,16 @@ class CNPGDriver:
     def _build_cluster_manifest(
         self,
         cnpg: Database,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build the CloudNativePG Cluster manifest."""
         cnpg.validate_cluster()
 
         if cnpg.database is None:
             raise DatabaseError(
-                "Database configuration is required to build "
-                "the PostgreSQL Cluster manifest."
+                "Database configuration is required to build the PostgreSQL Cluster manifest."
             )
 
-        storage: Dict[str, Any] = {
+        storage: dict[str, Any] = {
             "size": cnpg.storage_size,
         }
 
@@ -603,7 +616,7 @@ class CNPGDriver:
         # CloudNativePG emits no scheduling constraints of its own, so
         # whatever the spec carries is the only thing keeping Postgres
         # off the control plane.
-        scheduling: Dict[str, Any] = {}
+        scheduling: dict[str, Any] = {}
         if cnpg.affinity:
             scheduling["affinity"] = cnpg.affinity
         if cnpg.node_selector:
@@ -644,7 +657,7 @@ class CNPGDriver:
     def _find_operator_release(
         self,
         cnpg: Database,
-    ) -> Optional[HelmRelease]:
+    ) -> HelmRelease | None:
         """Return the existing operator Helm release, if present."""
         runner = self._helm_runner(cnpg)
 
@@ -683,7 +696,7 @@ class CNPGDriver:
 
     def _local(
         self,
-        argv: List[str],
+        argv: list[str],
         check: bool = True,
     ) -> str:
         """Execute a local command."""

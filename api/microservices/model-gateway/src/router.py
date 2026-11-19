@@ -42,7 +42,9 @@ v1 = APIRouter(prefix="/v1", dependencies=[Depends(verify_api_key), Depends(enfo
 
 def _to_response(result: Result):
     if result.stream is not None:
-        return StreamingResponse(result.stream, status_code=result.status_code, media_type=result.media_type)
+        return StreamingResponse(
+            result.stream, status_code=result.status_code, media_type=result.media_type
+        )
     return JSONResponse(status_code=result.status_code, content=result.body)
 
 
@@ -86,18 +88,28 @@ async def _respond(request: Request, payload: dict, result_coro: Awaitable[Resul
         result = await result_coro
     except Exception as exc:
         status = exc.status_code if isinstance(exc, AppError) else 500
-        pub.emit(events.response_event(
-            ctx, status=status, usage=None,
-            duration_ms=(time.monotonic() - start) * 1000, stream=False,
-        ))
+        pub.emit(
+            events.response_event(
+                ctx,
+                status=status,
+                usage=None,
+                duration_ms=(time.monotonic() - start) * 1000,
+                stream=False,
+            )
+        )
         raise  # the installed error handler builds the client body, unchanged
 
     if result.stream is None:
-        pub.emit(events.response_event(
-            ctx, status=result.status_code, usage=_usage(result.body),
-            duration_ms=(time.monotonic() - start) * 1000, stream=False,
-            body=result.body if capture else None,
-        ))
+        pub.emit(
+            events.response_event(
+                ctx,
+                status=result.status_code,
+                usage=_usage(result.body),
+                duration_ms=(time.monotonic() - start) * 1000,
+                stream=False,
+                body=result.body if capture else None,
+            )
+        )
         return JSONResponse(status_code=result.status_code, content=result.body)
 
     async def tee():
@@ -105,6 +117,12 @@ async def _respond(request: Request, payload: dict, result_coro: Awaitable[Resul
         usage: dict | None = None
         terminal = False
         buf = b""
+        # Assembled assistant text, mirroring the non-stream path's `body=result.body if capture
+        # else None` — the enricher's tokenizer fallback (resolve_usage -> _extract_text) needs
+        # SOME body when the upstream never sends a numeric `usage` in-stream (the common case;
+        # see mock-upstream/most real providers), or every streamed response silently gets
+        # source="none"/reason="no_body" and TPM never counts it at all.
+        text_parts: list[str] = [] if capture else None
         try:
             async for chunk in result.stream:
                 yield chunk  # client first — TTFT untouched
@@ -114,17 +132,41 @@ async def _respond(request: Request, payload: dict, result_coro: Awaitable[Resul
                 for line in lines:
                     usage = usage or events.usage_from_sse_line(line)
                     terminal = terminal or events.is_terminal(line)
-            pub.emit(events.response_event(
-                ctx, status=result.status_code, usage=usage,
-                duration_ms=(time.monotonic() - start) * 1000, stream=True,
-                partial=not terminal, chunks=seq,
-            ))
+                    if capture:
+                        piece = events.delta_text_from_sse_line(line)
+                        if piece:
+                            text_parts.append(piece)
+            body = (
+                {"choices": [{"message": {"content": "".join(text_parts)}}]} if text_parts else None
+            )
+            pub.emit(
+                events.response_event(
+                    ctx,
+                    status=result.status_code,
+                    usage=usage,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    stream=True,
+                    partial=not terminal,
+                    chunks=seq,
+                    body=body,
+                )
+            )
         except BaseException:  # abort / client disconnect / upstream stream error
-            pub.emit(events.response_event(
-                ctx, status=result.status_code, usage=usage,
-                duration_ms=(time.monotonic() - start) * 1000, stream=True,
-                partial=True, chunks=seq,
-            ))
+            body = (
+                {"choices": [{"message": {"content": "".join(text_parts)}}]} if text_parts else None
+            )
+            pub.emit(
+                events.response_event(
+                    ctx,
+                    status=result.status_code,
+                    usage=usage,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    stream=True,
+                    partial=True,
+                    chunks=seq,
+                    body=body,
+                )
+            )
             raise
         # NB: completion event fires exactly once — try-end OR except, never a finally.
 
@@ -135,8 +177,11 @@ async def _respond(request: Request, payload: dict, result_coro: Awaitable[Resul
 async def chat_completions(request: Request):
     payload = await _payload(request)
     return await _respond(
-        request, payload,
-        request.app.state.service.chat_completions(payload, stream=bool(payload.get("stream", False))),
+        request,
+        payload,
+        request.app.state.service.chat_completions(
+            payload, stream=bool(payload.get("stream", False))
+        ),
     )
 
 
@@ -144,7 +189,8 @@ async def chat_completions(request: Request):
 async def completions(request: Request):
     payload = await _payload(request)
     return await _respond(
-        request, payload,
+        request,
+        payload,
         request.app.state.service.completions(payload, stream=bool(payload.get("stream", False))),
     )
 

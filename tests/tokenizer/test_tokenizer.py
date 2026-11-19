@@ -1,4 +1,5 @@
 """The tokenizer capability: spec, wiring, and the tiktoken driver."""
+
 import pytest
 
 from multistack.stack import CAPABILITY_OUTPUT, Stack
@@ -90,9 +91,7 @@ def test_it_publishes_the_key_tpm_reads():
 def test_recording_it_publishes_the_url():
     stack = Stack(KUBECONFIG)
     stack.record(spec())
-    assert stack._values["tokenizer_url"] == (
-        "http://tokenizer.policy.svc.cluster.local:8000"
-    )
+    assert stack._values["tokenizer_url"] == ("http://tokenizer.policy.svc.cluster.local:8000")
 
 
 # -- driver ---------------------------------------------------------------
@@ -144,12 +143,11 @@ def test_delete_uninstalls_and_tolerates_absence(driver, calls):
 def test_a_missing_cluster_stops_create(driver, monkeypatch):
     monkeypatch.setattr(tk, "require_cli", lambda *a, **k: None)
     monkeypatch.setattr(
-        tk, "require_cluster",
+        tk,
+        "require_cluster",
         lambda *a, **k: (_ for _ in ()).throw(TokenizerPrerequisiteError("no")),
     )
-    monkeypatch.setattr(
-        driver, "_helm", lambda t: pytest.fail("helm must not run")
-    )
+    monkeypatch.setattr(driver, "_helm", lambda t: pytest.fail("helm must not run"))
     with pytest.raises(TokenizerPrerequisiteError):
         driver.create(spec())
 
@@ -163,9 +161,7 @@ def test_a_missing_cluster_stops_create(driver, monkeypatch):
 
 def test_a_node_selector_reaches_the_chart(driver, calls):
     driver.create(spec(node_selector={"kubernetes.io/hostname": "rke2-wrk-2"}))
-    assert _install(calls)["values"]["nodeSelector"] == {
-        "kubernetes.io/hostname": "rke2-wrk-2"
-    }
+    assert _install(calls)["values"]["nodeSelector"] == {"kubernetes.io/hostname": "rke2-wrk-2"}
 
 
 def test_no_node_selector_means_the_key_is_absent(driver, calls):
@@ -181,7 +177,38 @@ def test_an_empty_node_selector_is_sent_as_a_deliberate_override(driver, calls):
 
 
 def test_tolerations_reach_the_chart(driver, calls):
-    tol = [{"key": "dedicated", "operator": "Equal", "value": "platform",
-            "effect": "NoSchedule"}]
+    tol = [{"key": "dedicated", "operator": "Equal", "value": "platform", "effect": "NoSchedule"}]
     driver.create(spec(tolerations=tol))
     assert _install(calls)["values"]["tolerations"] == tol
+
+
+# -- affinity ------------------------------------------------------------
+# The chart's own default is `control-plane DoesNotExist`, which no node in
+# a single-node cluster can satisfy -- there the only node IS the control
+# plane, so the release installs and the pod never schedules. An explicit
+# {} is how such a cluster says "anywhere" on purpose.
+
+
+def test_an_affinity_reaches_the_chart(driver, calls):
+    anywhere = {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": []}}
+    driver.create(spec(affinity=anywhere))
+    assert _install(calls)["values"]["affinity"] == anywhere
+
+
+def test_no_affinity_means_the_key_is_absent(driver, calls):
+    driver.create(spec())
+    assert "affinity" not in _install(calls)["values"]
+
+
+def test_an_empty_affinity_is_sent_as_null_not_an_empty_map(driver, calls):
+    """The single-node case, and why it is null rather than {}.
+
+    Helm merges user values into the chart's recursively, so an empty map
+    contributes nothing and the chart's own affinity survives untouched --
+    the release installs, Helm reports success, and the pod stays Pending
+    with the control-plane exclusion still in force. Observed exactly that
+    way on a one-node cluster. null is what Helm deletes a key for.
+    """
+    driver.create(spec(affinity={}))
+    values = _install(calls)["values"]
+    assert "affinity" in values and values["affinity"] is None

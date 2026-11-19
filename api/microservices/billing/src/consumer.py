@@ -1,4 +1,5 @@
-"""NATS JetStream consumer — billing's metering strain (ADR-031).
+"""Event-backbone consumer — billing's metering strain (ADR-031), over the multistack.queue
+SDK seam (ADR-033).
 
 Durable consumer of `gateway.events.enriched` (stream GATEWAY_EVENTS_ENRICHED, produced by
 the `enricher` service, ADR-030). For each `response` event it opens a FRESH AsyncSession
@@ -16,14 +17,17 @@ already-processed no-op ONLY when it is specifically the request_id constraint �
 integrity failure (or any commit-time fault) is a genuine error and does NOT ack, so
 JetStream redelivers rather than silently swallowing a data problem as harmless redelivery.
 
-Resilience mirrors rate-limiter-tpm/enricher (ADR-016): lazy `nats` import,
-`retry_on_failed_connect`, rebind on reconnect, failure-isolated.
+Queue I/O goes through the multistack.queue SDK (ADR-033), not a backend client: the SDK is
+imported lazily (offline tests degrade gracefully) and owns deserialization, acknowledgement
+and reconnection. The durable consumer is provisioned externally by NACK — this service binds
+to it and never creates streams or consumers. Under AckMode.ON_SUCCESS a handler that returns
+is acked and a handler that RAISES is redelivered, which is how the no-ack-on-genuine-fault
+rule above is now expressed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
 
@@ -32,6 +36,15 @@ from prometheus_client import Counter, Gauge
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
+
+# How long startup may wait for the backbone before giving up and handing off to the
+# background retry. The SDK retries its INITIAL connect internally and indefinitely
+# (NatsConfig.retry_on_initial_connect defaults to True, 1s->30s backoff) and QueueConfig
+# exposes no knob to turn that off — so `await queue.connect()` on an unreachable backbone
+# never returns, which would hang lifespan startup and leave the service not listening at
+# all. Bounding it keeps ADR-016's promise: a down backbone leaves the consumer inactive,
+# never blocks or crashes startup. _retry_connect() below owns the waiting instead.
+_CONNECT_TIMEOUT_SECONDS = 10
 
 # Module-level (not per-instance) so repeated create_app() in tests never double-registers.
 USAGE_PERSISTED = Counter(
@@ -65,109 +78,97 @@ def _is_request_id_violation(exc: IntegrityError) -> bool:
     return _UNIQUE_MARKER in text and _REQUEST_ID_CONSTRAINT_MARKER in text
 
 
+class _PersistError(Exception):
+    """Raised when persisting a usage event genuinely fails, to withhold the ack.
+
+    Under AckMode.ON_SUCCESS the SDK acks only when the handler returns, so raising is how
+    this consumer asks for redelivery — the successor to the old "do not call msg.ack()"
+    path (ADR-031 D4). Deliberately NOT raised for an already-processed request_id, which is
+    a no-op, not a failure."""
+
+
 class BillingConsumer:
-    def __init__(self, settings, sessionmaker) -> None:
+    def __init__(self, settings, sessionmaker, *, queue=None) -> None:
         self._url = settings.event_backbone_url
+        self._backend = settings.queue_backend
         self._stream = settings.event_stream_name
-        self._subject = settings.event_stream_subject
         self._durable = settings.event_durable_name
         self._sessionmaker = sessionmaker
-        self._nc = None
-        self._sub = None
+        self._queue = queue  # test override; production builds it in start()
+        self._bound = False
+        # Hold a strong ref to the background retry task: the loop keeps only a weak
+        # reference, so an un-stored task can be GC'd mid-backoff (RUF006).
+        self._retry_task: asyncio.Task | None = None
 
     @property
     def active(self) -> bool:
-        return self._sub is not None
+        return self._bound
 
     async def start(self) -> None:
         """Best-effort connect. A down backbone leaves the consumer inactive (metering paused,
         never silently dropped — messages simply queue on the retained stream) rather than
         crashing startup, while a background task keeps retrying until it succeeds — see
-        _retry_connect().
-
-        FIXED: this used to pass retry_on_failed_connect=True to nats.connect() expecting it
-        to retry a down-at-startup backbone in the background. That parameter has never
-        existed in nats-py, at any version (confirmed by inspecting Client.connect()'s actual
-        signature and by searching nats.py's full commit history) — so connect() always
-        raised immediately instead, and this consumer never bound, ever, unless NATS happened
-        to be reachable at the exact moment start() ran. Native reconnect (max_reconnect_
-        attempts=-1) only takes over after a first successful connect, so it never engaged
-        either. _retry_connect() below is what actually covers the down-at-startup case."""
+        _retry_connect(). Reconnect after a first successful connect is the SDK's own job."""
         try:
-            import nats  # lazy: offline tests / inert path don't need nats-py
+            from multistack.queue import Queue, QueueConfig  # lazy: offline tests degrade
 
-            self._nc = await nats.connect(
-                self._url,
-                reconnected_cb=self._on_reconnected,
-                disconnected_cb=self._on_disconnected,
-                max_reconnect_attempts=-1,
-            )
+            queue = Queue(QueueConfig(name=self._backend, url=self._url))
+            await asyncio.wait_for(queue.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
+            self._queue = queue
         except Exception:
             logger.warning("billing_consumer_connect_failed_retrying", exc_info=True)
-            self._nc = None
-            asyncio.create_task(self._retry_connect())
+            self._queue = None
+            self._retry_task = asyncio.create_task(self._retry_connect())
             return
-        if getattr(self._nc, "is_connected", False):
-            await self._bind()
+        await self._bind()
 
     async def _retry_connect(self) -> None:
         """Background retry for a backbone that was down when start() ran. Capped exponential
         backoff (1s, 2s, 4s, ... up to 30s) until connect() succeeds, then binds directly."""
-        import nats
-
         delay = 1
-        while self._nc is None:
+        while self._queue is None:
             await asyncio.sleep(delay)
             try:
-                self._nc = await nats.connect(
-                    self._url,
-                    reconnected_cb=self._on_reconnected,
-                    disconnected_cb=self._on_disconnected,
-                    max_reconnect_attempts=-1,
-                )
+                from multistack.queue import Queue, QueueConfig
+
+                queue = Queue(QueueConfig(name=self._backend, url=self._url))
+                await queue.connect()
+                self._queue = queue
             except Exception:
                 delay = min(delay * 2, 30)
         await self._bind()
 
     async def _bind(self) -> None:
-        """Single bind path (used by start() and the reconnect handler): create the stream
-        (idempotent) and subscribe the durable consumer, classifying failures."""
-        from nats.js.api import ConsumerConfig, DeliverPolicy
+        """Bind to the NACK-provisioned durable consumer, classifying failures.
 
-        js = self._nc.jetstream()
-        try:  # the enricher also creates this; add_stream is idempotent
-            await js.add_stream(name=self._stream, subjects=[self._subject])
-        except Exception:
-            logger.info("billing_stream_exists", extra={"stream": self._stream})
+        AckMode.ON_SUCCESS is what preserves ADR-031's metering guarantee: the SDK acks only
+        when the handler returns, so a handler that RAISES leaves the message unacknowledged
+        and the backbone redelivers it. That is how a genuine persistence fault avoids
+        silently dropping billable usage."""
         try:
-            self._sub = await js.subscribe(
-                self._subject,
-                durable=self._durable,
-                cb=self._on_msg,
-                manual_ack=True,
-                config=ConsumerConfig(deliver_policy=DeliverPolicy.NEW),
+            from multistack.queue.drivers.nats.messaging import AckMode, ConsumerBinding
+
+            await self._queue.subscribe(
+                ConsumerBinding(
+                    stream=self._stream,
+                    durable=self._durable,
+                    ack_mode=AckMode.ON_SUCCESS,
+                ),
+                self._on_msg,
             )
-            logger.info("billing_consumer_started", extra={"subject": self._subject, "durable": self._durable})
+            self._bound = True
+            logger.info(
+                "billing_consumer_started", extra={"stream": self._stream, "durable": self._durable}
+            )
         except Exception as exc:
-            self._sub = None
+            self._bound = False
             text = str(exc).lower()
             if "already" in text and ("exist" in text or "bound" in text or "in use" in text):
-                logger.warning("billing_consumer_durable_conflict", exc_info=True)  # another replica holds it
+                logger.warning(
+                    "billing_consumer_durable_conflict", exc_info=True
+                )  # another replica holds it
             else:
                 logger.warning("billing_consumer_bind_failed", exc_info=True)
-
-    async def _on_reconnected(self) -> None:
-        if self._sub is not None:
-            try:
-                await self._sub.unsubscribe()
-            except Exception:
-                logger.warning("billing_resubscribe_drain_failed", exc_info=True)
-            self._sub = None
-        await self._bind()
-
-    async def _on_disconnected(self) -> None:
-        self._sub = None
-        logger.warning("billing_consumer_disconnected")
 
     async def _persist(self, event: dict) -> bool:
         """Write the usage (+ outbox, if countable) row(s) for one event. Returns True if the
@@ -197,7 +198,9 @@ class BillingConsumer:
                 source=source,
                 reason=reason,
                 prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
-                completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                completion_tokens=(
+                    usage.get("completion_tokens") if isinstance(usage, dict) else None
+                ),
                 ts=ts,
             )
             session.add(usage_row)
@@ -236,32 +239,32 @@ class BillingConsumer:
         finally:
             await session.close()
 
-    async def _on_msg(self, msg) -> None:
-        try:
-            event = json.loads(msg.data)
-        except Exception:
-            logger.warning("billing_unparseable_acked", exc_info=True)
-            await self._safe_ack(msg)
-            return
+    async def _on_msg(self, event: dict) -> None:
+        """Handle one already-deserialized enriched event.
 
-        if not (isinstance(event, dict) and event.get("type") == "response"):
-            await self._safe_ack(msg)  # non-response: skip, nothing to persist
-            return
+        The SDK owns deserialization (an unparseable payload is logged and acked by the
+        driver before reaching here — redelivery cannot fix malformed JSON) and
+        acknowledgement. Under AckMode.ON_SUCCESS the contract is:
 
-        ok = await self._persist(event)
-        if ok:
-            await self._safe_ack(msg)
-        # else: do NOT ack — JetStream redelivers once the fault clears (D4)
+          - return normally  -> the SDK acks (fresh success, or a confirmed already-processed
+                                request_id no-op, which is a no-op and not a failure);
+          - RAISE            -> the SDK withholds the ack, so the backbone redelivers once the
+                                fault clears (ADR-031 D4). This is the inversion of the old
+                                "don't call msg.ack()" path.
+        """
+        if event.get("type") != "response":
+            return  # non-response: skip, nothing to persist (acked)
 
-    async def _safe_ack(self, msg) -> None:
-        try:
-            await msg.ack()
-        except Exception:
-            logger.warning("billing_ack_failed", exc_info=True)
+        if not await self._persist(event):
+            # A genuine fault (not a request_id no-op). Raise so the message is NOT acked.
+            raise _PersistError(
+                f"billing persist failed for request_id={event.get('request_id')!r} "
+                "-- withholding ack for redelivery"
+            )
 
     async def stop(self) -> None:
-        if self._nc is not None:
+        if self._queue is not None:
             try:
-                await self._nc.drain()
+                await self._queue.close()
             except Exception:
                 logger.warning("billing_consumer_stop_failed", exc_info=True)

@@ -39,4 +39,15 @@ CMD ["pytest", "-q"]
 FROM base AS runtime
 WORKDIR /app/src
 EXPOSE 8000
+
+# Runs as a non-root uid so the chart can set runAsNonRoot/runAsUser and
+# clear Pod Security Standards "restricted". The uid is NUMERIC on purpose:
+# kubelet can only verify runAsNonRoot against a numeric USER, and a named
+# one is rejected at admission with "container has runAsNonRoot and image
+# has non-numeric user". Group 0 leaves the root-owned /app readable
+# without a recursive chown, which is also what lets the image run under an
+# arbitrary assigned uid.
+RUN useradd --system --uid 10001 --gid 0 --no-create-home --shell /usr/sbin/nologin app
+USER 10001
+
 CMD ["uvicorn", "main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,20 +1,21 @@
 """The billing capability: spec, wiring, and the stripe driver.
 
 The theme, same as controlplane's: nothing here may carry a credential.
-The chart reads DATABASE_URL and SERVICE_API_KEY (and optionally the two
+The chart reads DATABASE_URL_BILLING and SERVICE_API_KEY (and optionally the two
 Stripe secrets) from a Kubernetes Secret; this spec carries only that
 Secret's name, and the driver tells the chart not to render one of its
 own.
 """
+
 import base64
 import json
 
 import pytest
 
 from multistack.billing import (
+    REQUIRED_SECRET_KEYS,
     Billing,
     BillingPrerequisiteError,
-    REQUIRED_SECRET_KEYS,
     StripeOptions,
 )
 from multistack.billing.drivers import stripe as mod
@@ -41,9 +42,7 @@ class _FakeRunner:
 
 
 def _secret(keys) -> str:
-    return json.dumps(
-        {"data": {k: base64.b64encode(b"x").decode() for k in keys}}
-    )
+    return json.dumps({"data": {k: base64.b64encode(b"x").decode() for k in keys}})
 
 
 @pytest.fixture
@@ -59,9 +58,11 @@ def calls(driver, monkeypatch):
     monkeypatch.setattr(mod, "require_cli", lambda *a, **k: None)
     monkeypatch.setattr(mod, "require_cluster", lambda *a, **k: None)
     monkeypatch.setattr(
-        mod, "kubectl",
-        lambda *a, **k: _secret((*REQUIRED_SECRET_KEYS,
-                                 "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET")),
+        mod,
+        "kubectl",
+        lambda *a, **k: _secret(
+            (*REQUIRED_SECRET_KEYS, "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET")
+        ),
     )
     return recorded
 
@@ -73,32 +74,32 @@ def _install(calls):
 # -- spec ---------------------------------------------------------------
 def test_the_secret_name_is_required():
     with pytest.raises(ValueError, match="existing_secret is required"):
-        Billing(kubeconfig_path=KUBECONFIG, existing_secret="",
-                event_backbone_url="nats://x")
+        Billing(kubeconfig_path=KUBECONFIG, existing_secret="", event_backbone_url="nats://x")
 
 
 def test_no_credential_field_exists_on_the_spec():
     """The guard that matters: a spec is a file people commit, so there
     must be nowhere in it for a password to go."""
     forbidden = {
-        "database_url", "service_api_key", "stripe_secret_key",
-        "stripe_webhook_secret", "password",
+        "database_url",
+        "service_api_key",
+        "stripe_secret_key",
+        "stripe_webhook_secret",
+        "password",
     }
     assert not (forbidden & set(Billing.model_fields))
 
 
 def test_there_is_no_ambient_kubeconfig():
     with pytest.raises(ValueError, match="kubeconfig_path is required"):
-        Billing(kubeconfig_path="", existing_secret="s",
-                event_backbone_url="nats://x")
+        Billing(kubeconfig_path="", existing_secret="s", event_backbone_url="nats://x")
 
 
 def test_an_empty_backbone_is_refused_unless_deliberate():
     with pytest.raises(ValueError, match="nothing would be metered"):
         Billing(kubeconfig_path=KUBECONFIG, existing_secret="s")
     # Deliberate is fine.
-    Billing(kubeconfig_path=KUBECONFIG, existing_secret="s",
-            allow_no_backbone=True)
+    Billing(kubeconfig_path=KUBECONFIG, existing_secret="s", allow_no_backbone=True)
 
 
 def test_it_declares_cluster_and_database():
@@ -119,14 +120,15 @@ def test_stripe_is_the_only_implementation():
 
 def test_a_backoff_base_greater_than_its_own_max_is_refused():
     with pytest.raises(ValueError, match="reporter_backoff_base_seconds"):
-        spec(options=StripeOptions(
-            reporter_backoff_base_seconds=100, reporter_backoff_max_seconds=10))
+        spec(
+            options=StripeOptions(
+                reporter_backoff_base_seconds=100, reporter_backoff_max_seconds=10
+            )
+        )
 
 
 def test_the_endpoint_carries_no_credential():
-    assert spec().endpoint == (
-        "http://billing.billing.svc.cluster.local:8000"
-    )
+    assert spec().endpoint == ("http://billing.billing.svc.cluster.local:8000")
 
 
 def test_recording_it_publishes_billing_endpoint():
@@ -137,11 +139,15 @@ def test_recording_it_publishes_billing_endpoint():
 
 # -- driver ---------------------------------------------------------------
 def test_the_backbone_and_options_reach_the_chart(driver):
-    values = driver._values(spec(options=StripeOptions(
-        durable_name="custom-durable",
-        stripe_meter_event_name="my_tokens",
-        reporter_batch_size=25,
-    )))
+    values = driver._values(
+        spec(
+            options=StripeOptions(
+                durable_name="custom-durable",
+                stripe_meter_event_name="my_tokens",
+                reporter_batch_size=25,
+            )
+        )
+    )
     events = values["config"]["events"]
     assert events["backboneUrl"] == "nats://nats:4222"
     assert events["durableName"] == "custom-durable"
@@ -151,14 +157,12 @@ def test_the_backbone_and_options_reach_the_chart(driver):
 
 def test_the_secret_is_named_never_created(driver):
     values = driver._values(spec(existing_secret="my-billing-secrets"))
-    assert values["secret"] == {
-        "existingSecret": "my-billing-secrets", "create": False}
+    assert values["secret"] == {"existingSecret": "my-billing-secrets", "create": False}
 
 
 def test_no_image_tag_key_when_none_is_pinned(driver):
     assert "image" not in driver._values(spec())
-    assert driver._values(
-        spec(options=StripeOptions(image_tag="0.2.0")))["image"]["tag"] == "0.2.0"
+    assert driver._values(spec(options=StripeOptions(image_tag="0.2.0")))["image"]["tag"] == "0.2.0"
 
 
 def test_a_missing_secret_is_refused_before_install(driver, monkeypatch):
@@ -173,7 +177,7 @@ def test_a_missing_secret_is_refused_before_install(driver, monkeypatch):
 def test_a_secret_missing_required_keys_is_refused(driver, monkeypatch):
     monkeypatch.setattr(mod, "require_cli", lambda *a, **k: None)
     monkeypatch.setattr(mod, "require_cluster", lambda *a, **k: None)
-    monkeypatch.setattr(mod, "kubectl", lambda *a, **k: _secret(["DATABASE_URL"]))
+    monkeypatch.setattr(mod, "kubectl", lambda *a, **k: _secret(["DATABASE_URL_BILLING"]))
 
     with pytest.raises(BillingPrerequisiteError, match="SERVICE_API_KEY"):
         driver.check_prerequisites(spec())
@@ -203,6 +207,26 @@ def test_create_installs_and_returns_the_endpoint(driver, calls):
 def test_delete_uninstalls_by_release_name_and_leaves_the_database(driver, calls):
     driver.delete(spec())
     assert calls[-1] == (
-        "uninstall", "billing",
+        "uninstall",
+        "billing",
         {"namespace": "billing", "missing_ok": True},
     )
+
+
+# -- affinity ------------------------------------------------------------
+# The chart excludes the control plane by default. On a single-node cluster
+# the only node IS the control plane, so the release installs cleanly and
+# the pod stays Pending; {} overrides that exclusion deliberately.
+
+
+def test_an_empty_affinity_is_sent_as_null_not_an_empty_map(driver, calls):
+    """Helm merges maps recursively, so {} leaves the chart's own affinity in
+    place and the pod stays Pending; null is what deletes the key."""
+    driver.create(spec(affinity={}))
+    values = _install(calls)["values"]
+    assert "affinity" in values and values["affinity"] is None
+
+
+def test_no_affinity_means_the_key_is_absent(driver, calls):
+    driver.create(spec())
+    assert "affinity" not in _install(calls)["values"]

@@ -10,20 +10,22 @@ organization's own users, keys and quotas. Each is a FastAPI service with
 a Postgres schema, a migration Job, and a peer it calls over the cluster
 network.
 
-Credentials never appear here. Both charts read DATABASE_URL, VALKEY_URL,
+Credentials never appear here. The charts read DATABASE_URL_ADMIN /
+DATABASE_URL_ORG, VALKEY_URL,
 JWT_SECRET and their API keys from a Kubernetes Secret, and this spec
 carries only that Secret's *name* -- see `existing_secret`. The Stack's
 published `database_url` and `cache_url` are deliberately credential-free
 and so cannot serve, which is why they are in `REQUIRES` (the layers must
 exist first) but not in `FROM_STACK`.
 """
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("admin", "organization")
+SUPPORTED_TYPES: tuple[str, ...] = ("admin", "organization")
 
 DEFAULT_PORT = 8000
 
@@ -31,13 +33,19 @@ DEFAULT_PORT = 8000
 # `check_prerequisites` can say which one is missing rather than letting
 # the pod crash-loop on a KeyError, and so the message is one list rather
 # than one discovery per deploy.
-REQUIRED_SECRET_KEYS: Dict[str, Tuple[str, ...]] = {
+REQUIRED_SECRET_KEYS: dict[str, tuple[str, ...]] = {
     "admin": (
-        "DATABASE_URL", "VALKEY_URL", "JWT_SECRET",
-        "ADMIN_API_KEY", "SERVICE_API_KEY",
+        "DATABASE_URL_ADMIN",
+        "VALKEY_URL",
+        "JWT_SECRET",
+        "ADMIN_API_KEY",
+        "SERVICE_API_KEY",
     ),
     "organization": (
-        "DATABASE_URL", "VALKEY_URL", "JWT_SECRET", "SERVICE_API_KEY",
+        "DATABASE_URL_ORG",
+        "VALKEY_URL",
+        "JWT_SECRET",
+        "SERVICE_API_KEY",
         # The bearer the model-gateway sends to verify a per-org API key
         # (ADR-026). Distinct from SERVICE_API_KEY on purpose
         # (least-privilege) and must equal the gateway release's own
@@ -53,8 +61,13 @@ class _ControlPlaneOptions(BaseModel):
 
     release_name: str
     chart: str
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     # The migration Job runs before the Deployment is ready. Short enough
     # that a wedged migration fails the install rather than hanging it.
@@ -100,26 +113,27 @@ class ControlPlane(CapabilitySpec):
     """One of the platform's control plane services."""
 
     CAPABILITY: ClassVar[str] = "controlplane"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = OPTIONS_FOR_TYPE
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {
-        "admin": "control-plane", "organization": "control-plane",
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = OPTIONS_FOR_TYPE
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {
+        "admin": "control-plane",
+        "organization": "control-plane",
     }
 
     # A control plane is useless without its database, and its login path
     # reads the lockout counters from the cache before it verifies a
     # password -- with no cache every sign-in is a 500, which is how this
     # was found the first time.
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster", "database", "cache")
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster", "database", "cache")
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
     }
-    PROVIDES: ClassVar[Dict[str, str]] = {"controlplane_endpoint": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"controlplane_endpoint": "endpoint"}
 
     type: str = "admin"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[ControlPlaneOptions] = None
+    namespace: str | None = None
+    options: ControlPlaneOptions | None = None
 
     # The Secret holding every key in REQUIRED_SECRET_KEYS for this type.
     # Referenced by name, never created here: a spec is a file people
@@ -132,7 +146,7 @@ class ControlPlane(CapabilitySpec):
 
     # Where this service reaches its peer. Defaults are the in-cluster
     # Service names both charts already assume.
-    peer_url: Optional[str] = None
+    peer_url: str | None = None
     peer_timeout_ms: int = Field(default=3000, gt=0)
 
     # Where this reaches billing. Both types have a use for it, each its
@@ -144,15 +158,21 @@ class ControlPlane(CapabilitySpec):
     # effectively does: unset here just means each service's own
     # settings.py default (http://billing:8000) applies, which resolves
     # nowhere on a real cluster and silently breaks that call site.
-    billing_internal_url: Optional[str] = None
+    billing_internal_url: str | None = None
 
     # Scheduling. There is no in-cluster registry, so a service image
     # exists only on the node it was imported to, and a pod scheduled
     # anywhere else stays ImagePullBackOff with nothing in the release to
     # explain it. The chart's own affinity already keeps pods off the
     # control plane; this is how a caller says *which* worker.
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Dict[str, Any]]] = None
+    # The charts' own default keeps pods off the control plane, which is
+    # right for a multi-node cluster and impossible to satisfy on a
+    # single-node one, where the only node is the control plane. Absent
+    # leaves that default alone; an explicit {} means "schedule
+    # anywhere", which is how a one-node cluster says so deliberately.
+    affinity: dict[str, Any] | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[dict[str, Any]] | None = None
 
     @field_validator("kubeconfig_path")
     @classmethod
@@ -172,7 +192,8 @@ class ControlPlane(CapabilitySpec):
         if not value:
             raise ValueError(
                 "existing_secret is required: the control plane reads "
-                "DATABASE_URL, VALKEY_URL and JWT_SECRET from a Kubernetes "
+                "DATABASE_URL_ADMIN or DATABASE_URL_ORG, VALKEY_URL and JWT_SECRET "
+                "from a Kubernetes "
                 "Secret, and this spec carries only its name. Create the "
                 "Secret with multistack.kube.apply, which pipes the manifest "
                 "to stdin — `kubectl create secret --from-literal` puts the "
@@ -189,7 +210,7 @@ class ControlPlane(CapabilitySpec):
         return self.options.release_name if self.options else f"{self.type}-control-plane"
 
     @property
-    def required_secret_keys(self) -> Tuple[str, ...]:
+    def required_secret_keys(self) -> tuple[str, ...]:
         return REQUIRED_SECRET_KEYS[self.type]
 
     @property

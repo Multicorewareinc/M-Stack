@@ -24,7 +24,8 @@ Everything past proxying attaches by configuration rather than code
 empty `event_backbone_url` builds no publisher, so the defaults here
 deploy a plain authenticated proxy and each feature is one field away.
 """
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+
+from typing import Any, ClassVar
 
 from pydantic import (
     BaseModel,
@@ -36,16 +37,16 @@ from pydantic import (
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("modelgateway",)
+SUPPORTED_TYPES: tuple[str, ...] = ("modelgateway",)
 
-FAIL_MODES: Tuple[str, ...] = ("closed", "open")
+FAIL_MODES: tuple[str, ...] = ("closed", "open")
 
 # Every key the chart's Secret must carry. Named here, not just in the
 # chart's own `required` guards, so check_prerequisites can say which one
 # an existingSecret is missing by name -- the chart cannot inspect an
 # existingSecret's contents, so a missing key installs cleanly and passes
 # both probes, and only the first real request reveals it.
-REQUIRED_SECRET_KEYS: Tuple[str, ...] = ("API_KEY", "ORG_VERIFY_API_KEY")
+REQUIRED_SECRET_KEYS: tuple[str, ...] = ("API_KEY", "ORG_VERIFY_API_KEY")
 
 
 class ModelGatewayOptions(BaseModel):
@@ -55,8 +56,13 @@ class ModelGatewayOptions(BaseModel):
 
     release_name: str = "gateway"
     chart: str = "api/microservices/model-gateway/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     event_stream_name: str = "GATEWAY_EVENTS"
     event_stream_subject: str = "gateway.events"
@@ -73,23 +79,22 @@ class Gateway(CapabilitySpec):
     """An authenticated OpenAI-compatible gateway on a Kubernetes cluster."""
 
     CAPABILITY: ClassVar[str] = "gateway"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = {
-        "modelgateway": ModelGatewayOptions}
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {"modelgateway": "gateway"}
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = {"modelgateway": ModelGatewayOptions}
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {"modelgateway": "gateway"}
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster",)
 
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
         "event_backbone_url": "event_backbone_url",
         "api_key_secret": "api_key_secret",
     }
-    PROVIDES: ClassVar[Dict[str, str]] = {"gateway_endpoint": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"gateway_endpoint": "endpoint"}
 
     type: str = "modelgateway"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[ModelGatewayOptions] = None
+    namespace: str | None = None
+    options: ModelGatewayOptions | None = None
 
     # The OpenAI-compatible server to proxy to.
     upstream_url: str
@@ -115,10 +120,10 @@ class Gateway(CapabilitySpec):
 
     # Routes with no credentials in them. A route that needs a provider's
     # own api_key goes in the Secret instead — see the validator.
-    model_routes: Dict[str, str] = Field(default_factory=dict)
+    model_routes: dict[str, str] = Field(default_factory=dict)
 
     # Policy services implementing POST /check. Empty means inert.
-    policy_endpoints: List[str] = Field(default_factory=list)
+    policy_endpoints: list[str] = Field(default_factory=list)
 
     # 500ms, not the 50 the service itself defaults to. Measured from
     # inside the gateway pod, a /check to the limiter in the same cluster
@@ -139,15 +144,21 @@ class Gateway(CapabilitySpec):
     # allowed to reach this gateway. Empty => the chart installs no
     # NetworkPolicy, so an existing deployment is untouched until a caller
     # opts in (ADR-006: features attach by config, not code).
-    network_policy_allowed_ingress: List[Dict[str, str]] = Field(default_factory=list)
+    network_policy_allowed_ingress: list[dict[str, str]] = Field(default_factory=list)
 
     # Scheduling. There is no in-cluster registry, so a service image
     # exists only on the node it was imported to, and a pod scheduled
     # anywhere else stays ImagePullBackOff with nothing in the release to
     # explain it. The chart's own affinity already keeps pods off the
     # control plane; this is how a caller says *which* worker.
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Dict[str, Any]]] = None
+    # The charts' own default keeps pods off the control plane, which is
+    # right for a multi-node cluster and impossible to satisfy on a
+    # single-node one, where the only node is the control plane. Absent
+    # leaves that default alone; an explicit {} means "schedule
+    # anywhere", which is how a one-node cluster says so deliberately.
+    affinity: dict[str, Any] | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[dict[str, Any]] | None = None
 
     @field_validator("policy_fail_mode")
     @classmethod
@@ -172,7 +183,7 @@ class Gateway(CapabilitySpec):
         validates `options` before coercion.
         """
         if not isinstance(value, dict):
-            return value                    # let pydantic report the shape
+            return value  # let pydantic report the shape
         for model, route in value.items():
             if not isinstance(route, str):
                 raise ValueError(
@@ -183,10 +194,7 @@ class Gateway(CapabilitySpec):
                     "the plain values and which therefore overrides them."
                 )
             if not route.startswith(("http://", "https://")):
-                raise ValueError(
-                    f"model_routes[{model!r}] = {route!r} is not an http(s) "
-                    "URL."
-                )
+                raise ValueError(f"model_routes[{model!r}] = {route!r} is not an http(s) URL.")
         return value
 
     @property
@@ -196,8 +204,17 @@ class Gateway(CapabilitySpec):
 
     @property
     def endpoint(self) -> str:
-        return (f"http://{self.service_name}.{self.resolved_namespace}"
-                f".svc:{self.service_port}")
+        # .svc.cluster.local, not just .svc (matches ControlPlane.endpoint):
+        # in-cluster pod-to-pod calls resolve the short form fine via
+        # glibc's search-domain expansion, but nginx's `resolver` directive
+        # (the org portal's /mg/ proxy uses one, for dynamic re-resolution
+        # without a reload) does a literal query with no search-domain
+        # fallback -- confirmed live: it 502'd with "could not be resolved
+        # (3: Host not found)" against the short form on 2026-09-25.
+        return (
+            f"http://{self.service_name}.{self.resolved_namespace}"
+            f".svc.cluster.local:{self.service_port}"
+        )
 
     def validate(self) -> None:
         self.validate_capability()
@@ -213,9 +230,7 @@ class Gateway(CapabilitySpec):
             )
         for endpoint in self.policy_endpoints:
             if not endpoint.startswith(("http://", "https://")):
-                raise ValueError(
-                    f"policy_endpoint {endpoint!r} is not an http(s) URL."
-                )
+                raise ValueError(f"policy_endpoint {endpoint!r} is not an http(s) URL.")
 
     @model_validator(mode="after")
     def _validate_on_construction(self):

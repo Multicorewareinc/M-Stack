@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_LOCK_KEY = 0x5045525341444D4E  # b"PERSADMN"
 
 # Process exit codes (this is a CLI, not an HTTP surface):
-EXIT_OK = 0          # one super_admin created
-EXIT_REFUSED = 2     # single-use refusal / weak password / missing input — nothing created
-EXIT_TRANSIENT = 3   # transient/DB failure — fail closed, nothing created
+EXIT_OK = 0  # one super_admin created
+EXIT_REFUSED = 2  # single-use refusal / weak password / missing input — nothing created
+EXIT_TRANSIENT = 3  # transient/DB failure — fail closed, nothing created
 
 
 class SeedAdminError(Exception):
@@ -66,7 +66,9 @@ def _resolve_credentials(argv: list[str] | None = None) -> tuple[str, str]:
         prog="seed_admin",
         description="One-time bootstrap of the initial super_admin (SP-03).",
     )
-    parser.add_argument("--email", default=None, help="Seed admin email (overrides SEED_ADMIN_EMAIL).")
+    parser.add_argument(
+        "--email", default=None, help="Seed admin email (overrides SEED_ADMIN_EMAIL)."
+    )
     parser.add_argument(
         "--password",
         default=None,
@@ -105,7 +107,7 @@ async def bootstrap_super_admin(email: str, password: str, *, sessionmaker=None)
     Raises `WeakPasswordError` (before any DB work) on a sub-policy password,
     `AlreadyBootstrappedError` when an `admin_users` row already exists, and propagates SQLAlchemy
     errors on a transient/DB failure (the caller maps these to a fail-closed exit). `sessionmaker`
-    defaults to one built from `settings.database_url`; tests inject an aiosqlite one.
+    defaults to one built from `settings.database_url_admin`; tests inject an aiosqlite one.
     """
     from sqlalchemy import select, text
     from sqlalchemy.exc import IntegrityError
@@ -126,7 +128,7 @@ async def bootstrap_super_admin(email: str, password: str, *, sessionmaker=None)
 
         from settings import Settings
 
-        engine = build_engine(Settings().database_url)
+        engine = build_engine(Settings().database_url_admin)
         sessionmaker = build_sessionmaker(engine)
 
     try:

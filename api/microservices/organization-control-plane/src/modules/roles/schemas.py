@@ -28,6 +28,13 @@ class RoleOut(BaseModel):
     is_system_role: bool
     created_at: datetime
     updated_at: datetime
+    # Neither is a column on the ORM model — both are computed server-side (service.to_role_out,
+    # mirroring Admin CP's Organization.user_count) and defaulted to 0 here only so a bare Role
+    # ORM object (create/update/delete responses, where the count is always 0 or unchanged and
+    # not worth an extra query) still validates via from_attributes without callers needing to
+    # set them explicitly.
+    user_count: int = 0
+    permission_count: int = 0
 
 
 class PermissionSet(BaseModel):

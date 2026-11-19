@@ -39,7 +39,7 @@ services:
       dockerfile: Dockerfile
     environment:
       VALKEY_URL: redis://valkey:6379/0
-      RATE_LIMITS: '{"model_overrides":{"limited-model":3}}'
+      RPM_RATE_LIMITS: '{"model_overrides":{"limited-model":3}}'
       EVENT_BACKBONE_URL: nats://nats:4222
     depends_on:
       valkey:
@@ -76,7 +76,7 @@ services:
       dockerfile: Dockerfile
     environment:
       VALKEY_URL: redis://valkey:6379/0
-      RATE_LIMITS: '{"model_overrides":{"tpm-limited-model":15}}'
+      TPM_RATE_LIMITS: '{"model_overrides":{"tpm-limited-model":15}}'
       EVENT_BACKBONE_URL: nats://nats:4222
       TOKENIZER_URL: http://tokenizer:8000/tokenize
     depends_on:

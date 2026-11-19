@@ -1,7 +1,7 @@
 """Test helpers: build the app with an injected in-memory aiosqlite engine (so tests never
-touch Postgres, mirrors admin-control-plane's injected-engine pattern), plus a fake JetStream
-consumer harness (FakeMsg/_install_fake_nats, mirroring rate-limiter-tpm's/enricher's — no
-live NATS).
+touch Postgres, mirrors admin-control-plane's injected-engine pattern), plus a fake
+multistack.queue consumer harness (FakeMsg/FakeConnection/install_fake_queue — no live
+backbone, ADR-033).
 
 Two aiosqlite gotchas that otherwise make every test fail:
 - `StaticPool` keeps the single in-memory connection alive so the schema persists across the
@@ -13,7 +13,6 @@ Two aiosqlite gotchas that otherwise make every test fail:
 from __future__ import annotations
 
 import json
-import sys
 import types
 
 import pytest
@@ -87,59 +86,51 @@ class FakeSub:
         self.unsubscribed = True
 
 
-class FakeJS:
+class FakeQueue:
+    """A fake multistack.queue.Queue: records subscribe calls and the binding used."""
+
+    name = "nats"
+
     def __init__(self, *, subscribe_error=None):
         self._subscribe_error = subscribe_error
         self.subscribe_calls = 0
+        self.bindings = []
+        self.closed = False
+        self.connected = True
 
-    async def add_stream(self, **kwargs):
+    async def connect(self):
         return None
 
-    async def subscribe(self, *args, **kwargs):
+    async def subscribe(self, binding, handler):
         self.subscribe_calls += 1
+        self.bindings.append(binding)
         if self._subscribe_error is not None:
             raise self._subscribe_error
         return FakeSub()
 
-
-class FakeNC:
-    def __init__(self, *, connected=True, js=None):
-        self.is_connected = connected
-        self._js = js or FakeJS()
-
-    def jetstream(self):
-        return self._js
-
-    async def drain(self):
-        pass
+    async def close(self):
+        self.closed = True
 
 
-def install_fake_nats(monkeypatch, *, nc=None, connect_error=None):
-    mod = types.ModuleType("nats")
-    captured = {}
+def install_fake_queue(monkeypatch, *, queue=None, connect_error=None):
+    """Patch multistack.queue.Queue so start()/_retry_connect resolve to our fake Queue (or
+    raise) — no live backbone needed (ADR-033). The consumer imports Queue/QueueConfig lazily
+    inside those methods, so patching the module attribute is enough."""
+    import multistack.queue as mq
 
-    async def connect(url, **kwargs):
-        captured.update(kwargs)
-        if connect_error is not None:
-            raise connect_error
-        return nc
+    class _FakeQueueFactory:
+        def __init__(self, config):
+            self._q = queue
 
-    mod.connect = connect
-    js_api = types.ModuleType("nats.js.api")
+        async def connect(self):
+            if connect_error is not None:
+                raise connect_error
+            return None
 
-    class DeliverPolicy:
-        NEW = "new"
+        def __getattr__(self, item):
+            return getattr(self._q, item)
 
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
-            pass
-
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
-    return captured
+    monkeypatch.setattr(mq, "Queue", _FakeQueueFactory)
 
 
 def response_event(**overrides) -> dict:

@@ -40,13 +40,19 @@ class RateLimiterService:
 
         The "user" scope's identity is the org_id (AD-04: `principal` IS the org). Its limit
         prefers the org's actual plan (resolved via `plan_client`, cached briefly there) over
-        the static RATE_LIMITS user_default/user_overrides, which only apply when the plan
+        the static RPM_RATE_LIMITS user_default/user_overrides, which only apply when the plan
         lookup is inert/unresolved (no admin_cp_url configured, or the lookup failed/degraded)."""
         lim = self._limits
         out: list[tuple[str, str, int]] = []
         if principal:
-            plan_limit = await self._plan_client.get_rpm_limit(principal) if self._plan_client else None
-            n = plan_limit if plan_limit is not None else lim.user_overrides.get(principal, lim.user_default)
+            plan_limit = (
+                await self._plan_client.get_rpm_limit(principal) if self._plan_client else None
+            )
+            n = (
+                plan_limit
+                if plan_limit is not None
+                else lim.user_overrides.get(principal, lim.user_default)
+            )
             if n:
                 out.append(("user", principal, n))
         if model:
@@ -83,7 +89,7 @@ class RateLimiterService:
         # so it may lag — the soft-limit property of ADR-013.
         info = [
             (name, limit, int(v or 0), max(0, limit - int(v or 0)))
-            for (name, _ident, limit), v in zip(scopes, values)
+            for (name, _ident, limit), v in zip(scopes, values, strict=True)
         ]
         denied = [s for s in info if s[2] >= s[1]]  # count at or over the limit => deny
 
@@ -92,7 +98,9 @@ class RateLimiterService:
             return {"limit": limit, "remaining": remaining, "reset_after": reset_after}
 
         def _most_restrictive(scopes_info):
-            return min(scopes_info, key=lambda s: (s[3] / s[1], s[3]))  # (remaining/limit, remaining)
+            return min(
+                scopes_info, key=lambda s: (s[3] / s[1], s[3])
+            )  # (remaining/limit, remaining)
 
         if denied:
             worst = _most_restrictive(denied)
@@ -107,7 +115,9 @@ class RateLimiterService:
         return {"decision": "allow", **_fields(_most_restrictive(info))}
 
     # --- asynchronous counting: called by the backbone consumer ----------------
-    async def count(self, principal: str | None, model: str | None, path: str | None, request_id: str | None) -> None:
+    async def count(
+        self, principal: str | None, model: str | None, path: str | None, request_id: str | None
+    ) -> None:
         """INCR the per-scope counters for one request event. Idempotent on request_id
         (ADR-008): a redelivered event is counted at most once. Best-effort — Valkey errors
         drop the increment (soft)."""
@@ -118,7 +128,9 @@ class RateLimiterService:
         if request_id:
             try:
                 # SETNX + TTL: first sighting returns True; a replay returns None/False -> skip.
-                first = await self._redis.set(f"{KEY_PREFIX}:seen:{request_id}", 1, nx=True, ex=self._dedupe_ttl)
+                first = await self._redis.set(
+                    f"{KEY_PREFIX}:seen:{request_id}", 1, nx=True, ex=self._dedupe_ttl
+                )
             except Exception:
                 logger.warning("dedupe_error_counting_anyway", exc_info=True)
                 first = True

@@ -10,6 +10,7 @@ Two gotchas that otherwise make every test 500:
 
 from __future__ import annotations
 
+import json
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -41,6 +42,10 @@ def make_org_client(
     created_user=None,
     org_admin_role_id=None,
     permission_in_use=False,
+    audit_items=None,
+    invite_status=201,
+    invitations=None,
+    revoke_status=204,
 ):
     """A stub Org CP internal client via MockTransport for the org-creation workflow, the
     organizations-list/detail user-count enrichment, AND (SP-03) the super-admin user-provisioning
@@ -51,8 +56,11 @@ def make_org_client(
     status (e.g. 409 for a duplicate); `created_user` is the JSON returned on a 201 create;
     `org_admin_role_id` is the id returned for the `org_admin` role from `GET /v1/roles`;
     `permission_in_use` controls the GET /internal/v1/roles/permission-usage stub used by
-    delete_permission's reverse-reference check (council review fix)."""
+    delete_permission's reverse-reference check (council review fix); `invite_status` overrides the
+    `POST /internal/v1/organizations/{id}/invitations` status (e.g. 409 for an email that already has
+    an account), echoing the request back on a 201 the way the real Org CP does."""
     counts = user_counts if user_counts is not None else {}
+    audit_items = audit_items if audit_items is not None else []
     created_user = created_user if created_user is not None else {
         "id": str(uuid.uuid4()), "email": "owner@acme.com", "username": "owner",
         "organization_id": str(uuid.uuid4()),
@@ -79,6 +87,9 @@ def make_org_client(
             raise httpx.ConnectError("org cp down", request=request)
         if recorder is not None:
             recorder.append(request)
+        # Org CP's cross-org audit feed (merged into the Admin Portal's audit-log list).
+        if path == "/internal/v1/audit-logs" and method == "GET":
+            return httpx.Response(200, json={"items": audit_items, "total": len(audit_items), "limit": 0, "offset": 0})
         # SP-03 super-admin provisioning proxy routes.
         if path == "/v1/users" and method == "POST":
             if create_user_status == 201:
@@ -91,6 +102,29 @@ def make_org_client(
             ])
         if path.endswith("/roles") and method == "PUT":
             return httpx.Response(200, json={"role_ids": [org_admin_role_id]})
+        # Invitations list / revoke (Admin CP invitations proxy).
+        if path == "/internal/v1/invitations" and method == "GET":
+            items = invitations if invitations is not None else []
+            return httpx.Response(200, json={"items": items, "total": len(items), "limit": 25, "offset": 0})
+        if path.startswith("/internal/v1/invitations/") and method == "DELETE":
+            if revoke_status == 204:
+                return httpx.Response(204)
+            return httpx.Response(revoke_status, json={"error": {"type": "x", "message": "stub says " + str(revoke_status)}})
+        # Invitation issue (Admin CP invitations proxy).
+        if path.endswith("/invitations") and method == "POST":
+            if invite_status != 201:
+                return httpx.Response(
+                    invite_status, json={"error": {"type": "conflict", "message": "stub says no", "field": "email"}}
+                )
+            sent = json.loads(request.content)
+            org_id = path.split("/")[-2]
+            return httpx.Response(201, json={
+                "id": str(uuid.uuid4()), "email": sent["email"], "name": sent.get("name"),
+                "organization_id": org_id, "organization_name": "Stub Org",
+                "role_id": str(uuid.uuid4()), "role_name": sent.get("role_name") or "org_user",
+                "expires_at": "2026-12-31T00:00:00Z",
+                "invite_path": "/accept-invite?token=stub-token-0123456789", "invite_url": None,
+            })
         # Default = the org-creation init call.
         return httpx.Response(status_code, json={"id": "stub", "name": "stub"})
 
@@ -128,7 +162,7 @@ def make_client(*, engine=None, org_client=None, billing_client=None, **settings
     kwargs = {
         "admin_api_key": ADMIN_KEY,
         "service_api_key": SERVICE_KEY,
-        "database_url": "sqlite+aiosqlite://",
+        "database_url_admin": "sqlite+aiosqlite://",
     }
     kwargs.update(settings_kwargs)
     app = create_app(Settings(**kwargs), engine=engine, org_client=org_client, billing_client=billing_client)
@@ -178,7 +212,7 @@ def make_auth_app(*, engine=None, org_client=None, billing_client=None, **settin
     kwargs = {
         "admin_api_key": ADMIN_KEY,
         "service_api_key": SERVICE_KEY,
-        "database_url": "sqlite+aiosqlite://",
+        "database_url_admin": "sqlite+aiosqlite://",
         "jwt_secret": JWT_SECRET,
     }
     kwargs.update(settings_kwargs)

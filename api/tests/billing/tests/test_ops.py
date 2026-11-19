@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from conftest import FakeMsg, StubConsumer, response_event
+from conftest import StubConsumer, response_event
 
 
 def test_health(client_factory):
@@ -28,9 +28,9 @@ async def test_metrics_exposes_labelled_series_values():
     from conftest import make_engine, make_consumer
 
     consumer, engine, _sm = await make_consumer()
-    await consumer._on_msg(FakeMsg(response_event(request_id="m1", usage={"total_tokens": 10, "source": "provider"})))
+    await consumer._on_msg(response_event(request_id="m1", usage={"total_tokens": 10, "source": "provider"}))
     await consumer._on_msg(
-        FakeMsg(response_event(request_id="m2", usage={"total_tokens": None, "source": "none", "reason": "no_body"}))
+        response_event(request_id="m2", usage={"total_tokens": None, "source": "none", "reason": "no_body"})
     )
 
     from conftest import make_client

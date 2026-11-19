@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runtime entrypoint. Apply Alembic migrations (the ONLY place production Postgres DDL is
-# created — ADR-015a/ADR-020), then serve. DATABASE_URL comes from the environment.
+# created — ADR-015a/ADR-020), then serve. DATABASE_URL_ORG comes from the environment.
 set -e
 
 # alembic.ini + migrations/ live at /app; run the upgrade from there, then serve from src.

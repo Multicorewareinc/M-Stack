@@ -84,6 +84,7 @@ def create_app(
     if own_publisher:
         event_publisher = EventPublisher(
             settings.event_backbone_url,
+            backend=settings.queue_backend,
             stream_name=settings.event_stream_name,
             subject=settings.event_stream_subject,
             capture_bodies=settings.event_capture_bodies,

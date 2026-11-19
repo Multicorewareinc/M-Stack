@@ -62,6 +62,14 @@ class UnprocessableError(AppError):
     error_type = "unprocessable"
 
 
+class GoneError(AppError):
+    # A one-time resource that existed but can no longer be used (an expired, accepted or replaced
+    # invitation). Distinct from 404 so the invitee is told to ask for a new link, not that the link
+    # was never valid.
+    status_code = 410
+    error_type = "gone"
+
+
 class UpstreamError(AppError):
     # A dependency (e.g. Admin CP's internal API) was unreachable or returned an unexpected
     # status. Control operations fail closed with 502 rather than persisting unvalidated data.

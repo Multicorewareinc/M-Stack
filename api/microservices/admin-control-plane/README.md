@@ -34,7 +34,7 @@ Duplicate `name` → 409. Validation failures / unknown plan → 422.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | — | SQLAlchemy async URL, e.g. `postgresql+asyncpg://user:pass@host:5432/db` |
+| `DATABASE_URL_ADMIN` | — | SQLAlchemy async URL, e.g. `postgresql+asyncpg://user:pass@host:5432/db` |
 | `ADMIN_API_KEY` | — | super-admin bearer token (set this) |
 | `LOG_LEVEL` | `INFO` | log level |
 | `SEED_PLANS` | `true` | seed Free/Pro/Enterprise on startup (insert-missing only) |

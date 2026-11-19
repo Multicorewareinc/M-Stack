@@ -7,7 +7,8 @@ republishes to the derived enriched stream that `rate-limiter-tpm` and
 `billing` both consume from. `endpoint` exists for health checks and
 metrics scraping only.
 """
-from typing import Any, Dict, List
+
+from typing import Any
 
 from ...helm import HelmRunner
 from ...kube import require_cli, require_cluster
@@ -22,9 +23,9 @@ class JetStreamEnricherDriver:
     def _helm(self, enricher: Enricher) -> HelmRunner:
         return HelmRunner(enricher.kubeconfig_path, error_cls=EnricherError)
 
-    def _values(self, enricher: Enricher) -> Dict[str, Any]:
+    def _values(self, enricher: Enricher) -> dict[str, Any]:
         options = enricher.options
-        values: Dict[str, Any] = {
+        values: dict[str, Any] = {
             "replicaCount": enricher.replicas,
             "service": {"port": enricher.service_port},
             "config": {
@@ -46,19 +47,31 @@ class JetStreamEnricherDriver:
                 "allowNoBackbone": enricher.allow_no_backbone,
             },
         }
-        if options.image_tag:
-            values["image"] = {"tag": options.image_tag}
+        if options.image_tag or options.image_repository:
+            image: dict[str, Any] = {}
+            if options.image_repository:
+                image["repository"] = options.image_repository
+            if options.image_tag:
+                image["tag"] = options.image_tag
+            values["image"] = image
         # Absent leaves the chart's own default in place; an explicit {}
         # overrides it with "schedule anywhere", which is a different
         # statement and sometimes the intended one.
+        if enricher.affinity is not None:
+            # null, not {}, for the empty case: Helm merges user values
+            # into the chart's recursively, so an empty map adds nothing and
+            # the chart's own affinity survives -- the release installs and
+            # the pod stays Pending with the default still in force. An
+            # explicit null is what Helm treats as "delete this key".
+            values["affinity"] = enricher.affinity or None
         if enricher.node_selector is not None:
             values["nodeSelector"] = enricher.node_selector
         if enricher.tolerations is not None:
             values["tolerations"] = enricher.tolerations
         return values
 
-    def check_prerequisites(self, enricher: Enricher) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, enricher: Enricher) -> list[str]:
+        warnings: list[str] = []
         require_cli("helm", error_cls=EnricherPrerequisiteError)
         require_cluster(enricher.kubeconfig_path, capability="the enricher")
 
@@ -72,7 +85,7 @@ class JetStreamEnricherDriver:
             warnings.append(
                 "tokenizer_url is empty, so the fallback is inert: "
                 "response events with no `usage` block are republished "
-                "with source=\"none\" rather than estimated, and go "
+                'with source="none" rather than estimated, and go '
                 "uncounted downstream. Streaming responses are the usual "
                 "case."
             )

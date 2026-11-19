@@ -1,9 +1,6 @@
-"""RpmConsumer message handling (ADR-013) and start/reconnect resilience (ADR-016). No real
-NATS — feed messages to `_on_msg` directly, and for start() inject a fake `nats` module."""
-
-import json
-import sys
-import types
+"""RpmConsumer message handling (ADR-013) and start resilience (ADR-016), now over the
+multistack.queue SDK (ADR-033). No real backbone — the handler takes an already-deserialized
+dict (the SDK deserializes and acks), and start() is driven with a fake Queue."""
 
 from consumer import RpmConsumer
 from settings import Settings
@@ -17,94 +14,67 @@ class SpyService:
         self.calls.append((principal, model, path, request_id))
 
 
-class FakeMsg:
-    def __init__(self, obj):
-        self.data = json.dumps(obj).encode() if not isinstance(obj, bytes) else obj
-        self.acked = False
-
-    async def ack(self):
-        self.acked = True
-
-
 def _consumer(spy):
     return RpmConsumer(Settings(event_backbone_url="nats://test"), spy)
 
 
-# --- start()/reconnect fakes (ADR-016) ------------------------------------------------------
+# --- start() fakes (ADR-016) over the SDK ---------------------------------------------------
 
-class FakeSub:
-    def __init__(self):
-        self.unsubscribed = False
+class FakeQueue:
+    """A fake multistack.queue.Queue: subscribe succeeds or raises to exercise the
+    durable-conflict / transient classification."""
 
-    async def unsubscribe(self):
-        self.unsubscribed = True
-
-
-class FakeJS:
-    """jetstream() stand-in: add_stream is a no-op; subscribe succeeds or raises to exercise
-    the durable-conflict / transient classification and the reconnect rebind."""
+    name = "nats"
 
     def __init__(self, *, subscribe_error=None):
         self._subscribe_error = subscribe_error
         self.subscribe_calls = 0
+        self.bindings = []
+        self.closed = False
+        self.connected = True
 
-    async def add_stream(self, **kwargs):
+    async def connect(self):
         return None
 
-    async def subscribe(self, *args, **kwargs):
+    async def subscribe(self, binding, handler):
         self.subscribe_calls += 1
+        self.bindings.append(binding)
         if self._subscribe_error is not None:
             raise self._subscribe_error
-        return FakeSub()
+        return object()
+
+    async def close(self):
+        self.closed = True
 
 
-class FakeNC:
-    def __init__(self, *, connected=True, js=None):
-        self.is_connected = connected
-        self._js = js or FakeJS()
-        self.drained = False
+def _install_fake_queue(monkeypatch, *, queue=None, connect_error=None):
+    """Patch multistack.queue.Queue so start()/_retry_connect resolve without a live
+    backbone. The consumer imports Queue/QueueConfig lazily inside those methods."""
+    import multistack.queue as mq
 
-    def jetstream(self):
-        return self._js
+    made = {}
 
-    async def drain(self):
-        self.drained = True
+    class _FakeQueueFactory:
+        def __init__(self, config):
+            made["config"] = config
+            self._q = queue
 
+        async def connect(self):
+            if connect_error is not None:
+                raise connect_error
+            return None
 
-def _install_fake_nats(monkeypatch, *, nc=None, connect_error=None):
-    """Inject a fake `nats` module (and `nats.js.api`) so RpmConsumer.start()'s lazy imports
-    resolve without nats-py. Returns the recorded connect kwargs holder for callback access."""
-    mod = types.ModuleType("nats")
-    captured = {}
+        def __getattr__(self, item):
+            return getattr(self._q, item)
 
-    async def connect(url, **kwargs):
-        captured.update(kwargs)
-        if connect_error is not None:
-            raise connect_error
-        return nc
-
-    mod.connect = connect
-    js_api = types.ModuleType("nats.js.api")
-
-    class DeliverPolicy:
-        NEW = "new"
-
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
-            pass
-
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
-    return captured
+    monkeypatch.setattr(mq, "Queue", _FakeQueueFactory)
+    return made
 
 
 async def test_durable_conflict_is_classified_and_inactive(monkeypatch, caplog):
     spy = SpyService()
-    nc = FakeNC(connected=True, js=FakeJS(subscribe_error=Exception("consumer already exists")))
-    _install_fake_nats(monkeypatch, nc=nc)
+    queue = FakeQueue(subscribe_error=Exception("consumer already exists"))
+    _install_fake_queue(monkeypatch, queue=queue)
     c = _consumer(spy)
     with caplog.at_level("WARNING"):
         await c.start()  # must not raise
@@ -114,52 +84,41 @@ async def test_durable_conflict_is_classified_and_inactive(monkeypatch, caplog):
 
 
 async def test_start_leaves_inactive_on_connect_failure_without_crashing(monkeypatch):
-    # nats-py has no first-connect retry option (retry_on_failed_connect was never a real
-    # parameter, at any version) -- connect() raises immediately when the backbone is down.
-    # start() must swallow that, stay inactive, and schedule a background retry rather than
-    # crash or give up forever.
+    # A backbone that fails to connect must be swallowed: stay inactive, schedule a
+    # background retry, never crash or give up forever.
     spy = SpyService()
-    _install_fake_nats(monkeypatch, connect_error=ConnectionRefusedError("nats down"))
+    _install_fake_queue(monkeypatch, connect_error=ConnectionRefusedError("backbone down"))
     scheduled = []
     monkeypatch.setattr("consumer.asyncio.create_task", lambda coro: scheduled.append(coro) or coro.close())
     c = _consumer(spy)
     await c.start()
     assert c.active is False
-    assert c._nc is None
+    assert c._queue is None
     assert len(scheduled) == 1  # a retry was scheduled, not abandoned
 
 
 async def test_retry_connect_recovers_after_repeated_failures(monkeypatch):
-    # Drives _retry_connect() directly (as start() would via asyncio.create_task) against a
-    # connect() that fails twice before succeeding, confirming the background loop is what
-    # actually recovers a backbone that was down at startup.
+    # Drives _retry_connect() directly against a connect() that fails twice before succeeding,
+    # confirming the background loop recovers a backbone that was down at startup.
     spy = SpyService()
-    js = FakeJS()
-    nc = FakeNC(connected=True, js=js)
+    queue = FakeQueue()
     calls = {"n": 0}
 
-    async def flaky_connect(url, **kwargs):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise ConnectionRefusedError("nats down")
-        return nc
-
-    mod = types.ModuleType("nats")
-    mod.connect = flaky_connect
-    js_api = types.ModuleType("nats.js.api")
-
-    class DeliverPolicy:
-        NEW = "new"
-
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
+    class _FlakyQueue:
+        def __init__(self, config):
             pass
 
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
+        async def connect(self):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionRefusedError("backbone down")
+
+        def __getattr__(self, item):
+            return getattr(queue, item)
+
+    import multistack.queue as mq
+
+    monkeypatch.setattr(mq, "Queue", _FlakyQueue)
 
     async def instant_sleep(_seconds):
         return None
@@ -173,54 +132,46 @@ async def test_retry_connect_recovers_after_repeated_failures(monkeypatch):
     assert c.active is True
 
 
-async def test_reconnect_rebinds_and_restores_active(monkeypatch):
+async def test_bind_uses_the_nack_provisioned_consumer(monkeypatch):
+    """The binding names the stream + durable and asks for ALWAYS ack (soft-ack); the
+    subject/deliver policy/max_deliver live in the NACK consumer, not here."""
+    from multistack.queue.drivers.nats.messaging import AckMode
+
     spy = SpyService()
-    js = FakeJS()  # subscribe succeeds
-    nc = FakeNC(connected=False, js=js)  # not connected at start -> bind deferred
-    _install_fake_nats(monkeypatch, nc=nc)
+    queue = FakeQueue()
+    _install_fake_queue(monkeypatch, queue=queue)
     c = _consumer(spy)
+
     await c.start()
-    assert c.active is False
-
-    # The backbone comes up: nats-py fires the reconnect handler, which binds.
-    nc.is_connected = True
-    await c._on_reconnected()
     assert c.active is True
-
-    # Counting resumes: a request event is now counted.
-    await c._on_msg(FakeMsg({"type": "request", "request_id": "r1", "principal": "u", "model": "m", "path": "/p"}))
-    assert spy.calls == [("u", "m", "/p", "r1")]
-
-    # A later reconnect drains the live sub before rebinding (no duplicate JS push binding).
-    live = c._sub
-    await c._on_reconnected()
-    assert live.unsubscribed is True
-    assert c.active is True
-    assert js.subscribe_calls == 2
+    assert queue.subscribe_calls == 1
+    binding = queue.bindings[0]
+    assert binding.stream == "GATEWAY_EVENTS"
+    assert binding.durable == "rpm-counter"
+    assert binding.ack_mode is AckMode.ALWAYS
 
 
-async def test_request_event_is_counted_and_acked():
+async def test_request_event_is_counted():
     spy = SpyService()
     c = _consumer(spy)
-    msg = FakeMsg({"type": "request", "request_id": "r1", "principal": "u1", "model": "m1", "path": "/v1/chat/completions"})
-    await c._on_msg(msg)
+    await c._on_msg({"type": "request", "request_id": "r1", "principal": "u1", "model": "m1", "path": "/v1/chat/completions"})
     assert spy.calls == [("u1", "m1", "/v1/chat/completions", "r1")]
-    assert msg.acked is True
 
 
-async def test_response_event_is_not_counted_but_acked():
+async def test_response_event_is_not_counted():
     spy = SpyService()
     c = _consumer(spy)
-    msg = FakeMsg({"type": "response", "request_id": "r1", "status": 200})
-    await c._on_msg(msg)
+    await c._on_msg({"type": "response", "request_id": "r1", "status": 200})
     assert spy.calls == []          # only `request` events feed RPM
-    assert msg.acked is True
 
 
-async def test_bad_message_is_not_counted_but_acked():
-    spy = SpyService()
-    c = _consumer(spy)
-    msg = FakeMsg(b"{not json")
-    await c._on_msg(msg)
-    assert spy.calls == []
-    assert msg.acked is True         # poison message can't stall the consumer
+async def test_handler_error_is_swallowed_so_a_poison_message_cannot_stall():
+    """The SDK acks under AckMode.ALWAYS regardless, but the handler must also never
+    propagate — counting errors can't be allowed to take the service down."""
+
+    class BoomService:
+        async def count(self, *_args):
+            raise RuntimeError("redis down")
+
+    c = RpmConsumer(Settings(event_backbone_url="nats://test"), BoomService())
+    await c._on_msg({"type": "request", "request_id": "r1", "principal": "u", "model": "m", "path": "/p"})

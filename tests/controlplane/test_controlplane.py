@@ -1,19 +1,20 @@
 """The control plane capability: spec, wiring, and the FastAPI driver.
 
 The theme of these tests is that nothing here may carry a credential. The
-charts read DATABASE_URL, VALKEY_URL and JWT_SECRET from a Kubernetes
+charts read DATABASE_URL_ADMIN / DATABASE_URL_ORG, VALKEY_URL and JWT_SECRET from a Kubernetes
 Secret; this spec carries only that Secret's name, and the driver tells
 the chart not to render one of its own.
 """
+
 import base64
 import json
 
 import pytest
 
 from multistack.controlplane import (
+    REQUIRED_SECRET_KEYS,
     ControlPlane,
     ControlPlanePrerequisiteError,
-    REQUIRED_SECRET_KEYS,
 )
 from multistack.controlplane.drivers import fastapi_service as cp
 from multistack.controlplane.spec import AdminControlPlaneOptions
@@ -39,9 +40,7 @@ class _FakeRunner:
 
 
 def _secret(keys) -> str:
-    return json.dumps(
-        {"data": {k: base64.b64encode(b"x").decode() for k in keys}}
-    )
+    return json.dumps({"data": {k: base64.b64encode(b"x").decode() for k in keys}})
 
 
 @pytest.fixture
@@ -57,7 +56,8 @@ def calls(driver, monkeypatch):
     monkeypatch.setattr(cp, "require_cli", lambda *a, **k: None)
     monkeypatch.setattr(cp, "require_cluster", lambda *a, **k: None)
     monkeypatch.setattr(
-        cp, "kubectl",
+        cp,
+        "kubectl",
         lambda *a, **k: _secret(REQUIRED_SECRET_KEYS["admin"]),
     )
     return recorded
@@ -79,8 +79,12 @@ def test_no_credential_field_exists_on_the_spec():
     """The guard that matters: a spec is a file people commit, so there
     must be nowhere in it for a password to go."""
     forbidden = {
-        "database_url", "valkey_url", "jwt_secret", "admin_api_key",
-        "service_api_key", "password",
+        "database_url",
+        "valkey_url",
+        "jwt_secret",
+        "admin_api_key",
+        "service_api_key",
+        "password",
     }
     assert not (forbidden & set(ControlPlane.model_fields))
 
@@ -91,9 +95,7 @@ def test_both_types_are_supported():
 
 def test_each_type_gets_its_own_chart():
     assert spec(type="admin").options.chart.endswith("admin-control-plane/chart")
-    assert spec(type="organization").options.chart.endswith(
-        "organization-control-plane/chart"
-    )
+    assert spec(type="organization").options.chart.endswith("organization-control-plane/chart")
 
 
 def test_each_type_points_at_the_other_as_its_peer():
@@ -109,9 +111,7 @@ def test_an_explicit_peer_url_wins():
 
 
 def test_the_endpoint_is_credential_free():
-    assert spec().endpoint == (
-        "http://admin-control-plane.control-plane.svc.cluster.local:8000"
-    )
+    assert spec().endpoint == ("http://admin-control-plane.control-plane.svc.cluster.local:8000")
 
 
 def test_admin_needs_more_secret_keys_than_organization():
@@ -132,7 +132,8 @@ def test_it_requires_a_cluster_a_database_and_a_cache():
 
 def test_it_does_not_wire_database_url_from_the_stack():
     """The Stack's database_url is deliberately credential-free, so it
-    cannot serve as the chart's DATABASE_URL. The Secret does."""
+    cannot serve as the chart's DATABASE_URL_ADMIN / DATABASE_URL_ORG. The
+    Secret does."""
     assert "database_url" not in ControlPlane.FROM_STACK.values()
     assert "cache_url" not in ControlPlane.FROM_STACK.values()
 
@@ -192,7 +193,8 @@ def test_organization_sends_its_own_config_keys(driver, monkeypatch):
     monkeypatch.setattr(cp, "require_cli", lambda *a, **k: None)
     monkeypatch.setattr(cp, "require_cluster", lambda *a, **k: None)
     monkeypatch.setattr(
-        cp, "kubectl",
+        cp,
+        "kubectl",
         lambda *a, **k: _secret(REQUIRED_SECRET_KEYS["organization"]),
     )
 
@@ -210,7 +212,7 @@ def test_a_missing_secret_is_refused_with_the_keys_it_needs(driver, monkeypatch)
     monkeypatch.setattr(cp, "kubectl", lambda *a, **k: "")
     monkeypatch.setattr(driver, "_helm", lambda c: pytest.fail("must not install"))
 
-    with pytest.raises(ControlPlanePrerequisiteError, match="DATABASE_URL"):
+    with pytest.raises(ControlPlanePrerequisiteError, match="DATABASE_URL_"):
         driver.create(spec())
 
 
@@ -255,9 +257,7 @@ def test_a_node_selector_reaches_the_chart(driver, calls):
     """The control plane images are sideloaded onto one node, so a pod
     scheduled elsewhere never pulls."""
     driver.create(spec(node_selector={"kubernetes.io/hostname": "rke2-wrk-2"}))
-    assert _install(calls)["values"]["nodeSelector"] == {
-        "kubernetes.io/hostname": "rke2-wrk-2"
-    }
+    assert _install(calls)["values"]["nodeSelector"] == {"kubernetes.io/hostname": "rke2-wrk-2"}
 
 
 def test_no_node_selector_means_the_key_is_absent(driver, calls):
@@ -269,3 +269,22 @@ def test_tolerations_reach_the_chart(driver, calls):
     tol = [{"key": "dedicated", "operator": "Exists"}]
     driver.create(spec(tolerations=tol))
     assert _install(calls)["values"]["tolerations"] == tol
+
+
+# -- affinity ------------------------------------------------------------
+# The chart excludes the control plane by default. On a single-node cluster
+# the only node IS the control plane, so the release installs cleanly and
+# the pod stays Pending; {} overrides that exclusion deliberately.
+
+
+def test_an_empty_affinity_is_sent_as_null_not_an_empty_map(driver, calls):
+    """Helm merges maps recursively, so {} leaves the chart's own affinity in
+    place and the pod stays Pending; null is what deletes the key."""
+    driver.create(spec(affinity={}))
+    values = _install(calls)["values"]
+    assert "affinity" in values and values["affinity"] is None
+
+
+def test_no_affinity_means_the_key_is_absent(driver, calls):
+    driver.create(spec())
+    assert "affinity" not in _install(calls)["values"]

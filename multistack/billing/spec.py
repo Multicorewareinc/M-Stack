@@ -19,7 +19,7 @@ same shape as `ControlPlane`. Two independent surfaces in one service
              broken -- "usage metering only, no Stripe integration yet"
              is a valid, supported configuration.
 
-Credentials never appear here. The chart reads DATABASE_URL,
+Credentials never appear here. The chart reads DATABASE_URL_BILLING,
 SERVICE_API_KEY and the two optional Stripe secrets from a Kubernetes
 Secret, and this spec carries only that Secret's *name* -- see
 `existing_secret`, the same design as `ControlPlane.existing_secret`.
@@ -35,13 +35,14 @@ see ARCHITECTURE-GAPS.md. `PROVIDES` is still declared, on the same
 reasoning `Tokenizer.PROVIDES` has: a real output worth publishing even
 before anything reads it automatically.
 """
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("stripe",)
+SUPPORTED_TYPES: tuple[str, ...] = ("stripe",)
 
 DEFAULT_NAMESPACE = "billing"
 DEFAULT_PORT = 8000
@@ -52,7 +53,7 @@ DEFAULT_PORT = 8000
 # Not STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET: both are genuinely
 # optional (see the module docstring), so their absence is not a
 # prerequisite failure.
-REQUIRED_SECRET_KEYS: Tuple[str, ...] = ("DATABASE_URL", "SERVICE_API_KEY")
+REQUIRED_SECRET_KEYS: tuple[str, ...] = ("DATABASE_URL_BILLING", "SERVICE_API_KEY")
 
 
 class StripeOptions(BaseModel):
@@ -62,8 +63,13 @@ class StripeOptions(BaseModel):
 
     release_name: str = "billing"
     chart: str = "api/microservices/billing/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     durable_name: str = "billing-metering"
 
@@ -111,23 +117,23 @@ class Billing(CapabilitySpec):
     """Usage metering and Stripe subscriptions on an existing cluster."""
 
     CAPABILITY: ClassVar[str] = "billing"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = OPTIONS_FOR_TYPE
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {"stripe": DEFAULT_NAMESPACE}
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = OPTIONS_FOR_TYPE
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {"stripe": DEFAULT_NAMESPACE}
 
     # A database it owns exclusively (database-per-service) and, like
     # `ControlPlane`, no cache -- billing has no VALKEY_URL/REDIS_URL in
     # its settings at all.
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster", "database")
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster", "database")
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
     }
-    PROVIDES: ClassVar[Dict[str, str]] = {"billing_endpoint": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"billing_endpoint": "endpoint"}
 
     type: str = "stripe"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[BillingOptions] = None
+    namespace: str | None = None
+    options: BillingOptions | None = None
 
     # The Secret holding every key in REQUIRED_SECRET_KEYS, plus
     # optionally STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET. Referenced by
@@ -150,8 +156,14 @@ class Billing(CapabilitySpec):
     # anywhere else stays ImagePullBackOff with nothing in the release to
     # explain it. The chart's own affinity already keeps pods off the
     # control plane; this is how a caller says *which* worker.
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Dict[str, Any]]] = None
+    # The charts' own default keeps pods off the control plane, which is
+    # right for a multi-node cluster and impossible to satisfy on a
+    # single-node one, where the only node is the control plane. Absent
+    # leaves that default alone; an explicit {} means "schedule
+    # anywhere", which is how a one-node cluster says so deliberately.
+    affinity: dict[str, Any] | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[dict[str, Any]] | None = None
 
     @field_validator("kubeconfig_path")
     @classmethod
@@ -170,7 +182,7 @@ class Billing(CapabilitySpec):
     def _secret_required(cls, value: str) -> str:
         if not value:
             raise ValueError(
-                "existing_secret is required: billing reads DATABASE_URL "
+                "existing_secret is required: billing reads DATABASE_URL_BILLING "
                 "and SERVICE_API_KEY (and optionally the Stripe secrets) "
                 "from a Kubernetes Secret, and this spec carries only its "
                 "name. Create the Secret with multistack.kube.apply, which "

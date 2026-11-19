@@ -4,8 +4,9 @@ Same shape as `FastAPIControlPlaneDriver`: a FastAPI service, a Postgres
 schema, a migration Job that runs before the Deployment is ready, and a
 Secret referenced by name rather than created here.
 """
+
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
@@ -20,9 +21,9 @@ class StripeBillingDriver:
     def _helm(self, billing: Billing) -> HelmRunner:
         return HelmRunner(billing.kubeconfig_path, error_cls=BillingError)
 
-    def _values(self, billing: Billing) -> Dict[str, Any]:
+    def _values(self, billing: Billing) -> dict[str, Any]:
         options = billing.options
-        values: Dict[str, Any] = {
+        values: dict[str, Any] = {
             "replicaCount": billing.replicas,
             "service": {"port": billing.service_port},
             "config": {
@@ -56,27 +57,45 @@ class StripeBillingDriver:
                 "backoffLimit": options.migration_backoff_limit,
             },
         }
-        if options.image_tag:
-            values["image"] = {"tag": options.image_tag}
+        if options.image_tag or options.image_repository:
+            image: dict[str, Any] = {}
+            if options.image_repository:
+                image["repository"] = options.image_repository
+            if options.image_tag:
+                image["tag"] = options.image_tag
+            values["image"] = image
         # Absent leaves the chart's own default in place; an explicit {}
         # overrides it with "schedule anywhere", which is a different
         # statement and sometimes the intended one.
+        if billing.affinity is not None:
+            # null, not {}, for the empty case: Helm merges user values
+            # into the chart's recursively, so an empty map adds nothing and
+            # the chart's own affinity survives -- the release installs and
+            # the pod stays Pending with the default still in force. An
+            # explicit null is what Helm treats as "delete this key".
+            values["affinity"] = billing.affinity or None
         if billing.node_selector is not None:
             values["nodeSelector"] = billing.node_selector
         if billing.tolerations is not None:
             values["tolerations"] = billing.tolerations
         return values
 
-    def check_prerequisites(self, billing: Billing) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, billing: Billing) -> list[str]:
+        warnings: list[str] = []
         require_cli("helm", error_cls=BillingPrerequisiteError)
         require_cluster(billing.kubeconfig_path, capability="billing")
 
         raw = kubectl(
-            billing.kubeconfig_path, "get", "secret",
+            billing.kubeconfig_path,
+            "get",
+            "secret",
             billing.existing_secret,
-            "-n", billing.resolved_namespace, "-o", "json",
-            error_cls=BillingError, check=False,
+            "-n",
+            billing.resolved_namespace,
+            "-o",
+            "json",
+            error_cls=BillingError,
+            check=False,
         )
         if not (raw or "").strip():
             raise BillingPrerequisiteError(

@@ -14,6 +14,7 @@ Two seams: `stub_helm` for the operator's Helm release (the shared
 recording runner), and `_local` for kubectl, whose argv is the only
 record of what would have been applied or destroyed.
 """
+
 import json
 
 import pytest
@@ -46,12 +47,23 @@ def cnpg(**kwargs) -> Database:
     """A Database, with the operator settings routed into the
     implementation's options so every call site below reads as it
     always did."""
-    opt_keys = {"operator_release_name", "operator_namespace",
-                "operator_chart", "operator_chart_version", "values",
-                "install_timeout", "crd_name"}
+    opt_keys = {
+        "operator_release_name",
+        "operator_namespace",
+        "operator_chart",
+        "operator_chart_version",
+        "values",
+        "install_timeout",
+        "crd_name",
+    }
     opts = {k: kwargs.pop(k) for k in list(kwargs) if k in opt_keys}
-    base = dict(kubeconfig_path=KUBECONFIG, name="admin-pg",
-                namespace="platform-db", instances=1, database=database())
+    base = dict(
+        kubeconfig_path=KUBECONFIG,
+        name="admin-pg",
+        namespace="platform-db",
+        instances=1,
+        database=database(),
+    )
     base.update(kwargs)
     if opts:
         base["options"] = CNPGOptions(**opts)
@@ -94,12 +106,12 @@ def kubectl(backend, monkeypatch):
     class Fake:
         def __init__(self):
             self.runs = []
-            self.present = {CRD}          # the CRD exists by default
+            self.present = {CRD}  # the CRD exists by default
             self.phase = "Cluster in healthy state"
 
         def __call__(self, argv, check=True):
             self.runs.append(argv)
-            args = argv[3:]               # past kubectl --kubeconfig <path>
+            args = argv[3:]  # past kubectl --kubeconfig <path>
 
             if args[0] == "get":
                 return self._get(args)
@@ -122,15 +134,13 @@ def kubectl(backend, monkeypatch):
             self.present.discard(CRD)
 
         def ran(self, *fragment):
-            return [r for r in self.runs
-                    if all(f in r for f in fragment)]
+            return [r for r in self.runs if all(f in r for f in fragment)]
 
     fake = Fake()
     fake.present = {CRD}
     # `get crd <name>` arrives as args = ["get", "crd", <name>, ...],
     # so the CRD is keyed by its own name.
-    monkeypatch.setattr(CNPGDriver, "_local",
-                        lambda self, argv, check=True: fake(argv, check))
+    monkeypatch.setattr(CNPGDriver, "_local", lambda self, argv, check=True: fake(argv, check))
     monkeypatch.setattr(
         "multistack.database.drivers.cnpg.apply",
         lambda path, manifest, **k: fake.runs.append(["apply", manifest]) or "",
@@ -166,15 +176,16 @@ def test_create_installs_the_operator_chart(backend, stub_helm, kubectl):
 
 
 def test_create_does_not_reinstall_an_operator_that_is_there(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Unlike create_cluster, this is a no-op rather than an upgrade --
     update() is the method that reconciles."""
     kubectl.given(f"crd/{CRD}")
     runner = stub_helm(CNPGDriver)
     spec = cnpg()
-    runner.given_deployed(spec.operator_release_name,
-                          namespace=spec.operator_namespace)
+    runner.given_deployed(spec.operator_release_name, namespace=spec.operator_namespace)
 
     backend.create(spec)
 
@@ -182,7 +193,9 @@ def test_create_does_not_reinstall_an_operator_that_is_there(
 
 
 def test_create_refuses_when_the_crd_did_not_appear(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """A chart that installed without registering its CRD leaves every
     later Cluster apply failing with an unhelpful "no matches for kind"."""
@@ -200,18 +213,18 @@ def test_update_reconciles_the_operator(backend, stub_helm, kubectl):
 
     backend.update(spec)
 
-    assert runner.installed(spec.operator_release_name)[-1]["values"] == {
-        "replicaCount": 2}
+    assert runner.installed(spec.operator_release_name)[-1]["values"] == {"replicaCount": 2}
 
 
 def test_delete_removes_the_release_and_its_namespace(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     kubectl.given(f"crd/{CRD}", "namespace/cnpg-system")
     runner = stub_helm(CNPGDriver)
     spec = cnpg()
-    runner.given_deployed(spec.operator_release_name,
-                          namespace=spec.operator_namespace)
+    runner.given_deployed(spec.operator_release_name, namespace=spec.operator_namespace)
 
     backend.delete(spec)
 
@@ -224,8 +237,7 @@ def test_delete_can_keep_the_namespace(backend, stub_helm, kubectl):
     kubectl.given(f"crd/{CRD}", "namespace/cnpg-system")
     runner = stub_helm(CNPGDriver)
     spec = cnpg()
-    runner.given_deployed(spec.operator_release_name,
-                          namespace=spec.operator_namespace)
+    runner.given_deployed(spec.operator_release_name, namespace=spec.operator_namespace)
 
     backend.delete(spec, remove_namespace=False)
 
@@ -233,7 +245,9 @@ def test_delete_can_keep_the_namespace(backend, stub_helm, kubectl):
 
 
 def test_the_crds_survive_deleting_the_operator(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Cluster-scoped and shared: dropping them would take every
     PostgreSQL Cluster on the cluster with them, in any namespace."""
@@ -248,7 +262,9 @@ def test_the_crds_survive_deleting_the_operator(
 
 # -- cluster lifecycle ----------------------------------------------------
 def test_create_cluster_applies_a_secret_then_the_cluster(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", "namespace/platform-db")
@@ -257,13 +273,16 @@ def test_create_cluster_applies_a_secret_then_the_cluster(
     backend.create_cluster(spec, wait_for_ready=False)
 
     kinds = [e[1]["kind"] for e in kubectl.runs if e[0] == "apply"]
-    assert kinds == ["Secret", "Cluster"], (
-        "the bootstrap Secret has to exist before the Cluster that names it"
-    )
+    assert kinds == [
+        "Secret",
+        "Cluster",
+    ], "the bootstrap Secret has to exist before the Cluster that names it"
 
 
 def test_the_bootstrap_secret_carries_the_owner_and_password(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", "namespace/platform-db")
@@ -277,7 +296,9 @@ def test_the_bootstrap_secret_carries_the_owner_and_password(
 
 
 def test_the_cluster_manifest_keeps_postgres_off_the_control_plane(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """The manifest is the only place this can be said: CloudNativePG
     emits no scheduling constraints of its own and rke2-cp01 carries no
@@ -289,15 +310,20 @@ def test_the_cluster_manifest_keeps_postgres_off_the_control_plane(
     backend.create_cluster(cnpg(), wait_for_ready=False)
 
     affinity = applied(kubectl, "Cluster")["spec"]["affinity"]
-    terms = affinity["nodeAffinity"][
-        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    terms = affinity["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
     expressions = [e for t in terms for e in t["matchExpressions"]]
-    assert {"key": "node-role.kubernetes.io/control-plane",
-            "operator": "DoesNotExist"} in expressions
+    assert {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "DoesNotExist",
+    } in expressions
 
 
 def test_a_node_selector_and_tolerations_reach_the_manifest(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Inside spec.affinity, which is where CloudNativePG's schema puts
     them -- not at the top level like a Deployment."""
@@ -305,19 +331,22 @@ def test_a_node_selector_and_tolerations_reach_the_manifest(
     kubectl.given(f"crd/{CRD}", "namespace/platform-db")
 
     backend.create_cluster(
-        cnpg(node_selector={"kubernetes.io/hostname": "rke2-wrk-2"},
-             tolerations=[{"key": "dedicated", "operator": "Exists"}]),
+        cnpg(
+            node_selector={"kubernetes.io/hostname": "rke2-wrk-2"},
+            tolerations=[{"key": "dedicated", "operator": "Exists"}],
+        ),
         wait_for_ready=False,
     )
 
     affinity = applied(kubectl, "Cluster")["spec"]["affinity"]
     assert affinity["nodeSelector"] == {"kubernetes.io/hostname": "rke2-wrk-2"}
-    assert affinity["tolerations"] == [{"key": "dedicated",
-                                        "operator": "Exists"}]
+    assert affinity["tolerations"] == [{"key": "dedicated", "operator": "Exists"}]
 
 
 def test_the_storage_class_is_only_set_when_given(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """An empty storageClass is not the same as an absent one: it binds
     to no class at all rather than to the cluster default."""
@@ -327,17 +356,17 @@ def test_the_storage_class_is_only_set_when_given(
     backend.create_cluster(cnpg(), wait_for_ready=False)
     assert "storageClass" not in applied(kubectl, "Cluster")["spec"]["storage"]
 
-    backend.create_cluster(cnpg(name="other", storage_class="longhorn"),
-                           wait_for_ready=False)
-    assert applied(kubectl, "Cluster")["spec"]["storage"]["storageClass"] == (
-        "longhorn")
+    backend.create_cluster(cnpg(name="other", storage_class="longhorn"), wait_for_ready=False)
+    assert applied(kubectl, "Cluster")["spec"]["storage"]["storageClass"] == ("longhorn")
 
 
 def test_create_cluster_creates_the_namespace_only_if_absent(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     stub_helm(CNPGDriver)
-    kubectl.given(f"crd/{CRD}")          # no namespace
+    kubectl.given(f"crd/{CRD}")  # no namespace
 
     backend.create_cluster(cnpg(), wait_for_ready=False)
     assert kubectl.ran("create", "namespace", "platform-db")
@@ -349,15 +378,16 @@ def test_create_cluster_creates_the_namespace_only_if_absent(
 
 
 def test_create_cluster_is_a_no_op_when_one_exists(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Re-running a provisioning script must not reapply a Secret over a
     live cluster -- CNPG reads bootstrap.initdb.secret only at bootstrap,
     so a rewritten password would take effect nowhere and diverge from
     the role that actually exists."""
     stub_helm(CNPGDriver)
-    kubectl.given(f"crd/{CRD}", "namespace/platform-db",
-                  f"{CLUSTER_RESOURCE}/admin-pg")
+    kubectl.given(f"crd/{CRD}", "namespace/platform-db", f"{CLUSTER_RESOURCE}/admin-pg")
 
     backend.create_cluster(cnpg(), wait_for_ready=False)
 
@@ -365,7 +395,9 @@ def test_create_cluster_is_a_no_op_when_one_exists(
 
 
 def test_update_cluster_of_a_missing_cluster_is_refused(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Applying would create it -- turning a typo'd name into a second
     database nobody asked for, with its own PVCs."""
@@ -377,7 +409,9 @@ def test_update_cluster_of_a_missing_cluster_is_refused(
 
 
 def test_update_cluster_reapplies_the_cluster_only(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Not the Secret: CNPG reads it at bootstrap and never again, so
     rewriting it on every update only invites drift."""
@@ -393,7 +427,10 @@ def test_update_cluster_reapplies_the_cluster_only(
 
 # -- deletion, which is the irreversible half -----------------------------
 def test_delete_cluster_waits_for_the_resource_to_go(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
     """The regression that made this path dead code. wait_for_absent
     takes the object to watch -- (kubeconfig_path, kind, name,
@@ -405,11 +442,9 @@ def test_delete_cluster_waits_for_the_resource_to_go(
     watched = {}
 
     def fake_absent(kubeconfig, kind, name, namespace, **kwargs):
-        watched.update(kubeconfig=kubeconfig, kind=kind, name=name,
-                       namespace=namespace, **kwargs)
+        watched.update(kubeconfig=kubeconfig, kind=kind, name=name, namespace=namespace, **kwargs)
 
-    monkeypatch.setattr(
-        "multistack.database.drivers.cnpg.wait_for_absent", fake_absent)
+    monkeypatch.setattr("multistack.database.drivers.cnpg.wait_for_absent", fake_absent)
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", f"{CLUSTER_RESOURCE}/admin-pg")
 
@@ -422,13 +457,17 @@ def test_delete_cluster_waits_for_the_resource_to_go(
 
 
 def test_a_delete_that_never_finishes_says_so(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
     """A CNPG Cluster has finalizers, so "the delete returned" and "the
     cluster is gone" are different moments."""
     monkeypatch.setattr(
         "multistack.database.drivers.cnpg.wait_for_absent",
-        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("still there")))
+        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("still there")),
+    )
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", f"{CLUSTER_RESOURCE}/admin-pg")
 
@@ -437,18 +476,18 @@ def test_a_delete_that_never_finishes_says_so(
 
 
 def test_delete_cluster_does_not_need_the_password(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
     """Removing a database should not require typing its credentials.
     Both read paths and the delete path validate identity only."""
-    monkeypatch.setattr(
-        "multistack.database.drivers.cnpg.wait_for_absent",
-        lambda *a, **k: None)
+    monkeypatch.setattr("multistack.database.drivers.cnpg.wait_for_absent", lambda *a, **k: None)
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", f"{CLUSTER_RESOURCE}/admin-pg")
 
-    no_password = Database(kubeconfig_path=KUBECONFIG, name="admin-pg",
-                           namespace="platform-db")
+    no_password = Database(kubeconfig_path=KUBECONFIG, name="admin-pg", namespace="platform-db")
 
     backend.delete_cluster(no_password, remove_secret=True)
 
@@ -457,11 +496,12 @@ def test_delete_cluster_does_not_need_the_password(
 
 
 def test_delete_cluster_can_keep_the_secret(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "multistack.database.drivers.cnpg.wait_for_absent",
-        lambda *a, **k: None)
+    monkeypatch.setattr("multistack.database.drivers.cnpg.wait_for_absent", lambda *a, **k: None)
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", f"{CLUSTER_RESOURCE}/admin-pg")
 
@@ -471,7 +511,9 @@ def test_delete_cluster_can_keep_the_secret(
 
 
 def test_deleting_an_absent_cluster_is_not_an_error(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}")
@@ -482,11 +524,12 @@ def test_deleting_an_absent_cluster_is_not_an_error(
 
 
 def test_deleting_a_cluster_leaves_the_operator_alone(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "multistack.database.drivers.cnpg.wait_for_absent",
-        lambda *a, **k: None)
+    monkeypatch.setattr("multistack.database.drivers.cnpg.wait_for_absent", lambda *a, **k: None)
     runner = stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", f"{CLUSTER_RESOURCE}/admin-pg")
 
@@ -505,7 +548,9 @@ def test_cluster_exists_reflects_the_cluster(backend, stub_helm, kubectl):
 
 
 def test_cluster_status_raises_for_an_absent_cluster(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     stub_helm(CNPGDriver)
     with pytest.raises(DatabaseClusterNotFoundError, match="was not found"):
@@ -513,21 +558,26 @@ def test_cluster_status_raises_for_an_absent_cluster(
 
 
 def test_unparseable_status_is_not_reported_as_absent(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
-    """"kubectl returned something I cannot read" and "there is no such
+    """ "kubectl returned something I cannot read" and "there is no such
     cluster" are different answers, and only one of them means it is
     safe to create."""
     stub_helm(CNPGDriver)
-    monkeypatch.setattr(CNPGDriver, "_local",
-                        lambda self, argv, check=True: "not json")
+    monkeypatch.setattr(CNPGDriver, "_local", lambda self, argv, check=True: "not json")
 
     with pytest.raises(DatabaseError, match="Failed to parse status"):
         backend.cluster_status(cnpg())
 
 
 def test_readiness_waits_for_the_healthy_phase(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
     stub_helm(CNPGDriver)
     kubectl.given(f"{CLUSTER_RESOURCE}/admin-pg")
@@ -535,8 +585,8 @@ def test_readiness_waits_for_the_healthy_phase(
 
     monkeypatch.setattr(
         "multistack.database.drivers.cnpg.wait_for",
-        lambda check, **kwargs: (_ for _ in ()).throw(TimeoutError())
-        if not check() else None)
+        lambda check, **kwargs: (_ for _ in ()).throw(TimeoutError()) if not check() else None,
+    )
 
     with pytest.raises(DatabaseTimeoutError, match="to become ready"):
         backend.wait_for_cluster_ready(cnpg())
@@ -547,7 +597,9 @@ def test_readiness_waits_for_the_healthy_phase(
 
 # -- state tracking -------------------------------------------------------
 def test_the_operator_and_the_database_are_tracked_apart(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """Two public lifecycles, two rows. "database" is what a dependent's
     REQUIRES asks for and only the Cluster provides it; the operator is
@@ -568,7 +620,10 @@ def test_the_operator_and_the_database_are_tracked_apart(
 
 
 def test_a_failed_cluster_create_leaves_a_failed_row(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
     from multistack.state.tracking import default_state_manager
 
@@ -577,7 +632,8 @@ def test_a_failed_cluster_create_leaves_a_failed_row(
     kubectl.given(f"crd/{CRD}", "namespace/platform-db")
     monkeypatch.setattr(
         "multistack.database.drivers.cnpg.apply",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("admission denied")))
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("admission denied")),
+    )
 
     with pytest.raises(RuntimeError, match="admission denied"):
         backend.create_cluster(cnpg(), wait_for_ready=False)
@@ -587,7 +643,9 @@ def test_a_failed_cluster_create_leaves_a_failed_row(
 
 
 def test_a_refused_update_leaves_the_database_healthy(
-    backend, stub_helm, kubectl,
+    backend,
+    stub_helm,
+    kubectl,
 ):
     """An update against a cluster that is not there is a rejected
     request, not a broken database -- nothing was touched, so the row
@@ -596,8 +654,7 @@ def test_a_refused_update_leaves_the_database_healthy(
 
     state = default_state_manager()
     stub_helm(CNPGDriver)
-    kubectl.given(f"crd/{CRD}", "namespace/platform-db",
-                  f"{CLUSTER_RESOURCE}/admin-pg")
+    kubectl.given(f"crd/{CRD}", "namespace/platform-db", f"{CLUSTER_RESOURCE}/admin-pg")
     spec = cnpg()
     backend.create_cluster(spec, wait_for_ready=False)
 
@@ -609,15 +666,16 @@ def test_a_refused_update_leaves_the_database_healthy(
 
 
 def test_deleting_the_cluster_removes_only_its_row(
-    backend, stub_helm, kubectl, monkeypatch,
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
 ):
     from multistack.state.tracking import default_state_manager
 
     state = default_state_manager()
-    monkeypatch.setattr(
-        "multistack.database.drivers.cnpg.wait_for_absent",
-        lambda *a, **k: None)
-    runner = stub_helm(CNPGDriver)
+    monkeypatch.setattr("multistack.database.drivers.cnpg.wait_for_absent", lambda *a, **k: None)
+    stub_helm(CNPGDriver)
     kubectl.given(f"crd/{CRD}", "namespace/platform-db")
     spec = cnpg()
 
@@ -628,14 +686,99 @@ def test_deleting_the_cluster_removes_only_its_row(
     backend.delete_cluster(spec)
 
     assert state.get("admin-pg") is None
-    assert state.get("cnpg") is not None, (
-        "deleting a database must not deregister the operator"
+    assert state.get("cnpg") is not None, "deleting a database must not deregister the operator"
+
+
+# -- Vault ------------------------------------------------------------------
+# tests/conftest.py's isolated_vault_client fixture points
+# default_vault_client() at an empty init-file directory, so the first
+# test below exercises create_cluster() against the real (no-op-safe)
+# client; the second swaps in a recording stand-in to pin down the exact
+# path/data this driver sends.
+def test_create_cluster_succeeds_even_though_no_vault_exists(
+    backend,
+    stub_helm,
+    kubectl,
+):
+    stub_helm(CNPGDriver)
+    kubectl.given(f"crd/{CRD}", "namespace/platform-db")
+
+    result = backend.create_cluster(cnpg(), wait_for_ready=False)
+
+    assert result.name == "admin-pg"
+
+
+def test_create_cluster_stores_the_owner_and_password_at_the_clusters_own_path(
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
+):
+    stub_helm(CNPGDriver)
+    kubectl.given(f"crd/{CRD}", "namespace/platform-db")
+    calls = []
+
+    class FakeVaultClient:
+        def store_secret(self, path, data, *, deployment_name=None):
+            calls.append((path, data, deployment_name))
+            return True
+
+    monkeypatch.setattr(
+        "multistack.database.drivers.cnpg.default_vault_client",
+        lambda: FakeVaultClient(),
     )
+
+    backend.create_cluster(cnpg(), wait_for_ready=False)
+
+    assert calls == [
+        (
+            "database/admin-pg",
+            {"owner": "admin", "password": "s3cret"},
+            "admin-pg",
+        )
+    ]
+
+
+def test_create_cluster_also_stores_the_secret_when_the_cluster_already_exists(
+    backend,
+    stub_helm,
+    kubectl,
+    monkeypatch,
+):
+    """So that a Vault stood up after this database still ends up
+    holding its credential on the next create_cluster() call, rather
+    than only on the one that originally bootstrapped the role."""
+    stub_helm(CNPGDriver)
+    kubectl.given(f"crd/{CRD}", "namespace/platform-db", f"{CLUSTER_RESOURCE}/admin-pg")
+    calls = []
+
+    class FakeVaultClient:
+        def store_secret(self, path, data, *, deployment_name=None):
+            calls.append((path, data, deployment_name))
+            return True
+
+    monkeypatch.setattr(
+        "multistack.database.drivers.cnpg.default_vault_client",
+        lambda: FakeVaultClient(),
+    )
+
+    backend.create_cluster(cnpg(), wait_for_ready=False)
+
+    assert calls == [
+        (
+            "database/admin-pg",
+            {"owner": "admin", "password": "s3cret"},
+            "admin-pg",
+        )
+    ]
 
 
 # -- reporting ------------------------------------------------------------
 def test_the_backend_says_what_it_is_doing(
-    backend, stub_helm, kubectl, capsys,
+    backend,
+    stub_helm,
+    kubectl,
+    capsys,
 ):
     """It reported through `logging`, and nothing in the SDK configures
     a handler, so a live operator install printed nothing at all."""

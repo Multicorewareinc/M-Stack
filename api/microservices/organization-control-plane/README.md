@@ -23,9 +23,30 @@ under `src/modules/`, Alembic `migrations/`, tests under `api/tests/organization
 
 | Var | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | — | SQLAlchemy async URL, e.g. `postgresql+asyncpg://user:pass@host:5432/db` |
+| `DATABASE_URL_ORG` | — | SQLAlchemy async URL, e.g. `postgresql+asyncpg://user:pass@host:5432/db` |
 | `SERVICE_API_KEY` | — | service bearer (set this); shared with the calling control plane for now |
 | `LOG_LEVEL` | `INFO` | log level |
+
+## Invitations: email
+
+An admin invites someone by email; the invitee opens a one-time link, chooses a password, and signs in.
+The link is always shown to the admin to copy when the email could not be sent, so email is not required for
+invitations to work.
+
+**Emailing the invitation (SMTP).** Set these on the Org CP (Helm: `config.smtp.*`, secret `SMTP_PASSWORD`):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `SMTP_HOST` | — | mail server. Unset = no email |
+| `SMTP_PORT` | `587` | |
+| `SMTP_SECURITY` | `starttls` | `starttls` (587), `ssl` (465), or `none` (local relay / test mailbox only) |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | — | optional login; the password belongs in a Secret, never a ConfigMap |
+| `SMTP_FROM_ADDRESS` | — | sender address (required with `SMTP_HOST`) |
+| `SMTP_FROM_NAME` | `Multistack` | sender display name |
+| `ORG_PORTAL_BASE_URL` | — | public URL of the Organization Portal. The email carries an absolute link, so this is required too |
+
+A send that fails (bad credentials, server down, ...) never fails the invitation: the response reports
+`email_status` (`sent` / `failed` / `rejected` / `not_configured`) and the portals tell the admin to send the link themselves.
 
 ## Run
 

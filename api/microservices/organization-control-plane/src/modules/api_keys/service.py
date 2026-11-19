@@ -41,9 +41,7 @@ def _created(row: ApiKey, raw: str) -> ApiKeyCreated:
 
 async def _get_in_org(session: AsyncSession, org_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey:
     """Load a key scoped to the caller's org. A miss (absent OR another org's) is a uniform 404."""
-    row = await session.scalar(
-        select(ApiKey).where(ApiKey.id == key_id, ApiKey.org_id == org_id)
-    )
+    row = await session.scalar(select(ApiKey).where(ApiKey.id == key_id, ApiKey.org_id == org_id))
     if row is None:
         raise NotFoundError(f"API key {key_id} not found")
     return row
@@ -155,11 +153,14 @@ async def revoke_key(
     settings,
     org_id: uuid.UUID,
     key_id: uuid.UUID,
-) -> None:
+) -> str:
+    """Revoke a key; returns its name (for the audit trail)."""
     async with sessionmaker() as session:
         row = await _get_in_org(session, org_id, key_id)
         key_hash = row.key_hash
+        name = row.name
         if row.revoked_at is None:  # idempotent: re-revoke is a no-op
             row.revoked_at = datetime.now(UTC)
             await session.commit()
     await cache.evict(settings, key_hash)  # commit-then-evict (best-effort even on re-revoke)
+    return name

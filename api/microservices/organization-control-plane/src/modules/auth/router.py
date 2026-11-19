@@ -10,6 +10,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from errors import InvalidCredentialsError
+from modules.audit import service as audit
+
 from . import service
 from .dependencies import get_authenticated_user, get_current_user
 from .schemas import (
@@ -69,8 +72,31 @@ def _login_body(outcome: service.LoginOutcome) -> dict:
 async def login(payload: LoginRequest, request: Request) -> Response:
     settings = request.app.state.settings
     ip = _client_ip(request, settings.trusted_proxy_count)
-    outcome = await service.login_local(
-        request.app.state.sessionmaker, settings, payload.email, payload.password, ip=ip
+    sessionmaker = request.app.state.sessionmaker
+    try:
+        outcome = await service.login_local(
+            sessionmaker, settings, payload.email, payload.password, ip=ip
+        )
+    except InvalidCredentialsError:
+        await audit.record_detached(
+            sessionmaker,
+            organization_id=await audit.org_id_for_email(sessionmaker, payload.email),
+            actor=audit.Actor("anonymous", None, payload.email.lower()),
+            action="auth.login_failed",
+            resource_type="user",
+            resource_name=payload.email.lower(),
+            ip=ip,
+        )
+        raise
+    await audit.record_detached(
+        sessionmaker,
+        organization_id=outcome.user.organization_id,
+        actor=audit.Actor.from_user(outcome.user),
+        action="auth.login",
+        resource_type="user",
+        resource_id=outcome.user.id,
+        resource_name=outcome.user.email,
+        ip=ip,
     )
     response = JSONResponse(status_code=200, content=_login_body(outcome))
     _set_refresh_cookie(response, outcome.issued.refresh_token, outcome.issued.refresh_max_age)
@@ -120,5 +146,14 @@ async def change_password(
         user.id,
         payload.current_password,
         payload.new_password,
+    )
+    await audit.record_detached(
+        request.app.state.sessionmaker,
+        organization_id=user.organization_id,
+        action="auth.password_changed",
+        resource_type="user",
+        resource_id=user.id,
+        resource_name=user.email,
+        **audit.ctx(request, audit.Actor.from_user(user)),
     )
     return Response(status_code=204)

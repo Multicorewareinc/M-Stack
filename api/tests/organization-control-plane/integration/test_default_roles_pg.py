@@ -24,7 +24,8 @@ pytestmark = pytest.mark.skipif(not DSN, reason="ORG_PG_DSN not set — Postgres
 ALL_SLUGS = (
     "users.read", "users.create", "users.update", "users.delete",
     "roles.read", "roles.create", "roles.update", "roles.delete",
-    "organizations.read", "organizations.update", "apikey.manage",
+    "organizations.read", "organizations.update",
+    "apikey.create", "apikey.update", "apikey.delete",
 )
 
 

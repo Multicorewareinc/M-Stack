@@ -4,7 +4,7 @@ limiters enforce the resolving org's plan, not one static number for everyone).
 `/check` is on the gateway's synchronous request path, so this never blocks on a fresh HTTP
 round trip per request: results are cached briefly per org, and any failure (admin-control-plane
 unreachable, org has no plan, timeout) degrades to None so the caller falls back to the static
-RATE_LIMITS config (fail open) instead of erroring the request.
+TPM_RATE_LIMITS config (fail open) instead of erroring the request.
 """
 
 from __future__ import annotations
@@ -31,7 +31,9 @@ class PlanClient:
         if cached is not None and cached[0] > now:
             return cached[1]
         try:
-            resp = await self._client.get(f"/internal/v1/organizations/{org_id}/plan", headers=self._headers)
+            resp = await self._client.get(
+                f"/internal/v1/organizations/{org_id}/plan", headers=self._headers
+            )
             resp.raise_for_status()
             value: int | None = int(resp.json()["tpm"])
         except Exception:

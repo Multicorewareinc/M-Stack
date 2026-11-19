@@ -17,11 +17,12 @@ configuration. The gateway image is identical either way (ADR-006).
 Everything past proxying attaches by configuration (ADR-006), so the
 values below deploy a working stack even when the counter store and the
 event backbone are addresses this script points at rather than things it
-deploys itself — see examples/cache/create.py and examples/nats/deploy.py
+deploys itself — see examples/cache/create.py and examples/nats/deploy_nats.py
 for those, or examples/full_stack.py's own `nats` stage for both staged
 together. Leave the backbone empty and the limiter says so instead of
 silently allowing everything.
 """
+
 import os
 
 from multistack import (
@@ -36,23 +37,18 @@ from multistack import (
     Stack,
 )
 
-KUBECONFIG = os.path.expanduser(
-    os.environ.get("MULTISTACK_KUBECONFIG", "~/.multistack/kubeconfig")
-)
+KUBECONFIG = os.path.expanduser(os.environ.get("MULTISTACK_KUBECONFIG", "~/.multistack/kubeconfig"))
 
 # Where the SDK's own layers ended up. The gateway proxies to the vLLM
 # this SDK deployed; the limiter counts into the key/value store beside
 # it and reads the gateway's events off the backbone.
-UPSTREAM = os.environ.get("MULTISTACK_UPSTREAM",
-                          "http://vllm-qwen.inference.svc:8000")
-CACHE_URL = os.environ.get("MULTISTACK_CACHE_URL",
-                           "redis://valkey.platform.svc:6379/0")
+UPSTREAM = os.environ.get("MULTISTACK_UPSTREAM", "http://vllm-qwen.inference.svc:8000")
+CACHE_URL = os.environ.get("MULTISTACK_CACHE_URL", "redis://valkey.platform.svc:6379/0")
 # What's actually running on this cluster today: the Queue capability's
 # own Helm-managed NATS in `platform` (examples/queue/install.py), not
 # its chart's own `nats`/`nats` default -- deployed there specifically to
 # replace the hand-deployed NATS that used to run at that same address.
-BACKBONE = os.environ.get("MULTISTACK_BACKBONE",
-                          "nats://nats.platform.svc:4222")
+BACKBONE = os.environ.get("MULTISTACK_BACKBONE", "nats://nats.platform.svc:4222")
 
 # The Secret holding API_KEY. A name, never a value: credentials do not
 # live in a spec, and `kubectl create secret --from-literal` would put
@@ -66,14 +62,16 @@ MODEL = os.environ.get("MULTISTACK_MODEL", "Qwen2.5-0.5B-Instruct")
 # The control planes need a database, and this example does not deploy
 # one. Published into the stack so ControlPlane's REQUIRES is satisfied
 # the way it would be by a real CNPG cluster — and credential-free, which
-# is why it cannot serve as the chart's own DATABASE_URL. That one lives
+# is why it cannot serve as the charts' own DATABASE_URL_ADMIN /
+# DATABASE_URL_ORG. Those live
 # in the Secrets below.
 DATABASE_URL = os.environ.get(
     "MULTISTACK_DATABASE_URL",
     "postgresql://platform@platform-db-rw.postgres.svc.cluster.local:5432/platform",
 )
 
-# Names, never values. Each must already hold DATABASE_URL, VALKEY_URL,
+# Names, never values. Each must already hold its DATABASE_URL_ADMIN or
+# DATABASE_URL_ORG, VALKEY_URL,
 # JWT_SECRET and its API keys — and the two JWT_SECRETs must match, since
 # each plane verifies tokens the other issued. The backend checks the
 # keys before installing and names any that are missing.
@@ -109,10 +107,8 @@ def main() -> None:
     # mistake the tpm driver warns about, because 3 tokens a minute
     # denies everything and 120000 requests a minute denies nothing.
     limiters = [
-        stack.build(Policy, type="rpm",
-                    limits={"model_overrides": {MODEL: 3}}),
-        stack.build(Policy, type="tpm",
-                    limits={"model_overrides": {MODEL: 120_000}}),
+        stack.build(Policy, type="rpm", limits={"model_overrides": {MODEL: 3}}),
+        stack.build(Policy, type="tpm", limits={"model_overrides": {MODEL: 120_000}}),
     ]
 
     # Collected here rather than read back from the stack: `policy_endpoint`
@@ -153,13 +149,14 @@ def main() -> None:
     #
     # A portal proxies to a control plane, not to the gateway: the gateway
     # fronts inference, the control planes serve the portals' own API.
-    node_selector = ({"kubernetes.io/hostname": IMAGE_NODE} if IMAGE_NODE
-                     else None)
+    node_selector = {"kubernetes.io/hostname": IMAGE_NODE} if IMAGE_NODE else None
 
     for plane_type in ("admin", "organization"):
         secret = ADMIN_CP_SECRET if plane_type == "admin" else ORG_CP_SECRET
         plane = stack.build(
-            ControlPlane, type=plane_type, existing_secret=secret,
+            ControlPlane,
+            type=plane_type,
+            existing_secret=secret,
             # Seeding runs on a first install and is not concurrency-safe:
             # two admin pods racing both insert the same plan and one dies
             # on the unique index. Scale up once it has run.
@@ -171,7 +168,8 @@ def main() -> None:
         stack.record(plane)
 
         portal = stack.build(
-            Portal, type=plane_type,
+            Portal,
+            type=plane_type,
             api_upstream=plane.endpoint,
             node_selector=node_selector,
         )
