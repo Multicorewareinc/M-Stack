@@ -57,7 +57,13 @@ export function ChangePasswordPage({ onSubmit, submitting, error }: ChangePasswo
         <FormField label="Current password" htmlFor="cp-current" error={errors.current_password?.message} required>
           <Input id="cp-current" type="password" autoComplete="current-password" {...register('current_password')} />
         </FormField>
-        <FormField label="New password" htmlFor="cp-new" error={errors.new_password?.message} required>
+        <FormField
+          label="New password"
+          htmlFor="cp-new"
+          error={errors.new_password?.message}
+          required
+          hint="At least 12 characters."
+        >
           <Input id="cp-new" type="password" autoComplete="new-password" {...register('new_password')} />
         </FormField>
         <FormField

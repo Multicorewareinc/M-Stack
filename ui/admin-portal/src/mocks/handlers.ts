@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw';
-import type { Organization, Permission, Plan } from '../api/types';
+import type { Organization, Permission, Plan, UserDirectoryEntry } from '../api/types';
 import {
+  mockAuditLogs,
   mockOrganizations,
   mockPermissions,
   mockPlans,
@@ -32,16 +33,74 @@ let createdPermissions: Permission[] = [];
 // deactivating one of these must surface that specific conflict (§52).
 const ROLE_REFERENCED_PERMISSION_IDS = new Set(['perm_users_read']);
 
+// Users created via POST during a test/dev session, mirroring the createdOrganizations pattern.
+let createdUsers: UserDirectoryEntry[] = [];
+let nextUserSeq = 1;
+
+// Pending invitations: a couple of seeded rows, plus whatever POST /v1/invitations adds during a session.
+interface MockInvitation {
+  id: string;
+  email: string;
+  name: string | null;
+  organization_id: string;
+  role_id: string;
+  role_name: string;
+  invited_by: string | null;
+  created_at: string;
+  expires_at: string;
+}
+const DAY_MS = 24 * 60 * 60 * 1000;
+function seedInvitations(): MockInvitation[] {
+  const now = Date.now();
+  return [
+    {
+      id: 'inv_seed_2',
+      email: 'priya@globex.com',
+      name: 'Priya',
+      organization_id: 'org_002',
+      role_id: 'role_org_user',
+      role_name: 'org_user',
+      invited_by: 'root@platform.local',
+      created_at: new Date(now - 2 * DAY_MS).toISOString(),
+      expires_at: new Date(now + 5.5 * DAY_MS).toISOString(),
+    },
+    {
+      id: 'inv_seed_1',
+      email: 'sam@acme.com',
+      name: 'Sam',
+      organization_id: 'org_001',
+      role_id: 'role_org_admin',
+      role_name: 'org_admin',
+      invited_by: 'root@platform.local',
+      created_at: new Date(now - 4 * DAY_MS).toISOString(),
+      expires_at: new Date(now + 3.5 * DAY_MS).toISOString(),
+    },
+  ];
+}
+let invitations: MockInvitation[] = seedInvitations();
+let nextInvitationSeq = 1;
+
 /** Test-only: clears mutable mock state between tests (wired in test/setup.ts). */
 export function resetAdminMockState() {
   createdOrganizations = [];
   provisioningPollCounts.clear();
   createdPlans = [];
   createdPermissions = [];
+  createdUsers = [];
+  nextUserSeq = 1;
+  invitations = seedInvitations();
+  nextInvitationSeq = 1;
 }
 
 function findOrganization(id: string): Organization | undefined {
   return mockOrganizations.find((o) => o.id === id) ?? createdOrganizations.find((o) => o.id === id);
+}
+
+function userEmailOrUsernameTaken(orgId: string, email: string, username: string): 'email' | 'username' | null {
+  const all = [...mockUserDirectory, ...createdUsers].filter((u) => u.organization_id === orgId);
+  if (all.some((u) => u.email === email)) return 'email';
+  if (all.some((u) => u.username === username)) return 'username';
+  return null;
 }
 
 function findPlan(id: string): Plan | undefined {
@@ -97,6 +156,78 @@ export const handlers = [
       return HttpResponse.json({ error: { message: 'Organization not found', type: 'not_found' } }, { status: 404 });
     }
     return HttpResponse.json(withProvisioningProgress(org));
+  }),
+
+  // Mirrors Admin CP POST /v1/invitations: invite into an existing org, or create a new one first. An
+  // email of taken@example.com stands in for "already has an account" (409 on the email field).
+  http.post('/v1/invitations', async ({ request }) => {
+    const body = (await request.json()) as {
+      email: string;
+      name?: string;
+      role: string;
+      organization_id?: string;
+      new_organization?: { name: string; plan_id: string };
+    };
+    if (body.email === 'taken@example.com') {
+      return HttpResponse.json(
+        { error: { message: 'A user with this email already exists', type: 'conflict', field: 'email' } },
+        { status: 409 },
+      );
+    }
+    const existing = [...mockOrganizations, ...createdOrganizations].find((o) => o.id === body.organization_id);
+    if (!body.new_organization && !existing) {
+      return HttpResponse.json({ error: { message: 'Organization not found', type: 'not_found' } }, { status: 404 });
+    }
+    const orgName = body.new_organization?.name ?? existing!.name;
+    const row: MockInvitation = {
+      id: `inv_${nextInvitationSeq++}`,
+      email: body.email,
+      name: body.name ?? null,
+      organization_id: existing?.id ?? `org_${slugify(orgName)}`,
+      role_id: `role_${body.role}`,
+      role_name: body.role,
+      invited_by: 'root@platform.local',
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 7 * DAY_MS).toISOString(),
+    };
+    invitations = [row, ...invitations.filter((i) => i.email !== row.email)]; // a new link replaces the old one
+    return HttpResponse.json(
+      {
+        ...row,
+        organization_name: orgName,
+        invite_path: '/accept-invite?token=mock-invite-token-0123456789',
+        invite_url: null,
+        email_status: 'not_configured', // no mail server in mock mode
+        email_detail: 'SMTP is not configured (SMTP_HOST and SMTP_FROM_ADDRESS).',
+        organization_created: Boolean(body.new_organization),
+      },
+      { status: 201 },
+    );
+  }),
+
+  // Mirrors Admin CP GET /v1/invitations: pending invitations across all orgs, newest first.
+  http.get('/v1/invitations', ({ request }) => {
+    const q = new URL(request.url).searchParams;
+    const orgId = q.get('organization_id');
+    const search = q.get('search')?.toLowerCase();
+    const role = q.get('role');
+    const limit = Number(q.get('limit') ?? 25);
+    const offset = Number(q.get('offset') ?? 0);
+    const matches = invitations.filter(
+      (i) =>
+        (!orgId || i.organization_id === orgId) &&
+        (!role || i.role_name === role) &&
+        (!search || i.email.toLowerCase().includes(search)),
+    );
+    return HttpResponse.json({ items: matches.slice(offset, offset + limit), total: matches.length, limit, offset });
+  }),
+
+  http.delete('/v1/invitations/:id', ({ params }) => {
+    if (!invitations.some((i) => i.id === params.id)) {
+      return HttpResponse.json({ error: { message: 'Invitation not found', type: 'not_found' } }, { status: 404 });
+    }
+    invitations = invitations.filter((i) => i.id !== params.id);
+    return new HttpResponse(null, { status: 204 });
   }),
 
   http.post('/v1/organizations', async ({ request }) => {
@@ -259,12 +390,68 @@ export const handlers = [
   http.get('/v1/organizations/:id/users', ({ params }) =>
     HttpResponse.json(mockUserDirectory.filter((u) => u.organization_id === params.id)),
   ),
-  http.get('/v1/users', () => HttpResponse.json(mockUserDirectory)),
+
+  http.post('/v1/organizations/:id/users', async ({ params, request }) => {
+    const orgId = params.id as string;
+    if (!findOrganization(orgId)) {
+      return HttpResponse.json({ error: { message: 'Organization not found', type: 'not_found' } }, { status: 404 });
+    }
+    const body = (await request.json()) as {
+      username: string;
+      email: string;
+      password: string;
+      display_name?: string;
+    };
+    const conflictField = userEmailOrUsernameTaken(orgId, body.email, body.username);
+    if (conflictField) {
+      const label = conflictField === 'email' ? `Email '${body.email}'` : `Username '${body.username}'`;
+      return HttpResponse.json(
+        { error: { message: `${label} already exists in this organization`, type: 'conflict', field: conflictField } },
+        { status: 409 },
+      );
+    }
+    const now = new Date().toISOString();
+    const created: UserDirectoryEntry = {
+      id: `usr_${nextUserSeq++}`,
+      organization_id: orgId,
+      username: body.username,
+      display_name: body.display_name ?? null,
+      email: body.email,
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+    createdUsers.push(created);
+    return HttpResponse.json(created, { status: 201 });
+  }),
+
+  http.get('/v1/users', () => HttpResponse.json([...mockUserDirectory, ...createdUsers])),
   http.get('/v1/users/:id', ({ params }) =>
     params.id === mockUserDetail.id
       ? HttpResponse.json(mockUserDetail)
       : HttpResponse.json({ error: { message: 'User not found', type: 'not_found' } }, { status: 404 }),
   ),
+
+  http.get('/v1/audit-logs', ({ request }) => {
+    const q = new URL(request.url).searchParams;
+    const orgId = q.get('organization_id');
+    const action = q.get('action');
+    const since = q.get('since');
+    const until = q.get('until');
+    const search = q.get('search')?.toLowerCase();
+    const limit = Number(q.get('limit') ?? 50);
+    const offset = Number(q.get('offset') ?? 0);
+    const matches = mockAuditLogs.filter(
+      (l) =>
+        (!orgId || l.organization_id === orgId) &&
+        (!action || l.action === action) &&
+        (!since || new Date(l.created_at) >= new Date(since)) &&
+        (!until || new Date(l.created_at) <= new Date(until)) &&
+        (!search ||
+          [l.actor_email, l.resource_name, l.action].some((v) => v?.toLowerCase().includes(search))),
+    );
+    return HttpResponse.json({ items: matches.slice(offset, offset + limit), total: matches.length, limit, offset });
+  }),
 
   http.get('/v1/platform-summary', () => HttpResponse.json(mockPlatformSummary)),
 ];

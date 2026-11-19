@@ -3,7 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Rebranding a fork: replace public/favicon.svg with your own icon — no code change needed.
+         The <title> here is just the sane default shown before React mounts; the real title
+         (BRANDING.appName, src/branding.ts) is set at runtime in src/main.tsx. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Multistack Admin</title>
+    <script>
+      // Applies a stored theme choice before React mounts (see @multistack/ui's ThemeProvider),
+      // so first paint isn't dark-then-flip-to-light for a returning light-theme user.
+      (function () {
+        try {
+          var t = localStorage.getItem('multistack-theme');
+          if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

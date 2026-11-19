@@ -1,5 +1,6 @@
 import { cn } from '@multistack/ui';
 import { NavLink } from 'react-router-dom';
+import { BRANDING } from '../../branding';
 
 export interface NavItem {
   label: string;
@@ -13,12 +14,16 @@ export const ADMIN_NAV: NavItem[] = [
   { label: 'Plans', to: '/plans' },
   { label: 'Permissions', to: '/permissions' },
   { label: 'Users', to: '/users' },
+  { label: 'Invitations', to: '/invitations' },
+  { label: 'Audit Logs', to: '/audit-logs' },
 ];
 
 export function Sidebar() {
   return (
     <nav aria-label="Primary" className="flex w-56 shrink-0 flex-col gap-1 border-r border-subtle bg-neutral-0 p-3">
-      <p className="px-2 pb-2 text-caption font-semibold uppercase tracking-wide text-neutral-500">Multistack</p>
+      <div className="mb-2 border-b border-subtle px-2 pb-2">
+        <p className="text-caption font-semibold uppercase tracking-wide text-neutral-500">{BRANDING.appName}</p>
+      </div>
       {ADMIN_NAV.map((item) => (
         <NavLink
           key={item.to}

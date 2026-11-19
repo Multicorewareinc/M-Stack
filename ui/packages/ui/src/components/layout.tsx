@@ -37,14 +37,35 @@ export interface Crumb {
   href?: string;
 }
 
-export function Breadcrumbs({ items, className }: { items: Crumb[]; className?: string }) {
+export interface BreadcrumbsProps {
+  items: Crumb[];
+  className?: string;
+  /** Called instead of following `href` natively — pass your app router's navigate function so a
+   * crumb click is a client-side transition, not a full page reload. This component stays
+   * routing-agnostic (presentation only) by not importing any router itself; omit this to fall
+   * back to a plain anchor. */
+  onNavigate?: (href: string) => void;
+}
+
+export function Breadcrumbs({ items, className, onNavigate }: BreadcrumbsProps) {
   return (
     <nav aria-label="Breadcrumb" className={cn('flex items-center gap-1 text-secondary text-neutral-500', className)}>
       {items.map((item, i) => (
         <React.Fragment key={`${item.label}-${i}`}>
           {i > 0 && <ChevronRight className="h-3.5 w-3.5 text-neutral-400" aria-hidden="true" />}
           {item.href && i < items.length - 1 ? (
-            <a href={item.href} className="hover:text-neutral-700">
+            <a
+              href={item.href}
+              className="hover:text-neutral-700"
+              onClick={
+                onNavigate
+                  ? (e) => {
+                      e.preventDefault();
+                      onNavigate(item.href!);
+                    }
+                  : undefined
+              }
+            >
               {item.label}
             </a>
           ) : (

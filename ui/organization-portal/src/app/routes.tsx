@@ -1,9 +1,11 @@
 import { DetailDialog } from '@multistack/ui';
 import { useLocation, useNavigate, Route, Routes, type Location } from 'react-router-dom';
 import { ApiKeysPage } from '../features/apiKeys/ApiKeysPage';
+import { AuditLogsPage } from '../features/auditLogs/AuditLogsPage';
 import { BillingPage } from '../features/billing/BillingPage';
 import { ChatPage } from '../features/chat/ChatPage';
 import { DashboardPage } from '../features/dashboard/DashboardPage';
+import { InvitationsPage } from '../features/invitations/InvitationsPage';
 import { PermissionsPage } from '../features/permissions/PermissionsPage';
 import { RoleDetailPage } from '../features/roles/RoleDetailPage';
 import { RolesPage } from '../features/roles/RolesPage';
@@ -11,6 +13,7 @@ import { SettingsPage } from '../features/settings/SettingsPage';
 import { UserDetailPage } from '../features/users/UserDetailPage';
 import { UsersPage } from '../features/users/UsersPage';
 import { NotFound } from '../pages/NotFound';
+import { RequirePermission } from '../components/RequirePermission';
 import { Shell } from './Shell';
 
 interface NavState {
@@ -39,12 +42,66 @@ export function AppRoutes() {
       <Routes location={backgroundLocation ?? location}>
         <Route element={<Shell />}>
           <Route path="/" element={<DashboardPage />} />
-          <Route path="/users" element={<UsersPage />} />
-          <Route path="/users/:userId" element={<UserDetailPage />} />
-          <Route path="/roles" element={<RolesPage />} />
-          <Route path="/roles/:roleId" element={<RoleDetailPage />} />
-          <Route path="/permissions" element={<PermissionsPage />} />
-          <Route path="/api-keys" element={<ApiKeysPage />} />
+          <Route
+            path="/users"
+            element={
+              <RequirePermission permission="users.read">
+                <UsersPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/users/:userId"
+            element={
+              <RequirePermission permission="users.read">
+                <UserDetailPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/invitations"
+            element={
+              <RequirePermission permission="users.create">
+                <InvitationsPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/roles"
+            element={
+              <RequirePermission permission="roles.read">
+                <RolesPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/roles/:roleId"
+            element={
+              <RequirePermission permission="roles.read">
+                <RoleDetailPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/permissions"
+            element={
+              // No dedicated "permissions.read" slug exists in the master catalog — gated on
+              // roles.read since browsing the catalog is part of the same role-composition
+              // capability (anyone who can view roles can see what they're composed from).
+              <RequirePermission permission="roles.read">
+                <PermissionsPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/api-keys"
+            element={
+              <RequirePermission permission={['apikey.create', 'apikey.update', 'apikey.delete']}>
+                <ApiKeysPage />
+              </RequirePermission>
+            }
+          />
+          <Route path="/audit-logs" element={<AuditLogsPage />} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/billing" element={<BillingPage />} />
           <Route path="/settings" element={<SettingsPage />} />
@@ -56,17 +113,21 @@ export function AppRoutes() {
           <Route
             path="/users/:userId"
             element={
-              <DetailDialog open label="User details" onOpenChange={closeDetail}>
-                <UserDetailPage />
-              </DetailDialog>
+              <RequirePermission permission="users.read">
+                <DetailDialog open label="User details" onOpenChange={closeDetail}>
+                  <UserDetailPage />
+                </DetailDialog>
+              </RequirePermission>
             }
           />
           <Route
             path="/roles/:roleId"
             element={
-              <DetailDialog open label="Role details" onOpenChange={closeDetail}>
-                <RoleDetailPage />
-              </DetailDialog>
+              <RequirePermission permission="roles.read">
+                <DetailDialog open label="Role details" onOpenChange={closeDetail}>
+                  <RoleDetailPage />
+                </DetailDialog>
+              </RequirePermission>
             }
           />
         </Routes>

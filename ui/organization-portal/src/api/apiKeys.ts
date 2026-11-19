@@ -3,7 +3,8 @@
 // /api/auth, gated by get_current_user — a real signed-in identity, never the shared
 // SERVICE_API_KEY/VITE_DEV_API_KEY bridge). So every call here goes straight to fetch() with the
 // Bearer token from tokenStore, not through api/client.ts's request(). Mutations additionally
-// require the `apikey.manage` permission server-side (403 if the caller's role doesn't grant it).
+// require the granular `apikey.create`/`apikey.update`/`apikey.delete` permissions server-side
+// (403 if the caller's role doesn't grant the relevant one; rotate is gated on apikey.update).
 import { ApiError, type ApiErrorCode } from './client';
 import { getAccessToken } from '../auth/tokenStore';
 

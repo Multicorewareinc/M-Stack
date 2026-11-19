@@ -88,3 +88,31 @@ export interface PlatformSummary {
   active: number;
   failed: number;
 }
+
+/** One audit event. Matches modules/audit/schemas.py (admin-control-plane) — the Admin Portal's
+ * `GET /v1/audit-logs` merges platform events (`source: 'platform'`) with Org CP's
+ * (`source: 'organization'`: users, roles, API keys, org logins) across every organization. */
+export interface AuditLog {
+  id: string;
+  organization_id: string | null;
+  /** 'user' (org member) | 'admin' (super-admin) | 'service' (unattributed key) | 'anonymous'. */
+  actor_type: string;
+  actor_id: string | null;
+  actor_email: string | null;
+  /** Dotted event name, e.g. 'api_key.created'. */
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  resource_name: string | null;
+  details: Record<string, unknown>;
+  ip_address: string | null;
+  created_at: string;
+  source: 'platform' | 'organization';
+}
+
+export interface AuditLogPage {
+  items: AuditLog[];
+  total: number;
+  limit: number;
+  offset: number;
+}

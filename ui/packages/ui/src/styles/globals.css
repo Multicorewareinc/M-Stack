@@ -5,19 +5,107 @@
 @tailwind utilities;
 
 @layer base {
+  /*
+   * Theme variables — dark (default) here, light override below under
+   * `[data-theme="light"]`. Values must stay in lockstep with
+   * `tokens/index.ts`'s `colors` (dark) / `lightColors` (light) / `canvas`
+   * exports — that pairing is asserted by `theme-css-vars.test.ts`. The
+   * Tailwind preset (tokens/preset.ts) points every `bg-neutral-0` etc.
+   * utility class at these variables, so toggling `data-theme` on <html>
+   * (see ../theme.tsx) repaints the whole app with no rebuild.
+   */
   :root {
     color-scheme: dark;
+    --canvas-bg: 9 13 17; /* #090d11 */
+    --color-neutral-0: 14 19 26; /* #0e131a */
+    --color-neutral-50: 22 29 38; /* #161d26 */
+    --color-neutral-100: 27 32 39; /* #1b2027 */
+    --color-neutral-200: 46 56 70; /* #2e3846 */
+    --color-neutral-300: 59 71 88; /* #3b4758 */
+    --color-neutral-400: 100 116 139; /* #64748b */
+    --color-neutral-500: 148 163 184; /* #94a3b8 */
+    --color-neutral-600: 170 180 197; /* #aab4c5 */
+    --color-neutral-700: 194 198 214; /* #c2c6d6 */
+    --color-neutral-800: 226 232 240; /* #e2e8f0 */
+    --color-neutral-900: 248 250 252; /* #f8fafc */
+    --color-primary-50: 17 29 47; /* #111d2f */
+    --color-primary-100: 22 40 63; /* #16283f */
+    --color-primary-500: 59 130 246; /* #3b82f6 */
+    --color-primary-600: 37 99 235; /* #2563eb */
+    --color-primary-700: 147 197 253; /* #93c5fd */
+    --color-success-100: 15 42 34; /* #0f2a22 */
+    --color-success-500: 16 185 129; /* #10b981 */
+    --color-success-700: 110 231 183; /* #6ee7b7 */
+    --color-warning-100: 44 34 16; /* #2c2210 */
+    --color-warning-500: 245 158 11; /* #f59e0b */
+    --color-warning-700: 252 211 77; /* #fcd34d */
+    --color-danger-100: 47 21 24; /* #2f1518 */
+    --color-danger-500: 239 68 68; /* #ef4444 */
+    --color-danger-700: 252 165 165; /* #fca5a5 */
+    --color-info-100: 18 42 61; /* #122a3d */
+    --color-info-500: 56 189 248; /* #38bdf8 */
+    --color-info-700: 125 211 252; /* #7dd3fc */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+    --shadow-md: 0 8px 24px -4px rgb(0 0 0 / 0.45);
+    --shadow-lg: 0 16px 40px -8px rgb(0 0 0 / 0.7);
   }
+
+  :root[data-theme='light'] {
+    color-scheme: light;
+    --canvas-bg: 248 250 252; /* #f8fafc */
+    --color-neutral-0: 255 255 255; /* #ffffff */
+    --color-neutral-50: 248 250 252; /* #f8fafc */
+    --color-neutral-100: 241 245 249; /* #f1f5f9 */
+    --color-neutral-200: 226 232 240; /* #e2e8f0 */
+    --color-neutral-300: 221 227 234; /* #dde3ea */
+    --color-neutral-400: 199 208 218; /* #c7d0da */
+    --color-neutral-500: 100 116 139; /* #64748b */
+    --color-neutral-600: 71 85 105; /* #475569 */
+    --color-neutral-700: 51 65 85; /* #334155 */
+    --color-neutral-800: 30 41 59; /* #1e293b */
+    --color-neutral-900: 15 23 42; /* #0f172a */
+    --color-primary-50: 239 246 255; /* #eff6ff */
+    --color-primary-100: 219 234 254; /* #dbeafe */
+    --color-primary-500: 59 130 246; /* #3b82f6 */
+    --color-primary-600: 37 99 235; /* #2563eb */
+    --color-primary-700: 29 78 216; /* #1d4ed8 */
+    --color-success-100: 220 252 231; /* #dcfce7 */
+    --color-success-500: 16 185 129; /* #10b981 */
+    --color-success-700: 4 120 87; /* #047857 */
+    --color-warning-100: 254 243 199; /* #fef3c7 */
+    --color-warning-500: 245 158 11; /* #f59e0b */
+    --color-warning-700: 146 64 14; /* #92400e */
+    --color-danger-100: 254 226 226; /* #fee2e2 */
+    --color-danger-500: 239 68 68; /* #ef4444 */
+    --color-danger-700: 185 28 28; /* #b91c1c */
+    --color-info-100: 224 242 254; /* #e0f2fe */
+    --color-info-500: 56 189 248; /* #38bdf8 */
+    --color-info-700: 3 105 161; /* #0369a1 */
+    /* Same near-black hue as the dark shadows, but at a fraction of the alpha — a shadow tuned
+       for a near-black surface reads as a heavy charcoal smudge on white otherwise. */
+    --shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.04);
+    --shadow-md: 0 4px 12px -2px rgb(15 23 42 / 0.08);
+    --shadow-lg: 0 12px 24px -6px rgb(15 23 42 / 0.12);
+  }
+
   body {
     font-family: theme('fontFamily.sans');
     font-size: theme('fontSize.body');
     color: theme('colors.neutral.900');
-    /* Canvas base sits one step darker than neutral.0 (the shell/card surface
-       tone) so raised surfaces read as elevated rather than recessed. */
-    background: #090d11;
+    /* Canvas sits one step away from neutral.0 (the shell/card surface tone)
+       so raised surfaces read as elevated rather than recessed, in either
+       theme. */
+    background: rgb(var(--canvas-bg));
   }
   *:focus-visible {
     outline: 2px solid theme('colors.primary.600');
     outline-offset: 2px;
+  }
+  /* Browser text-selection highlight — tied to the accent color like every other "selected"
+     surface (active Sidebar item, solid Button/Tab backgrounds), so a fork's accentColor override
+     (../accentColor.ts) repaints this too with no extra wiring. */
+  ::selection {
+    background: rgb(var(--color-primary-500) / 0.35);
+    color: inherit;
   }
 }

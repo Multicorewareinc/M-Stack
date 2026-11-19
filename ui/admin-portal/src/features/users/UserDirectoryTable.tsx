@@ -15,11 +15,12 @@ export interface UserDirectoryTableProps {
 }
 
 /**
- * Shared read-only directory rendering (§42) — used by both the platform-wide
- * Users page and the Organization Detail page's Users tab, so the two
- * contexts never diverge in columns or empty/loading/error states. No row
- * actions: the directory is a projection: Admin CP owns no user mutation
- * (§209 CRUD matrix).
+ * Shared directory rendering (§42) — used by both the platform-wide Users page and the
+ * Organization Detail page's Users tab, so the two contexts never diverge in columns or
+ * empty/loading/error states. Still no row actions here (§209 CRUD matrix: no per-row
+ * edit/delete) — this table stays a pure projection. Creation is a separate, super-admin-only
+ * provisioning capability (ADR-029/AD-02b,c) surfaced above this table (UsersDirectoryPage's
+ * Create User button), not a row mutation.
  */
 export function UserDirectoryTable({ rows, loading, error, onRetry, organizations }: UserDirectoryTableProps) {
   const navigate = useNavigate();

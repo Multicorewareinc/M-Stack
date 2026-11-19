@@ -74,7 +74,13 @@ export function ResetUserPasswordDrawer({ open, onOpenChange, user }: ResetUserP
         <Alert variant="warning">
           {user.username} will be required to set a new password at their next sign-in.
         </Alert>
-        <FormField label="New password" htmlFor="reset-pw-new" error={errors.new_password?.message} required>
+        <FormField
+          label="New password"
+          htmlFor="reset-pw-new"
+          error={errors.new_password?.message}
+          required
+          hint="At least 12 characters."
+        >
           <Input id="reset-pw-new" type="password" autoComplete="new-password" {...register('new_password')} />
         </FormField>
         <FormField

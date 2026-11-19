@@ -1,5 +1,6 @@
-import { Alert, Button, FormField, Input } from '@multistack/ui';
+import { Alert, BrandLogo, Button, FormField, Input } from '@multistack/ui';
 import * as React from 'react';
+import { BRANDING } from '../branding';
 import type { LoginInput } from './api';
 
 export interface LoginPageProps {
@@ -25,9 +26,9 @@ export function LoginPage({ onSubmit, submitting, error, notice }: LoginPageProp
         onSubmit={handleSubmit}
         className="flex w-full max-w-sm flex-col gap-4 rounded-lg border border-subtle bg-neutral-0 p-6 shadow-md"
       >
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-2">
+          <BrandLogo name={BRANDING.appName} logoUrl={BRANDING.logoUrl} logoHeight={28} />
           <h1 className="text-pageTitle font-semibold text-neutral-900">Sign in</h1>
-          <p className="text-secondary text-neutral-500">Multistack</p>
         </div>
         {notice && !error && <Alert variant="success">{notice}</Alert>}
         {error && (

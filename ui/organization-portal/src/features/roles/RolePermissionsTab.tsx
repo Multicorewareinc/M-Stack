@@ -25,7 +25,7 @@ export function RolePermissionsTab({ roleId }: RolePermissionsTabProps) {
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   // Sync commits within the same act() batch that made `current` available —
   // no intermediate frame where the matrix is observably out of sync with
-  // the backend's current selection (see ManageRolesDrawer for the same pattern).
+  // the backend's current selection (see UserDetailPage's role sync for the same pattern).
   const syncedForRef = React.useRef<string | null>(null);
   React.useLayoutEffect(() => {
     if (!current) return;

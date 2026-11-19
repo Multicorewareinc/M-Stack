@@ -15,6 +15,12 @@ export const queryKeys = {
   rolePermissions: (orgId: string, roleId: string) => ['role-permissions', orgId, roleId] as const,
   permissions: (orgId: string) => scopedKey('permissions', orgId),
   apiKeys: (orgId: string) => scopedKey('api-keys', orgId),
+  // Filter + page are part of the key so each combination caches on its own (still org-scoped).
+  auditLogs: (orgId: string, action = '', since = '', until = '', search = '', offset = 0) =>
+    ['audit-logs', orgId, action, since, until, search, offset] as const,
+  // Search / role / page are part of the key so each combination caches on its own (still org-scoped).
+  invitations: (orgId: string, search = '', role = '', offset = 0) =>
+    ['invitations', orgId, search, role, offset] as const,
   usageSummary: (orgId: string) => scopedKey('usage-summary', orgId),
   usageTimeseries: (orgId: string) => scopedKey('usage-timeseries', orgId),
   usageByUser: (orgId: string) => scopedKey('usage-by-user', orgId),

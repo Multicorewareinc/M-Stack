@@ -1,6 +1,6 @@
-import { Badge, Button, EmptyState, PageHeader, StatCard, Tabs, TabsContent, TabsList, TabsTrigger } from '@multistack/ui';
+import { Badge, Breadcrumbs, Button, EmptyState, PageHeader, StatCard, Tabs, TabsContent, TabsList, TabsTrigger } from '@multistack/ui';
 import * as React from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { Can } from '../../components/Can';
 import { DeleteRoleDialog } from './DeleteRoleDialog';
 import { RoleFormDrawer } from './RoleFormDrawer';
@@ -9,6 +9,7 @@ import { useRole } from './hooks/useRole';
 
 export function RoleDetailPage() {
   const { roleId = '' } = useParams();
+  const navigate = useNavigate();
   const { data: role, isLoading, isError } = useRole(roleId);
   const [editOpen, setEditOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
@@ -21,6 +22,11 @@ export function RoleDetailPage() {
 
   return (
     <div>
+      <Breadcrumbs
+        className="mb-2"
+        items={[{ label: 'Roles', href: '/roles' }, { label: role.name }]}
+        onNavigate={navigate}
+      />
       <PageHeader
         title={role.name}
         description={role.description ?? undefined}
@@ -47,26 +53,18 @@ export function RoleDetailPage() {
         </div>
       )}
 
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue="permissions">
         <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="permissions">Permissions</TabsTrigger>
           <TabsTrigger value="users">Users</TabsTrigger>
         </TabsList>
-
-        <TabsContent value="overview">
-          <div className="grid grid-cols-2 gap-4">
-            <StatCard label="Users" value={role.user_count ?? '—'} />
-            <StatCard label="Permissions" value={role.permission_count ?? '—'} />
-          </div>
-        </TabsContent>
 
         <TabsContent value="permissions">
           <RolePermissionsTab roleId={role.id} />
         </TabsContent>
 
         <TabsContent value="users">
-          <p className="text-secondary text-neutral-500">{role.user_count ?? 0} users assigned to this role.</p>
+          <StatCard label="Users assigned to this role" value={role.user_count ?? 0} />
         </TabsContent>
       </Tabs>
 

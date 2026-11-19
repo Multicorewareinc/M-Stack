@@ -15,6 +15,11 @@ export interface CreateUserInput {
   first_name?: string;
   last_name?: string;
   display_name?: string;
+  // Optional initial password (org-control-plane's UserCreate.password, ADR-025 SP-01 follow-up).
+  // When set, the backend hashes it and forces rotation on first login (must_change_password=True)
+  // — same semantic as UpdateUserInput.password below. Omitted -> the user can't log in locally
+  // until an admin sets one (unchanged prior behavior).
+  password?: string;
 }
 
 /** Mutating: gated by users.create. The mock backend checks a permission

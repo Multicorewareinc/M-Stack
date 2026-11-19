@@ -45,11 +45,19 @@ describe('UsersDirectoryPage', () => {
     expect(screen.getByText('John Smith')).toBeInTheDocument();
   });
 
-  it('offers no create/edit/delete affordances', async () => {
+  it('offers no per-row edit/delete affordances', async () => {
     renderPage();
     await screen.findByText('John Smith');
-    // Must fail if any mutation control is present.
-    expect(screen.queryByRole('button', { name: /create/i })).toBeNull();
+    // The directory table itself stays a pure projection (§209 CRUD matrix) — no per-row
+    // mutation. Creating a user is a separate, page-level provisioning action (ADR-029), not a
+    // row action, so it's exempted from this check.
     expect(screen.queryByRole('button', { name: 'Row actions' })).toBeNull();
+  });
+
+  it('offers a Create User action for provisioning the first login-capable user in an org', async () => {
+    renderPage();
+    await screen.findByText('John Smith');
+    // Must fail if super-admin provisioning (ADR-029/AD-02b,c) has no entry point on this page.
+    expect(screen.getByRole('button', { name: '+ Create User' })).toBeInTheDocument();
   });
 });
