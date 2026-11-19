@@ -1,0 +1,14 @@
+apiVersion: v2
+name: rag
+description: |
+  Reference search for Multistack -- finds the SDK fields, service code and
+  skill notes that answer a question, by meaning and by exact words, and
+  returns them ready to put in a prompt. Brings its own vector database
+  (Qdrant); depends on no other Multistack component.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [rag, search, embeddings, qdrant]
+home: https://github.com/Multicorewareinc/M-Stack
+sources:
+  - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/rag

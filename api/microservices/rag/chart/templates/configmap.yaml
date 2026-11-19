@@ -1,0 +1,54 @@
+{{- if not .Values.config.embedding.url }}
+{{- fail "\n\nrag: config.embedding.url is not set.\n\nEvery search embeds the question first, so without an embedding server\nthe service answers every request with a 503.\n\nSet config.embedding.url=http://<embedding-server>/v1/embeddings\n" }}
+{{- end }}
+{{- if and (not .Values.secret.existingSecret) (not .Values.secret.create) }}
+{{- fail "\n\nrag: no credentials.\n\nSet one of:\n  secret.existingSecret=<name>   a Secret with SERVICE_API_KEY and QDRANT_API_KEY\n  secret.create=true             with secret.serviceApiKey and secret.qdrantApiKey (local work only)\n" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rag.fullname" . }}
+  labels: {{- include "rag.labels" . | nindent 4 }}
+    {{- include "rag.selectorLabels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  EMBEDDING_URL: {{ .Values.config.embedding.url | quote }}
+  EMBEDDING_MODEL: {{ .Values.config.embedding.model | quote }}
+  EMBEDDING_DIMENSION: {{ .Values.config.embedding.dimension | quote }}
+  EMBEDDING_BATCH_SIZE: {{ .Values.config.embedding.batchSize | quote }}
+  QUERY_TEMPLATE: {{ .Values.config.embedding.queryTemplate | quote }}
+  DOCUMENT_TEMPLATE: {{ .Values.config.embedding.documentTemplate | quote }}
+  EMBEDDING_MAX_INPUT_TOKENS: {{ .Values.config.embedding.maxInputTokens | quote }}
+  CHUNK_MAX_TOKENS: {{ .Values.config.chunking.maxTokens | quote }}
+  CHUNK_OVERLAP_TOKENS: {{ .Values.config.chunking.overlapTokens | quote }}
+  QDRANT_URL: {{ printf "http://%s:6333" (include "rag.qdrantName" .) | quote }}
+  QDRANT_COLLECTION: {{ .Values.config.collection | quote }}
+  TOP_K: {{ .Values.config.search.topK | quote }}
+  BUDGET_TOKENS: {{ .Values.config.search.budgetTokens | quote }}
+  MIN_SCORE: {{ .Values.config.search.minScore | quote }}
+  MIN_QUERY_TERMS: {{ .Values.config.search.minQueryTerms | quote }}
+  STUB_PENALTY: {{ .Values.config.search.stubPenalty | quote }}
+  CAPABILITY_BOOST: {{ .Values.config.search.capabilityBoost | quote }}
+  SKILL_SLOTS: {{ .Values.config.search.skillSlots | quote }}
+  RERANK_URL: {{ .Values.config.search.rerank.url | quote }}
+  RERANK_MODEL: {{ .Values.config.search.rerank.model | quote }}
+  RERANK_CANDIDATES: {{ .Values.config.search.rerank.candidates | quote }}
+  RERANK_PER_RANKING: {{ .Values.config.search.rerank.perRanking | quote }}
+  RERANK_TIMEOUT_SECONDS: {{ .Values.config.search.rerank.timeoutSeconds | quote }}
+  RERANK_MIN_SCORE: {{ .Values.config.search.rerank.minScore | quote }}
+  RERANK_KEEP: {{ .Values.config.search.rerank.keep | quote }}
+  CLAUSE_SEARCH: {{ .Values.config.search.clauses.enabled | quote }}
+  CLAUSE_CANDIDATES: {{ .Values.config.search.clauses.candidates | quote }}
+  MAX_CLAUSES: {{ .Values.config.search.clauses.max | quote }}
+  CLAUSE_SLOTS: {{ .Values.config.search.clauses.slots | quote }}
+  RERANK_QUERY_TEMPLATE: {{ .Values.config.search.rerank.queryTemplate | quote }}
+  RERANK_DOCUMENT_TEMPLATE: {{ .Values.config.search.rerank.documentTemplate | quote }}
+  LLM_RERANK_URL: {{ .Values.config.search.llmRerank.url | quote }}
+  LLM_RERANK_MODEL: {{ .Values.config.search.llmRerank.model | quote }}
+  LLM_RERANK_CANDIDATES: {{ .Values.config.search.llmRerank.candidates | quote }}
+  LLM_RERANK_TIMEOUT_SECONDS: {{ .Values.config.search.llmRerank.timeoutSeconds | quote }}
+  LLM_RERANK_SUBJECT: {{ .Values.config.search.llmRerank.subject | quote }}
+  LLM_RERANK_ONLY_USEFUL: {{ .Values.config.search.llmRerank.onlyUseful | quote }}
+  LLM_RERANK_MIN_PASSAGES: {{ .Values.config.search.llmRerank.minPassages | quote }}
+  SEARCH_CACHE_SECONDS: {{ .Values.config.search.cacheSeconds | quote }}
+  SEARCH_CACHE_SIZE: {{ .Values.config.search.cacheSize | quote }}

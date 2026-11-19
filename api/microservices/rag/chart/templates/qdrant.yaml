@@ -1,0 +1,79 @@
+{{/*
+The vector database, owned by this release. One replica: a single Qdrant
+node holds the whole index comfortably, and more than one would need
+Qdrant's cluster mode, which this chart does not configure.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rag.qdrantName" . }}
+  labels: {{- include "rag.labels" . | nindent 4 }}
+    {{- include "rag.qdrantSelectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http
+      protocol: TCP
+  selector: {{- include "rag.qdrantSelectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "rag.qdrantName" . }}
+  labels: {{- include "rag.labels" . | nindent 4 }}
+    {{- include "rag.qdrantSelectorLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "rag.qdrantName" . }}
+  selector:
+    matchLabels: {{- include "rag.qdrantSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "rag.qdrantSelectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: qdrant
+          image: "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
+          imagePullPolicy: {{ .Values.qdrant.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 6333
+              protocol: TCP
+          env:
+            - name: QDRANT__SERVICE__API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rag.secretName" . }}
+                  key: QDRANT_API_KEY
+            - name: QDRANT__TELEMETRY_DISABLED
+              value: "true"
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          {{- with .Values.qdrant.resources }}
+          resources: {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.qdrant.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.persistence.size }}
