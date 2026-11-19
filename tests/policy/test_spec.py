@@ -4,6 +4,7 @@ Every case here is a failure that is invisible at deploy time — the pod
 comes up Ready and answers /check while limiting nothing — which is why
 they are construction-time errors rather than warnings.
 """
+
 import pytest
 
 from multistack import Policy, RateLimits
@@ -71,8 +72,7 @@ def test_dedupe_ttl_must_cover_the_window_it_protects():
 
 
 def test_the_endpoint_follows_the_release_name():
-    assert policy().endpoint == (
-        "http://rpm-rate-limiter-rpm.policy.svc:8000/check")
+    assert policy().endpoint == ("http://rpm-rate-limiter-rpm.policy.svc.cluster.local:8000/check")
     renamed = policy(options={"release_name": "limits"})
     assert renamed.endpoint.startswith("http://limits-rate-limiter-rpm.")
 
@@ -85,7 +85,7 @@ def test_assignment_is_revalidated():
 
 def test_unknown_fields_are_refused():
     with pytest.raises(ValueError):
-        policy(rate_limits={"user_default": 5})     # the env var's name
+        policy(rate_limits={"user_default": 5})  # an env-var name, not a field
 
 
 # -- tpm ------------------------------------------------------------------
@@ -105,7 +105,8 @@ def test_the_service_name_follows_the_type_not_rpm():
     assert policy(type="rpm").service_name == "rpm-rate-limiter-rpm"
     assert policy(type="tpm").service_name == "tpm-rate-limiter-tpm"
     assert policy(type="tpm").endpoint == (
-        "http://tpm-rate-limiter-tpm.policy.svc:8000/check")
+        "http://tpm-rate-limiter-tpm.policy.svc.cluster.local:8000/check"
+    )
 
 
 def test_a_release_already_naming_the_chart_is_not_doubled():
@@ -140,10 +141,15 @@ def test_an_unknown_policy_type_is_refused():
 def _policy(**kwargs):
     from multistack import Policy
     from multistack.policy.spec import RateLimits
+
     kwargs.setdefault("type", "rpm")
-    return Policy(kubeconfig_path="/tmp/kc.yaml",
-                  cache_url="redis://c:6379/0", allow_no_backbone=True,
-                  limits=RateLimits(), **kwargs)
+    return Policy(
+        kubeconfig_path="/tmp/kc.yaml",
+        cache_url="redis://c:6379/0",
+        allow_no_backbone=True,
+        limits=RateLimits(),
+        **kwargs,
+    )
 
 
 def test_both_policy_drivers_forward_a_node_selector():
@@ -152,8 +158,7 @@ def test_both_policy_drivers_forward_a_node_selector():
 
     pin = {"kubernetes.io/hostname": "rke2-wrk-2"}
     assert RPMDriver()._values(_policy(node_selector=pin))["nodeSelector"] == pin
-    assert TPMDriver()._values(
-        _policy(type="tpm", node_selector=pin))["nodeSelector"] == pin
+    assert TPMDriver()._values(_policy(type="tpm", node_selector=pin))["nodeSelector"] == pin
 
 
 def test_a_policy_without_a_node_selector_omits_the_key():
@@ -168,32 +173,96 @@ def test_a_policy_without_a_node_selector_omits_the_key():
 # it. These cover the split: cache_url stays credential-free for the
 # ConfigMap, cache_auth_url carries the password into the Secret.
 def test_cache_auth_url_defaults_to_none_so_an_unauthenticated_cache_works():
-    policy = Policy(kubeconfig_path=KC, cache_url=CACHE,
-                    allow_no_backbone=True)
+    policy = Policy(kubeconfig_path=KC, cache_url=CACHE, allow_no_backbone=True)
 
     assert policy.cache_auth_url is None
 
 
 def test_cache_auth_url_is_masked_in_repr_and_dump():
     """A spec reaching a traceback or a bare print() must not show it."""
-    policy = Policy(kubeconfig_path=KC, cache_url=CACHE,
-                    cache_auth_url="redis://:s3cret@valkey:6379/0",
-                    allow_no_backbone=True)
+    policy = Policy(
+        kubeconfig_path=KC,
+        cache_url=CACHE,
+        cache_auth_url="redis://:s3cret@valkey:6379/0",
+        allow_no_backbone=True,
+    )
 
     assert "s3cret" not in repr(policy)
     assert "s3cret" not in str(policy.model_dump())
     # And is still readable where it is meant to be.
-    assert policy.cache_auth_url.get_secret_value() == \
-        "redis://:s3cret@valkey:6379/0"
+    assert policy.cache_auth_url.get_secret_value() == "redis://:s3cret@valkey:6379/0"
 
 
 def test_cache_url_is_left_credential_free_alongside_it():
     """The two fields are not alternatives -- both render, to different
     places. Collapsing them into one would put the password in the
     ConfigMap, which is the bug this pair exists to prevent."""
-    policy = Policy(kubeconfig_path=KC, cache_url=CACHE,
-                    cache_auth_url="redis://:s3cret@valkey:6379/0",
-                    allow_no_backbone=True)
+    policy = Policy(
+        kubeconfig_path=KC,
+        cache_url=CACHE,
+        cache_auth_url="redis://:s3cret@valkey:6379/0",
+        allow_no_backbone=True,
+    )
 
     assert policy.cache_url == CACHE
     assert "s3cret" not in policy.cache_url
+
+
+# -- affinity ------------------------------------------------------------
+# Both rate-limiter charts exclude the control plane by default, which a
+# single-node cluster cannot satisfy. {} overrides that deliberately.
+
+
+def test_both_policy_drivers_clear_the_chart_affinity_with_null():
+    """{} would merge into the chart's map and change nothing; null deletes."""
+    from multistack.policy.drivers.rpm import RPMDriver
+    from multistack.policy.drivers.tpm import TPMDriver
+
+    assert RPMDriver()._values(_policy(affinity={}))["affinity"] is None
+    assert TPMDriver()._values(_policy(type="tpm", affinity={}))["affinity"] is None
+
+
+def test_a_real_affinity_is_forwarded_as_given():
+    from multistack.policy.drivers.rpm import RPMDriver
+
+    pin = {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": []}}
+    assert RPMDriver()._values(_policy(affinity=pin))["affinity"] == pin
+
+
+def test_a_policy_without_an_affinity_omits_the_key():
+    from multistack.policy.drivers.rpm import RPMDriver
+
+    assert "affinity" not in RPMDriver()._values(_policy())
+
+
+def test_both_limiter_drivers_ask_the_chart_to_create_the_secret():
+    """`secret.limits` without `secret.create` renders nothing at all.
+
+    The chart's own `secretName` helper refuses rather than pointing the
+    pod's `envFrom` at a Secret nothing wrote:
+
+        rate-limiter-rpm requires secret.existingSecret or
+        secret.create=true; the Secret must contain RPM_RATE_LIMITS
+
+    That refusal is correct, and it was reaching `stage_policy` on a real
+    install: both drivers filled in every field of `secret` -- limits,
+    valkeyUrl, serviceApiKey -- and never set the flag that asks for the
+    Secret to exist. Found on 2026-10-09 by rendering the chart with the
+    driver's own values rather than the test fixtures', which is why the
+    chart suite did not catch it: those render the chart directly and
+    supply `secret.create` themselves.
+
+    There is no bring-your-own-Secret field on `Policy`, so this is
+    unconditional for both limiters.
+    """
+    from multistack.policy.drivers.rpm import RPMDriver
+    from multistack.policy.drivers.tpm import TPMDriver
+
+    for driver, kind in ((RPMDriver(), "rpm"), (TPMDriver(), "tpm")):
+        secret = driver._values(_policy(type=kind))["secret"]
+        assert secret["create"] is True, (
+            f"{kind} limiter does not set secret.create, so the chart "
+            "refuses to render and the stage fails at install"
+        )
+        # The flag is useless without the payload it exists to create.
+        assert "limits" in secret

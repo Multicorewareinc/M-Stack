@@ -12,7 +12,7 @@ from conftest import auth_headers, make_client, make_org_client, service_headers
 
 H = auth_headers()
 
-DEFAULT_CATALOG_SIZE = 11  # users.{r,c,u,d}, roles.{r,c,u,d}, organizations.{r,u}, apikey.manage
+DEFAULT_CATALOG_SIZE = 13  # users.{r,c,u,d}, roles.{r,c,u,d}, organizations.{r,u}, apikey.{c,u,d}
 
 
 def test_create_permission_has_slug_no_org(client):
@@ -163,7 +163,8 @@ def test_seed_creates_default_catalog(client):
     required = {
         "users.read", "users.create", "users.update", "users.delete",
         "roles.read", "roles.create", "roles.update", "roles.delete",
-        "organizations.read", "organizations.update", "apikey.manage",
+        "organizations.read", "organizations.update",
+        "apikey.create", "apikey.update", "apikey.delete",
     }
     assert required <= slugs
     assert len([p for p in perms if p["slug"] in slugs]) == len(slugs)  # no dup slugs seeded

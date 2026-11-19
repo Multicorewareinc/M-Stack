@@ -1,4 +1,5 @@
 """The gateway spec, and the two rules worth being strict about."""
+
 import pytest
 
 from multistack import Gateway, Policy
@@ -8,9 +9,12 @@ KC = "/tmp/kc.yaml"
 
 
 def gateway(**kwargs):
-    base = dict(kubeconfig_path=KC, upstream_url="http://vllm:8000",
-                api_key_secret="gateway-keys",
-                org_cp_internal_url="http://organization-control-plane:8000")
+    base = dict(
+        kubeconfig_path=KC,
+        upstream_url="http://vllm:8000",
+        api_key_secret="gateway-keys",
+        org_cp_internal_url="http://organization-control-plane:8000",
+    )
     base.update(kwargs)
     return Gateway(**base)
 
@@ -62,18 +66,19 @@ def test_defaults_deploy_a_plain_authenticated_proxy():
 
 
 def test_a_policy_endpoint_comes_from_the_policy_spec():
-    limiter = Policy(kubeconfig_path=KC, cache_url="redis://v:6379/0",
-                     event_backbone_url="nats://n:4222")
+    limiter = Policy(
+        kubeconfig_path=KC, cache_url="redis://v:6379/0", event_backbone_url="nats://n:4222"
+    )
     wired = gateway(policy_endpoints=[limiter.endpoint])
     assert wired.policy_endpoints == [
-        "http://rpm-rate-limiter-rpm.policy.svc:8000/check"]
+        "http://rpm-rate-limiter-rpm.policy.svc.cluster.local:8000/check"
+    ]
 
 
 def test_routes_are_rendered_as_a_json_string():
     # The service parses MODEL_ROUTES with json.loads, so a dict handed
     # straight through would arrive as Python's repr and fail to parse.
-    values = ModelGatewayDriver()._values(
-        gateway(model_routes={"qwen": "http://vllm:8000"}))
+    values = ModelGatewayDriver()._values(gateway(model_routes={"qwen": "http://vllm:8000"}))
     assert values["config"]["modelRoutes"] == '{"qwen": "http://vllm:8000"}'
 
 
@@ -93,10 +98,15 @@ def test_the_gateway_driver_forwards_a_node_selector():
     from multistack.gateway.drivers.modelgateway import ModelGatewayDriver
 
     pin = {"kubernetes.io/hostname": "rke2-wrk-2"}
-    values = ModelGatewayDriver()._values(Gateway(
-        kubeconfig_path="/tmp/kc.yaml", upstream_url="http://u",
-        api_key_secret="s", org_cp_internal_url="http://org-cp:8000",
-        node_selector=pin))
+    values = ModelGatewayDriver()._values(
+        Gateway(
+            kubeconfig_path="/tmp/kc.yaml",
+            upstream_url="http://u",
+            api_key_secret="s",
+            org_cp_internal_url="http://org-cp:8000",
+            node_selector=pin,
+        )
+    )
     assert values["nodeSelector"] == pin
 
 
@@ -104,7 +114,42 @@ def test_the_gateway_driver_omits_the_key_when_unset():
     from multistack import Gateway
     from multistack.gateway.drivers.modelgateway import ModelGatewayDriver
 
-    values = ModelGatewayDriver()._values(Gateway(
-        kubeconfig_path="/tmp/kc.yaml", upstream_url="http://u",
-        api_key_secret="s", org_cp_internal_url="http://org-cp:8000"))
+    values = ModelGatewayDriver()._values(
+        Gateway(
+            kubeconfig_path="/tmp/kc.yaml",
+            upstream_url="http://u",
+            api_key_secret="s",
+            org_cp_internal_url="http://org-cp:8000",
+        )
+    )
     assert "nodeSelector" not in values
+
+
+# -- affinity ------------------------------------------------------------
+# The gateway chart excludes the control plane, so on a single-node cluster
+# the release succeeds and the pod stays Pending with no node to take it.
+
+
+def _gateway(**kwargs):
+    from multistack import Gateway
+
+    return Gateway(
+        kubeconfig_path="/tmp/kc.yaml",
+        upstream_url="http://u",
+        api_key_secret="s",
+        org_cp_internal_url="http://org-cp:8000",
+        **kwargs,
+    )
+
+
+def test_the_gateway_driver_clears_the_chart_affinity_with_null():
+    """{} merges into the chart's map and changes nothing; null deletes it."""
+    from multistack.gateway.drivers.modelgateway import ModelGatewayDriver
+
+    assert ModelGatewayDriver()._values(_gateway(affinity={}))["affinity"] is None
+
+
+def test_a_gateway_without_an_affinity_omits_the_key():
+    from multistack.gateway.drivers.modelgateway import ModelGatewayDriver
+
+    assert "affinity" not in ModelGatewayDriver()._values(_gateway())

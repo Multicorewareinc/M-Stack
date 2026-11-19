@@ -198,6 +198,39 @@ def test_internal_permission_usage_reflects_composition():
         ).json() == {"in_use": False}
 
 
+def test_role_counts_reflect_composition_and_assignment(client):
+    """RoleOut.user_count/permission_count are computed, not stored — a role's counts must move
+    when users/permissions are attached and stay 0 for a freshly created, untouched role."""
+    p1, p2 = uuid.uuid4(), uuid.uuid4()
+    c, _ = make_client(admin_client=make_admin_client([p1, p2]))
+    with c:
+        org = _init_org(c)
+        rid = _make_role(c, org)
+        # Fresh role: both counts are genuinely 0, not merely absent from the response.
+        created = c.get(f"/v1/roles/{rid}", headers=org_headers(org)).json()
+        assert created["user_count"] == 0
+        assert created["permission_count"] == 0
+
+        c.put(
+            f"/v1/roles/{rid}/permissions",
+            json={"permission_ids": [str(p1), str(p2)]},
+            headers=org_headers(org),
+        )
+        u1 = _make_user(c, org, "u1")
+        u2 = _make_user(c, org, "u2")
+        c.put(f"/v1/users/{u1}/roles", json={"role_ids": [rid]}, headers=org_headers(org))
+        c.put(f"/v1/users/{u2}/roles", json={"role_ids": [rid]}, headers=org_headers(org))
+
+        got = c.get(f"/v1/roles/{rid}", headers=org_headers(org)).json()
+        assert got["user_count"] == 2
+        assert got["permission_count"] == 2
+
+        # list_roles must report the same counts (bulk path), not just get_role (single path).
+        listed = {r["id"]: r for r in c.get("/v1/roles", headers=org_headers(org)).json()}
+        assert listed[rid]["user_count"] == 2
+        assert listed[rid]["permission_count"] == 2
+
+
 def test_assign_cross_org_target_user_404(client):
     """The TARGET user, not just the role, must be org-scoped (council review: only the
     cross-org-role case was tested; a cross-org target user was not)."""

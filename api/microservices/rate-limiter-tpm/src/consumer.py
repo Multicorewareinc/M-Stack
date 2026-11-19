@@ -1,4 +1,5 @@
-"""NATS JetStream consumer — the async counting strain (AD-01/AD-02, ADR-030).
+"""Event-backbone consumer — the async counting strain (AD-01/AD-02, ADR-030), over the
+multistack.queue SDK seam (ADR-033).
 
 Subscribes to the gateway's **enriched** event stream (ADR-030; not the raw
 `gateway.events` — see settings.py) and, for each `response` event (NOT `request`
@@ -20,7 +21,11 @@ and increments the TPM counters:
 - Durable consumer => independent cursor, survives restarts, replays on reconnect.
 - Idempotent: the service dedupes on `request_id` (ADR-008), so at-least-once redelivery
   never double-counts.
-- `nats` is imported lazily so the module (and offline tests) load without nats-py.
+- Queue I/O goes through the multistack.queue SDK, not a backend client; the SDK is imported
+  lazily so the module (and offline tests) load without it. The SDK owns deserialization,
+  acknowledgement and reconnection.
+- The durable consumer itself is provisioned externally by NACK — this service binds to it
+  and never creates streams or consumers.
 - Failure-isolated: connect/consume errors are logged; they never crash the service. If the
   backbone is unreachable, counters simply don't advance and `/check` fails open (allows).
 """
@@ -28,124 +33,107 @@ and increments the TPM counters:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 logger = logging.getLogger(__name__)
 
+# How long startup may wait for the backbone before giving up and handing off to the
+# background retry. The SDK retries its INITIAL connect internally and indefinitely
+# (NatsConfig.retry_on_initial_connect defaults to True, 1s->30s backoff) and QueueConfig
+# exposes no knob to turn that off — so `await queue.connect()` on an unreachable backbone
+# never returns, which would hang lifespan startup and leave the service not listening at
+# all. Bounding it keeps ADR-016's promise: a down backbone leaves the consumer inactive,
+# never blocks or crashes startup. _retry_connect() below owns the waiting instead.
+_CONNECT_TIMEOUT_SECONDS = 10
+
 
 class TpmConsumer:
-    def __init__(self, settings, service) -> None:
+    def __init__(self, settings, service, *, queue=None) -> None:
         self._url = settings.event_backbone_url
+        self._backend = settings.queue_backend
         self._stream = settings.event_stream_name
-        self._subject = settings.event_stream_subject
         self._durable = settings.event_durable_name
         self._service = service
-        self._nc = None
-        self._sub = None
+        self._queue = queue  # test override; production builds it in start()
+        self._bound = False
+        # Hold a strong ref to the background retry task: the loop keeps only a weak
+        # reference, so an un-stored task can be GC'd mid-backoff (RUF006).
+        self._retry_task: asyncio.Task | None = None
 
     @property
     def active(self) -> bool:
-        """True once the JetStream subscription is bound (i.e. counting is live). Read by
-        /ready and the consumer-active metric — the observable counterpart to the state
-        start() already tracked but never exposed."""
-        return self._sub is not None
+        """True once the durable consumer is bound (i.e. counting is live). Read by /ready
+        and the consumer-active metric."""
+        return self._bound
 
     async def start(self) -> None:
-        """Best-effort connect. A down backbone logs and leaves the consumer inactive
-        (counts won't advance) rather than crashing startup, while a background task keeps
-        retrying until it succeeds — see _retry_connect().
-
-        FIXED: this used to pass retry_on_failed_connect=True to nats.connect() expecting it
-        to retry a down-at-startup backbone in the background. That parameter has never
-        existed in nats-py, at any version (confirmed by inspecting Client.connect()'s actual
-        signature and by searching nats.py's full commit history) — so connect() always
-        raised immediately instead, and this consumer never bound, ever, unless NATS happened
-        to be reachable at the exact moment start() ran. Native reconnect (max_reconnect_
-        attempts=-1) only takes over after a first successful connect, so it never engaged
-        either. _retry_connect() below is what actually covers the down-at-startup case."""
+        """Best-effort connect through the multistack.queue SDK. A down backbone logs and
+        leaves the consumer inactive (counts won't advance) rather than crashing startup,
+        while a background task keeps retrying until it succeeds (_retry_connect). Reconnect
+        after a first successful connect is the SDK's own job (its NATS client reconnects and
+        restores the push subscription), so this service no longer rebinds by hand."""
         try:
-            import nats  # lazy: offline tests / inert path don't need nats-py
+            from multistack.queue import Queue, QueueConfig  # lazy: offline tests degrade
 
-            self._nc = await nats.connect(
-                self._url,
-                reconnected_cb=self._on_reconnected,
-                disconnected_cb=self._on_disconnected,
-                max_reconnect_attempts=-1,
-            )
+            queue = Queue(QueueConfig(name=self._backend, url=self._url))
+            await asyncio.wait_for(queue.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
+            self._queue = queue
         except Exception:
             logger.warning("tpm_consumer_connect_failed_retrying", exc_info=True)
-            self._nc = None
-            asyncio.create_task(self._retry_connect())
+            self._queue = None
+            self._retry_task = asyncio.create_task(self._retry_connect())
             return
-        if getattr(self._nc, "is_connected", False):
-            await self._bind()
+        await self._bind()
 
     async def _retry_connect(self) -> None:
         """Background retry for a backbone that was down when start() ran. Capped exponential
         backoff (1s, 2s, 4s, ... up to 30s) until connect() succeeds, then binds directly."""
-        import nats
-
         delay = 1
-        while self._nc is None:
+        while self._queue is None:
             await asyncio.sleep(delay)
             try:
-                self._nc = await nats.connect(
-                    self._url,
-                    reconnected_cb=self._on_reconnected,
-                    disconnected_cb=self._on_disconnected,
-                    max_reconnect_attempts=-1,
-                )
+                from multistack.queue import Queue, QueueConfig
+
+                queue = Queue(QueueConfig(name=self._backend, url=self._url))
+                await queue.connect()
+                self._queue = queue
             except Exception:
                 delay = min(delay * 2, 30)
         await self._bind()
 
     async def _bind(self) -> None:
-        """Single bind path (used by start() and the reconnect handler): create the stream
-        (idempotent) and subscribe the durable consumer, classifying failures."""
-        from nats.js.api import ConsumerConfig, DeliverPolicy
+        """Bind to the NACK-provisioned durable consumer, classifying failures. The consumer
+        (its filter subject, deliver policy, max_deliver and ack_wait) is provisioned
+        externally by NACK; this only binds to it and chooses runtime ack behaviour.
 
-        js = self._nc.jetstream()
-        try:  # the gateway also creates this; add_stream is idempotent
-            await js.add_stream(name=self._stream, subjects=[self._subject])
-        except Exception:
-            logger.info("tpm_stream_exists", extra={"stream": self._stream})
+        AckMode.ALWAYS keeps the pre-SDK soft-ack: the message is acked even when the handler
+        fails, so a poison message can never stall counting."""
         try:
-            # DeliverPolicy.NEW: count events going FORWARD only. A rolling 60s window must
-            # not replay the whole retained backlog into the current minute (that would
-            # over-count on every restart). Once durable, it resumes from the last ack.
-            self._sub = await js.subscribe(
-                self._subject,
-                durable=self._durable,
-                cb=self._on_msg,
-                manual_ack=True,
-                config=ConsumerConfig(deliver_policy=DeliverPolicy.NEW),
+            from multistack.queue.drivers.nats.messaging import AckMode, ConsumerBinding
+
+            await self._queue.subscribe(
+                ConsumerBinding(
+                    stream=self._stream,
+                    durable=self._durable,
+                    ack_mode=AckMode.ALWAYS,
+                ),
+                self._on_msg,
             )
-            logger.info("tpm_consumer_started", extra={"subject": self._subject, "durable": self._durable})
+            self._bound = True
+            logger.info(
+                "tpm_consumer_started", extra={"stream": self._stream, "durable": self._durable}
+            )
         except Exception as exc:
-            self._sub = None
+            self._bound = False
             text = str(exc).lower()
             if "already" in text and ("exist" in text or "bound" in text or "in use" in text):
-                logger.warning("tpm_consumer_durable_conflict", exc_info=True)  # another replica holds it
+                logger.warning(
+                    "tpm_consumer_durable_conflict", exc_info=True
+                )  # another replica holds it
             else:
-                logger.warning("tpm_consumer_bind_failed", exc_info=True)  # transient — will retry on reconnect
-
-    async def _on_reconnected(self) -> None:
-        # nats-py restores core subscriptions on reconnect, so drain any live sub first to
-        # avoid a duplicate JS push binding, then rebind. Re-binding cannot double-count: the
-        # durable resumes from its last ack and counting is idempotent on request_id.
-        if self._sub is not None:
-            try:
-                await self._sub.unsubscribe()
-            except Exception:
-                logger.warning("tpm_resubscribe_drain_failed", exc_info=True)
-            self._sub = None
-        await self._bind()
-
-    async def _on_disconnected(self) -> None:
-        # Reflect the outage in `active`/ /ready until the connection is restored.
-        self._sub = None
-        logger.warning("tpm_consumer_disconnected")
+                logger.warning(
+                    "tpm_consumer_bind_failed", exc_info=True
+                )  # transient — retried on reconnect
 
     def _resolve_amount(self, event: dict) -> int | None:
         """Read the enriched, already-guaranteed count. No tokenizer call, no text
@@ -158,10 +146,12 @@ class TpmConsumer:
             return int(total)
         return None
 
-    async def _on_msg(self, msg) -> None:
+    async def _on_msg(self, event: dict) -> None:
+        """Handle one already-deserialized event. The SDK deserializes the payload and acks
+        (AckMode.ALWAYS), so this neither parses nor acknowledges. Errors are swallowed and
+        logged: counting must never take the service down."""
         try:
-            event = json.loads(msg.data)
-            if isinstance(event, dict) and event.get("type") == "response":
+            if event.get("type") == "response":
                 amount = self._resolve_amount(event)
                 if amount:
                     await self._service.count(
@@ -169,15 +159,10 @@ class TpmConsumer:
                     )
         except Exception:
             logger.warning("tpm_consume_error", exc_info=True)
-        finally:
-            try:
-                await msg.ack()  # soft: ack even on error so a poison msg can't loop forever
-            except Exception:
-                logger.warning("tpm_ack_failed", exc_info=True)
 
     async def stop(self) -> None:
-        if self._nc is not None:
+        if self._queue is not None:
             try:
-                await self._nc.drain()
+                await self._queue.close()
             except Exception:
                 logger.warning("tpm_consumer_stop_failed", exc_info=True)

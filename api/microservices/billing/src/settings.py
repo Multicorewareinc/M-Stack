@@ -13,11 +13,15 @@ class Settings(BaseSettings):
     # Billing's own database (SQLAlchemy async URL, asyncpg driver). Alembic reads this too.
     # Owned by this service alone (database-per-service, ADR-003/ADR-006/ADR-015) — no other
     # service reads or writes it.
-    database_url: str = "postgresql+asyncpg://billing:billing@localhost:5432/billing_service"
+    database_url_billing: str = (
+        "postgresql+asyncpg://billing:billing@localhost:5432/billing_service"
+    )
 
-    # Async metering via the ENRICHED event backbone (ADR-030/ADR-031). Empty = no consumer =>
-    # nothing is metered. When set, the subject/stream MUST be the enriched pair (ADR-030
-    # AD-07) — enforced by fail-fast startup validation in main.py, not by defaults alone.
+    # Async metering via the ENRICHED event backbone (ADR-030/ADR-031), reached through the
+    # multistack.queue SDK seam (ADR-033). Empty = no consumer => nothing is metered. When set,
+    # the subject/stream MUST be the enriched pair (ADR-030 AD-07) — enforced by fail-fast
+    # startup validation in main.py. QUEUE_BACKEND selects the backend the seam maps to (AD-04).
+    queue_backend: str = "nats"  # env QUEUE_BACKEND; SDK maps this to a driver
     event_backbone_url: str = ""
     event_stream_name: str = "GATEWAY_EVENTS_ENRICHED"
     event_stream_subject: str = "gateway.events.enriched"

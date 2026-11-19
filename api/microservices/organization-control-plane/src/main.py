@@ -1,6 +1,6 @@
 """App entrypoint. Builds the FastAPI app, wires settings + DB engine/sessionmaker + routers.
-Mirrors admin-control-plane's create_app (ADR-020), minus seeding (Org CP has no default
-tenants to seed).
+Mirrors admin-control-plane's create_app (ADR-020). The only seeding is the optional, e2e/CI-only
+fixed verify API key (SEED_API_KEY, src/seed.py) — a no-op in production where it is unset.
 
 Run: uvicorn main:create_app --factory --host 0.0.0.0 --port 8000
 (Production DDL is applied by `alembic upgrade head` in docker-entrypoint.sh, not here.)
@@ -18,14 +18,19 @@ import httpx
 from db import Base, build_engine, build_sessionmaker
 from fastapi import FastAPI
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from seed import seed_api_key
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import Response
 
 from errors import install_error_handlers
-from modules.api_keys.dependencies import load_apikey_manage_permission_id
 from modules.api_keys.router import internal_router as api_keys_internal_router
 from modules.api_keys.router import router as api_keys_router
+from modules.audit.router import internal_router as audit_internal_router
+from modules.audit.router import router as audit_router
 from modules.auth.router import router as auth_router
+from modules.invitations.router import internal_router as invitations_internal_router
+from modules.invitations.router import platform_router as invitations_platform_router
+from modules.invitations.router import router as invitations_router
 from modules.organizations.router import internal_router as organizations_internal_router
 from modules.organizations.router import router as organizations_router
 from modules.permissions.router import router as permissions_router
@@ -76,7 +81,7 @@ def create_app(
     # injected. Offline tests inject an aiosqlite engine and own its lifecycle.
     owns_engine = engine is None
     if engine is None:
-        engine = build_engine(settings.database_url)
+        engine = build_engine(settings.database_url_org)
     sessionmaker = build_sessionmaker(engine)
 
     # Owns-it outbound client to Admin CP's internal API (validate permission ids, ADR-018/019).
@@ -107,9 +112,11 @@ def create_app(
         if not owns_engine:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-        # Resolve the apikey.manage permission id once (Admin-owned catalog, ADR-027 D6). Cached on
-        # app.state; the mutation gate reads it (no per-request Admin call). None ⇒ gate fails closed.
-        app.state.apikey_manage_permission_id = await load_apikey_manage_permission_id(admin_client)
+        # e2e/CI only: seed the fixed verify key after the schema exists (create_all above on the test
+        # engine; Alembic before uvicorn boots in prod). A no-op when settings.seed_api_key is unset.
+        if settings.seed_api_key:
+            async with sessionmaker() as session:
+                await seed_api_key(session, settings.seed_api_key)
         yield
         if owns_engine:
             await engine.dispose()
@@ -124,7 +131,6 @@ def create_app(
     app.state.sessionmaker = sessionmaker
     app.state.admin_client = admin_client
     app.state.billing_client = billing_client
-    app.state.apikey_manage_permission_id = None  # set by lifespan (ADR-027 D6)
 
     install_error_handlers(app)
     # users_internal_router's literal /user-counts and /active-user-count routes must be
@@ -148,6 +154,13 @@ def create_app(
     app.include_router(auth_router)
     # Public end-user API-key lifecycle (/api/api-keys) — same JWT surface (ADR-027).
     app.include_router(api_keys_router)
+    # Audit-log reads: org-scoped JWT surface (/api/audit-logs) + cross-org service surface for Admin CP.
+    app.include_router(audit_router)
+    app.include_router(audit_internal_router)
+    # Invitations: org-admin JWT surface + public accept (/api/invitations) and Admin CP's internal issue route.
+    app.include_router(invitations_router)
+    app.include_router(invitations_internal_router)
+    app.include_router(invitations_platform_router)
     # Internal key verify surface for the model-gateway (/internal/v1/api-keys) — service bearer (SP-02).
     app.include_router(api_keys_internal_router)
 

@@ -16,12 +16,13 @@ event:
 That second one is a way to end up with a limiter that is healthy and not
 limiting much, so it gets a prerequisite warning rather than a comment.
 """
-from typing import Any, Dict, List
 
-from ..base import PolicyError, PolicyPrerequisiteError
-from ..spec import Policy
+from typing import Any
+
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ..base import PolicyError, PolicyPrerequisiteError
+from ..spec import Policy
 
 # Below this, a token ceiling is almost certainly a request ceiling that
 # was copied from an RPM limits document. A 0.5B model's single reply is
@@ -38,8 +39,8 @@ INACTIVE_MARKERS = (
     # failed attempt and clears on its own once NATS comes back -- but at each log line the
     # consumer is, right then, not bound and not counting, which is exactly what this checks.
     "tpm_consumer_connect_failed_retrying",
-    "tpm_consumer_durable_conflict",          # another pod holds the durable
-    "tpm_consumer_bind_failed",               # transient, retried on reconnect
+    "tpm_consumer_durable_conflict",  # another pod holds the durable
+    "tpm_consumer_bind_failed",  # transient, retried on reconnect
 )
 
 
@@ -50,9 +51,9 @@ class TPMDriver:
     def _helm(self, policy: Policy) -> HelmRunner:
         return HelmRunner(policy.kubeconfig_path, error_cls=PolicyError)
 
-    def _values(self, policy: Policy) -> Dict[str, Any]:
+    def _values(self, policy: Policy) -> dict[str, Any]:
         options = policy.options
-        values: Dict[str, Any] = {
+        values: dict[str, Any] = {
             "replicaCount": policy.replicas,
             "config": {
                 "valkeyUrl": policy.cache_url,
@@ -69,42 +70,63 @@ class TPMDriver:
             # The chart takes the limits structured and assembles the JSON
             # itself, into a Secret — the override maps are keyed by
             # bearer token.
-            "secret": {"limits": {
-                "userDefault": policy.limits.user_default,
-                "modelDefault": policy.limits.model_default,
-                "userOverrides": policy.limits.user_overrides,
-                "modelOverrides": policy.limits.model_overrides,
-                "userModelOverrides": policy.limits.user_model_overrides,
-            }},
+            # `create` is what asks for that Secret to exist. Without it
+            # the chart's own secretName helper fails the render rather than
+            # pointing the pod's envFrom at a Secret nothing wrote -- the
+            # right refusal, and it was reaching the limiter stage, because
+            # every field below was being sent and this flag was not. There
+            # is no bring-your-own-Secret path on `Policy`, so this is
+            # unconditional: the chart creating it is the only way the
+            # limits ever reach the pod.
+            "secret": {
+                "create": True,
+                "limits": {
+                    "userDefault": policy.limits.user_default,
+                    "modelDefault": policy.limits.model_default,
+                    "userOverrides": policy.limits.user_overrides,
+                    "modelOverrides": policy.limits.model_overrides,
+                    "userModelOverrides": policy.limits.user_model_overrides,
+                },
+            },
         }
         if policy.cache_auth_url is not None:
             # Into the Secret, not config.valkeyUrl: that renders into the
             # ConfigMap, where a password is readable by anything holding
             # `get configmaps` here. The chart's envFrom applies the Secret
             # after the ConfigMap, so this wins inside the pod.
-            values["secret"]["valkeyUrl"] = \
-                policy.cache_auth_url.get_secret_value()
+            values["secret"]["valkeyUrl"] = policy.cache_auth_url.get_secret_value()
         if policy.admin_cp_service_api_key is not None:
-            values["secret"]["serviceApiKey"] = \
-                policy.admin_cp_service_api_key.get_secret_value()
+            values["secret"]["serviceApiKey"] = policy.admin_cp_service_api_key.get_secret_value()
         if policy.network_policy_allowed_ingress:
             values["networkPolicy"] = {
                 "enabled": True,
                 "allowedIngress": policy.network_policy_allowed_ingress,
             }
-        if options.image_tag:
-            values["image"] = {"tag": options.image_tag}
+        if options.image_tag or options.image_repository:
+            image: dict[str, Any] = {}
+            if options.image_repository:
+                image["repository"] = options.image_repository
+            if options.image_tag:
+                image["tag"] = options.image_tag
+            values["image"] = image
         # Absent leaves the chart's own default in place; an explicit {}
         # overrides it with "schedule anywhere", which is a different
         # statement and sometimes the intended one.
+        if policy.affinity is not None:
+            # null, not {}, for the empty case: Helm merges user values
+            # into the chart's recursively, so an empty map adds nothing and
+            # the chart's own affinity survives -- the release installs and
+            # the pod stays Pending with the default still in force. An
+            # explicit null is what Helm treats as "delete this key".
+            values["affinity"] = policy.affinity or None
         if policy.node_selector is not None:
             values["nodeSelector"] = policy.node_selector
         if policy.tolerations is not None:
             values["tolerations"] = policy.tolerations
         return values
 
-    def check_prerequisites(self, policy: Policy) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, policy: Policy) -> list[str]:
+        warnings: list[str] = []
         require_cli("helm", error_cls=PolicyPrerequisiteError)
         require_cluster(policy.kubeconfig_path, capability="a policy service")
 
@@ -115,9 +137,15 @@ class TPMDriver:
                 "here, but it is not rate limiting."
             )
         limits = policy.limits
-        if not any((limits.user_default, limits.model_default,
-                    limits.user_overrides, limits.model_overrides,
-                    limits.user_model_overrides)):
+        if not any(
+            (
+                limits.user_default,
+                limits.model_default,
+                limits.user_overrides,
+                limits.model_overrides,
+                limits.user_model_overrides,
+            )
+        ):
             warnings.append(
                 "every limit is 0, which means unlimited rather than blocked "
                 "— this deploys a service that denies nothing."
@@ -128,8 +156,10 @@ class TPMDriver:
             # a tiny *default* is nearly always a copied RPM number.
             small = {
                 name: value
-                for name, value in (("user_default", limits.user_default),
-                                    ("model_default", limits.model_default))
+                for name, value in (
+                    ("user_default", limits.user_default),
+                    ("model_default", limits.model_default),
+                )
                 if 0 < value < SUSPICIOUSLY_SMALL_TOKEN_LIMIT
             }
             if small:
@@ -185,20 +215,33 @@ class TPMDriver:
             return False
 
         ready = kubectl(
-            policy.kubeconfig_path, "get", "deploy", policy.service_name,
-            "-n", policy.resolved_namespace,
-            "-o", "jsonpath={.status.readyReplicas}",
-            error_cls=PolicyError, check=False,
+            policy.kubeconfig_path,
+            "get",
+            "deploy",
+            policy.service_name,
+            "-n",
+            policy.resolved_namespace,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
+            error_cls=PolicyError,
+            check=False,
         )
         # Empty means the field is absent, which Kubernetes does when the
         # count is zero — so "" and "0" are the same answer.
         if not (ready or "").strip().strip("0"):
             return False
 
-        logs = kubectl(
-            policy.kubeconfig_path, "logs",
-            f"deploy/{policy.service_name}",
-            "-n", policy.resolved_namespace, "--tail=200",
-            error_cls=PolicyError, check=False,
-        ) or ""
+        logs = (
+            kubectl(
+                policy.kubeconfig_path,
+                "logs",
+                f"deploy/{policy.service_name}",
+                "-n",
+                policy.resolved_namespace,
+                "--tail=200",
+                error_cls=PolicyError,
+                check=False,
+            )
+            or ""
+        )
         return not any(marker in logs for marker in INACTIVE_MARKERS)

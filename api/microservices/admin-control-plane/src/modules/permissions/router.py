@@ -11,8 +11,10 @@ import uuid
 import httpx
 from db import get_session
 from dependencies import get_org_client, require_admin_key, require_service_key
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from modules.audit import service as audit
 
 from . import service
 from .schemas import PermissionCreate, PermissionOut, PermissionUpdate
@@ -24,19 +26,32 @@ router = APIRouter(
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=PermissionOut)
 async def create(
-    body: PermissionCreate, session: AsyncSession = Depends(get_session)
+    body: PermissionCreate,
+    request: Request,
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> PermissionOut:
-    return await service.create_permission(session, body)
+    permission = await service.create_permission(session, body)
+    await audit.record(
+        session,
+        action="permission.created",
+        resource_type="permission",
+        resource_id=permission.id,
+        resource_name=permission.slug,
+        **audit.ctx(request),
+    )
+    return permission
 
 
 @router.get("", response_model=list[PermissionOut])
-async def list_all(session: AsyncSession = Depends(get_session)) -> list[PermissionOut]:
+async def list_all(
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> list[PermissionOut]:
     return await service.list_permissions(session)
 
 
 @router.get("/{permission_id}", response_model=PermissionOut)
 async def get_one(
-    permission_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    permission_id: uuid.UUID, session: AsyncSession = Depends(get_session, scope="function")
 ) -> PermissionOut:
     return await service.get_permission(session, permission_id)
 
@@ -45,19 +60,40 @@ async def get_one(
 async def patch(
     permission_id: uuid.UUID,
     body: PermissionUpdate,
-    session: AsyncSession = Depends(get_session),
+    request: Request,
+    session: AsyncSession = Depends(get_session, scope="function"),
     org_client: httpx.AsyncClient = Depends(get_org_client),
 ) -> PermissionOut:
-    return await service.update_permission(session, org_client, permission_id, body)
+    permission = await service.update_permission(session, org_client, permission_id, body)
+    await audit.record(
+        session,
+        action="permission.updated",
+        resource_type="permission",
+        resource_id=permission_id,
+        resource_name=permission.slug,
+        details={"changed": sorted(body.model_dump(exclude_unset=True))},
+        **audit.ctx(request),
+    )
+    return permission
 
 
 @router.delete("/{permission_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete(
     permission_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
+    request: Request,
+    session: AsyncSession = Depends(get_session, scope="function"),
     org_client: httpx.AsyncClient = Depends(get_org_client),
 ) -> None:
+    slug = (await service.get_permission(session, permission_id)).slug  # 404s as delete would
     await service.delete_permission(session, org_client, permission_id)
+    await audit.record(
+        session,
+        action="permission.deleted",
+        resource_type="permission",
+        resource_id=permission_id,
+        resource_name=slug,
+        **audit.ctx(request),
+    )
 
 
 # Internal read-only surface — Org CP validates role_permissions.permission_id against this.
@@ -69,12 +105,14 @@ internal_router = APIRouter(
 
 
 @internal_router.get("", response_model=list[PermissionOut])
-async def internal_list(session: AsyncSession = Depends(get_session)) -> list[PermissionOut]:
+async def internal_list(
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> list[PermissionOut]:
     return await service.list_permissions(session)
 
 
 @internal_router.get("/{permission_id}", response_model=PermissionOut)
 async def internal_get(
-    permission_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    permission_id: uuid.UUID, session: AsyncSession = Depends(get_session, scope="function")
 ) -> PermissionOut:
     return await service.get_permission(session, permission_id)

@@ -5,6 +5,8 @@ Mirrors the pydantic-settings shape used across the repo's services (ADR-003).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -17,7 +19,7 @@ class Settings(BaseSettings):
     # Org database. SQLAlchemy async URL (asyncpg driver in prod). Alembic reads the same value
     # from the environment. Offline tests never use this — they inject an aiosqlite engine into
     # create_app (ADR-015/ADR-020).
-    database_url: str = "postgresql+asyncpg://org:org@localhost:5432/org_control_plane"
+    database_url_org: str = "postgresql+asyncpg://org:org@localhost:5432/org_control_plane"
 
     # Service bearer token. Every /v1/* and /internal/v1/users, /internal/v1/organization route is
     # checked against this with secrets.compare_digest (AD-06) — the broad, trusted BFF/portal-backend
@@ -40,6 +42,11 @@ class Settings(BaseSettings):
     # the master permission list here (ADR-018/ADR-019). Bounded timeout on the call.
     admin_cp_internal_url: str = "http://admin-control-plane:8000"
     admin_timeout_ms: int = 3000
+
+    # e2e/CI only: when set, a single fixed verify API key — plus its org and active owner — is seeded
+    # on startup (src/seed.py) so the model-gateway's fixed test bearer resolves against a real row
+    # without a human minting one. Empty (the default) disables seeding entirely; never set in prod.
+    seed_api_key: str | None = None
 
     # Billing internal API base URL — Org CP proxies the org-scoped usage read endpoints here
     # (add-org-cp-usage-proxy), mirroring the Admin CP client above exactly. Bounded timeout on
@@ -70,3 +77,28 @@ class Settings(BaseSettings):
     trusted_proxy_count: int = 0
     # Redis for the brute-force lockout counters (redis.asyncio client from this URL).
     valkey_url: str = "redis://localhost:6379/0"
+
+    # ── Invitations (modules/invitations) ─────────────────────────────────────────────────────
+    # How long an invitation link stays valid.
+    invitation_ttl_hours: int = 168
+    # Public base URL of the Organization Portal (e.g. https://org.example.com). When set, invitation
+    # responses carry an absolute `invite_url`; otherwise only the relative `invite_path`.
+    org_portal_base_url: str | None = None
+
+    # ── Outgoing mail (SMTP), used to email invitations ───────────────────────────────────────
+    # Needs smtp_host AND smtp_from_address, plus org_portal_base_url (the email carries an absolute
+    # link). Anything missing = invitations are still created and the link is shown to copy by hand.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    # starttls: plain connect then upgrade (port 587). ssl: TLS from the first byte (port 465).
+    # none: no encryption -- only for a local relay or a test mailbox.
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_from_address: str | None = None
+    smtp_from_name: str = "Multistack"
+    smtp_timeout_seconds: float = 10.0
+    # Overall cap on one send (connect + TLS + login + message). smtp_timeout_seconds applies to each
+    # network step, so without this a slow server could add up to several times that. Callers waiting on
+    # the invitation (the Admin CP) allow slightly longer than this.
+    smtp_send_deadline_seconds: float = 20.0

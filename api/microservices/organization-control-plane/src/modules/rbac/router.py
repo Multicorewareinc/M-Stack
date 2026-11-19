@@ -20,7 +20,7 @@ router = APIRouter(prefix="/v1", tags=["rbac"], dependencies=[Depends(require_se
 async def effective_permissions(
     user_id: uuid.UUID,
     org_id: uuid.UUID = Depends(require_org_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> PermissionIds:
     ids = await service.effective_permission_ids(session, org_id, user_id)
     return PermissionIds(permission_ids=ids)
@@ -39,6 +39,6 @@ internal_router = APIRouter(
 async def composed_user_roles(
     organization_id: uuid.UUID,
     user_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[RoleWithPermissions]:
     return await service.user_role_view(session, organization_id, user_id)

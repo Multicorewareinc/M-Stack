@@ -122,30 +122,39 @@ def test_publish_failure_is_isolated(make_events_client):
 
 async def test_safe_publish_gives_request_and_response_distinct_msg_ids():
     # Regression: request_event and response_event share a bare request_id, and
-    # _safe_publish used to key Nats-Msg-Id on that alone for anything but a chunk. JetStream
-    # dedups by Nats-Msg-Id within its duplicate window regardless of message content, so the
-    # response (published moments after the request, same key) was silently discarded as a
-    # "duplicate" and never reached the durable stream -- only ephemeral core subscribers,
-    # which aren't gated by that storage-layer dedup. This is what all of billing/enricher's
+    # _safe_publish used to key the dedup id on that alone for anything but a chunk. The
+    # backbone dedups by that id within its duplicate window regardless of message content, so
+    # the response (published moments after the request, same key) was silently discarded as a
+    # "duplicate" and never reached the durable stream. This is what all of billing/enricher's
     # empty-tables symptoms traced back to. FakePublisher (used elsewhere in this file) never
     # exercises this path at all, since it bypasses EventPublisher/_safe_publish entirely.
+    #
+    # Post-ADR-033 the publisher goes through the multistack.queue SDK: _safe_publish calls
+    # queue.publish(subject, event, options=PublishOptions(message_id=...)). This drives that
+    # path with a fake Queue recording the message_id, asserting the ids stay distinct.
     from events import EventPublisher, request_event, response_event
 
-    class FakeJS:
-        def __init__(self):
-            self.published = []  # (subject, headers)
+    class FakeQueue:
+        name = "nats"
+        connected = True
 
-        async def publish(self, subject, data, headers=None):
-            self.published.append((subject, headers))
+        def __init__(self):
+            self.sent = []  # (subject, message_id)
+
+        async def publish(self, destination, message, *, options=None):
+            self.sent.append((destination, options.message_id if options else None))
+
+        async def close(self):
+            pass
 
     pub = EventPublisher("nats://test", stream_name="S", subject="s", capture_bodies=False, max_inflight=10)
-    pub._js = FakeJS()  # bypass connect(): no real NATS needed
+    pub._queue = FakeQueue()  # bypass connect(): no real backbone needed
 
     ctx = {"request_id": "r1", "principal": "p", "model": "m", "path": "/v1/chat/completions"}
     await pub._safe_publish(request_event(ctx, None))
     await pub._safe_publish(response_event(ctx, status=200, usage={"total_tokens": 9}, duration_ms=1.0, stream=False))
 
-    msg_ids = [h["Nats-Msg-Id"] for _subject, h in pub._js.published]
+    msg_ids = [mid for _subject, mid in pub._queue.sent]
     assert len(msg_ids) == len(set(msg_ids)) == 2  # distinct -- neither can dedup the other
 
 

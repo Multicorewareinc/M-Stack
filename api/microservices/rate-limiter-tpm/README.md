@@ -19,7 +19,7 @@ rate-limiter-tpm/
     ├── main.py       # app factory, JSON logging, redis wiring, startup config validation
     ├── router.py     # routes: POST /check, GET /health, GET /ready, GET /metrics
     ├── service.py    # TPM enforcement (check/count)
-    ├── settings.py   # env-driven config (VALKEY_URL, RATE_LIMITS, ADMIN_CP_URL, EVENT_STREAM_*, ...)
+    ├── settings.py   # env-driven config (VALKEY_URL, TPM_RATE_LIMITS, ADMIN_CP_URL, EVENT_STREAM_*, ...)
     ├── plan_client.py # resolves an org's plan tpm limit from admin-control-plane, cached
     ├── errors.py     # generic error handlers
     └── consumer.py   # NATS consumer: counts tokens from the enriched response events
@@ -53,7 +53,7 @@ decision lives in the body (ADR-004).
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | Log level |
 | `VALKEY_URL` | `redis://localhost:6379/0` | **Same Valkey instance as `rate-limiter-rpm`** (ADR-011), prefix `rl:tpm:` |
-| `RATE_LIMITS` | `{}` | JSON limits, same shape as RPM's — values are **token** counts |
+| `TPM_RATE_LIMITS` | `{}` | JSON limits, same shape as RPM's — values are **token** counts |
 | `EVENT_BACKBONE_URL` | `""` | NATS JetStream URL; empty = no consumer, counters never advance |
 | `EVENT_STREAM_NAME` | `GATEWAY_EVENTS_ENRICHED` | Must equal this exactly when a backbone is configured (ADR-030 AD-07) |
 | `EVENT_STREAM_SUBJECT` | `gateway.events.enriched` | Must equal this exactly when a backbone is configured (ADR-030 AD-07) |
@@ -100,7 +100,7 @@ POLICY_ENDPOINTS=http://rate-limiter-rpm:8000/check,http://rate-limiter-tpm:8000
 # and consuming gateway.events (ADR-030 AD-07); this service has no tokenizer dependency
 VALKEY_URL=redis://valkey:6379/0        # same instance as rate-limiter-rpm
 EVENT_BACKBONE_URL=nats://nats:4222
-RATE_LIMITS={"user_default":60000,"model_overrides":{"gpt-4o":120000}}
+TPM_RATE_LIMITS={"user_default":60000,"model_overrides":{"gpt-4o":120000}}
 ```
 
 **Ops note:** the previous durable (`tpm-counter` on the raw `GATEWAY_EVENTS` stream)
@@ -113,7 +113,7 @@ deletion — a rollback to a prior image depends on it still existing.
 docker build -t rate-limiter-tpm .
 docker run --rm -p 8000:8000 \
   -e VALKEY_URL=redis://host.docker.internal:6379/0 \
-  -e RATE_LIMITS='{"user_default":60000}' \
+  -e TPM_RATE_LIMITS='{"user_default":60000}' \
   rate-limiter-tpm
 ```
 

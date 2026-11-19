@@ -8,7 +8,10 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from conftest import FakeMsg, raw_msg, response_event
+import pytest
+
+from conftest import response_event
+from consumer import _PersistError
 from models import Outbox, Usage
 
 
@@ -65,10 +68,9 @@ async def _count(sessionmaker, model) -> int:
 # --- Countable event -> usage + pending outbox + ack (7.2) -----------------------------------
 async def test_countable_event_persists_usage_and_outbox_and_acks(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory()
-    msg = FakeMsg(response_event(request_id="req-a", usage={"total_tokens": 150, "source": "provider"}))
+    msg = response_event(request_id="req-a", usage={"total_tokens": 150, "source": "provider"})
     await consumer._on_msg(msg)
 
-    assert msg.acked is True
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-a"))).one()
         assert usage.total_tokens == 150
@@ -83,7 +85,7 @@ async def test_provider_breakdown_persisted(consumer_factory):
         request_id="req-b",
         usage={"total_tokens": 150, "source": "provider", "prompt_tokens": 100, "completion_tokens": 50},
     )
-    await consumer._on_msg(FakeMsg(event))
+    await consumer._on_msg(event)
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-b"))).one()
         assert usage.prompt_tokens == 100
@@ -97,7 +99,7 @@ async def test_outbox_payload_content(consumer_factory):
         request_id="req-9", principal="u1", model="m1",
         usage={"total_tokens": 150, "source": "provider"}, ts=1234.5,
     )
-    await consumer._on_msg(FakeMsg(event))
+    await consumer._on_msg(event)
     async with sessionmaker() as s:
         outbox = (await s.scalars(select(Outbox).where(Outbox.request_id == "req-9"))).one()
         assert outbox.payload == {
@@ -110,10 +112,9 @@ async def test_outbox_payload_content(consumer_factory):
 async def test_uncountable_event_audited_no_outbox_and_acks(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory()
     event = response_event(request_id="req-c", usage={"total_tokens": None, "source": "none", "reason": "no_body"})
-    msg = FakeMsg(event)
+    msg = event
     await consumer._on_msg(msg)
 
-    assert msg.acked is True
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-c"))).one()
         assert usage.total_tokens is None
@@ -125,13 +126,11 @@ async def test_uncountable_event_audited_no_outbox_and_acks(consumer_factory):
 async def test_redelivery_is_a_noop_via_unique_constraint(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory()
     event = response_event(request_id="req-dup", usage={"total_tokens": 42, "source": "provider"})
-    msg1 = FakeMsg(event)
-    msg2 = FakeMsg(event)  # redelivery: same request_id
+    msg1 = event
+    msg2 = event  # redelivery: same request_id
     await consumer._on_msg(msg1)
     await consumer._on_msg(msg2)
 
-    assert msg1.acked is True
-    assert msg2.acked is True  # already-processed no-op is still acked
     assert await _count(sessionmaker, Usage) == 1
     assert await _count(sessionmaker, Outbox) == 1
 
@@ -143,10 +142,11 @@ async def test_generic_db_fault_is_not_acked():
 
     failing = FailingSessionmaker(fail_on="commit", exc=RuntimeError("connection dropped"))
     consumer = BillingConsumer(Settings(), failing)
-    msg = FakeMsg(response_event(request_id="req-fault"))
-    await consumer._on_msg(msg)
-
-    assert msg.acked is False
+    msg = response_event(request_id="req-fault")
+    # Withholding the ack is now expressed by raising: AckMode.ON_SUCCESS leaves the
+    # message unacknowledged so the backbone redelivers it.
+    with pytest.raises(_PersistError):
+        await consumer._on_msg(msg)
     assert failing.sessions[0].rolled_back is True
     assert failing.sessions[0].closed is True
 
@@ -158,18 +158,22 @@ async def test_non_request_id_integrity_error_is_not_swallowed():
 
     failing = FailingSessionmaker(fail_on="flush", exc=_fake_integrity_error("uq_something_unrelated"))
     consumer = BillingConsumer(Settings(), failing)
-    msg = FakeMsg(response_event(request_id="req-other-constraint"))
-    await consumer._on_msg(msg)
+    msg = response_event(request_id="req-other-constraint")
+    with pytest.raises(_PersistError):  # NOT treated as an already-processed no-op
+        await consumer._on_msg(msg)
 
-    assert msg.acked is False  # NOT treated as an already-processed no-op
     assert failing.sessions[0].rolled_back is True
 
 
-# --- Non-response / un-parseable messages are ignored (7.7) ------------------------------------
-async def test_non_response_and_unparseable_events_ignored(consumer_factory):
+# --- Non-response messages are ignored (7.7) ---------------------------------------------------
+async def test_non_response_events_ignored(consumer_factory):
+    """A non-`response` event persists nothing and returns normally, so the SDK acks it.
+
+    Un-parseable payloads no longer reach this handler at all: the multistack.queue driver
+    deserializes and, on malformed JSON, logs and acks before dispatch (redelivery cannot fix
+    malformed JSON) — the same poison-message policy this consumer used to implement itself."""
     consumer, _engine, sessionmaker = await consumer_factory()
-    await consumer._on_msg(FakeMsg({"type": "request", "request_id": "r"}))
-    await consumer._on_msg(raw_msg(b"not json{"))
+    await consumer._on_msg({"type": "request", "request_id": "r"})
     assert await _count(sessionmaker, Usage) == 0
 
 
@@ -177,10 +181,9 @@ async def test_non_response_and_unparseable_events_ignored(consumer_factory):
 async def test_malformed_non_numeric_total_tokens_falls_through_to_uncountable(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory()
     event = response_event(request_id="req-malformed", usage={"total_tokens": "not-a-number", "source": "provider"})
-    msg = FakeMsg(event)
+    msg = event
     await consumer._on_msg(msg)
 
-    assert msg.acked is True
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-malformed"))).one()
         assert usage.total_tokens is None
@@ -191,7 +194,7 @@ async def test_missing_usage_key_falls_through_to_uncountable(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory()
     event = response_event(request_id="req-nousage")
     del event["usage"]
-    await consumer._on_msg(FakeMsg(event))
+    await consumer._on_msg(event)
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-nousage"))).one()
         assert usage.total_tokens is None
@@ -207,10 +210,9 @@ async def test_missing_request_id_is_not_swallowed_as_a_noop(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory(rate_limits='{"user_default":1000}')
     event = response_event(principal="u1", model="m1")
     del event["request_id"]  # triggers a real NOT NULL violation, not a UNIQUE one
-    msg = FakeMsg(event)
-    await consumer._on_msg(msg)
-
-    assert msg.acked is False  # a genuine fault — must redeliver, not be swallowed
+    msg = event
+    with pytest.raises(_PersistError):  # a genuine fault — must redeliver, not be swallowed
+        await consumer._on_msg(msg)
     async with sessionmaker() as s:
         rows = list(await s.scalars(select(Usage)))
         assert rows == []  # nothing committed
@@ -223,7 +225,7 @@ async def test_attribution_persisted_when_present(consumer_factory):
         request_id="req-attr", api_key_id="key-1", owner_id="owner-1",
         usage={"total_tokens": 150, "source": "provider"},
     )
-    await consumer._on_msg(FakeMsg(event))
+    await consumer._on_msg(event)
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-attr"))).one()
         assert usage.api_key_id == "key-1"
@@ -233,7 +235,7 @@ async def test_attribution_persisted_when_present(consumer_factory):
 async def test_attribution_null_when_absent(consumer_factory):
     consumer, _engine, sessionmaker = await consumer_factory()
     # response_event() carries no api_key_id/owner_id by default (pre-attribution / replayed event).
-    await consumer._on_msg(FakeMsg(response_event(request_id="req-noattr")))
+    await consumer._on_msg(response_event(request_id="req-noattr"))
     async with sessionmaker() as s:
         usage = (await s.scalars(select(Usage).where(Usage.request_id == "req-noattr"))).one()
         assert usage.api_key_id is None
@@ -247,8 +249,8 @@ async def test_attribution_does_not_disturb_idempotency_or_outbox(consumer_facto
         api_key_id="key-1", owner_id="owner-1",
         usage={"total_tokens": 150, "source": "provider"}, ts=1234.5,
     )
-    await consumer._on_msg(FakeMsg(event))
-    await consumer._on_msg(FakeMsg(event))  # redelivery: same request_id
+    await consumer._on_msg(event)
+    await consumer._on_msg(event)  # redelivery: same request_id
 
     assert await _count(sessionmaker, Usage) == 1
     assert await _count(sessionmaker, Outbox) == 1

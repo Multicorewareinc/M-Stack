@@ -1,4 +1,4 @@
-"""Async Alembic environment for Org CP. Reads DATABASE_URL from the environment and targets
+"""Async Alembic environment for Org CP. Reads DATABASE_URL_ORG from the environment and targets
 the shared Base.metadata. The organizations model is imported so its table is registered before
 autogenerate/upgrade runs. Copied from admin-control-plane (ADR-020)."""
 
@@ -13,6 +13,7 @@ from db import Base
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import modules.audit.models
 import modules.auth.models
 import modules.organizations.models
 import modules.roles.models
@@ -26,7 +27,7 @@ target_metadata = Base.metadata
 
 
 def _get_url() -> str:
-    return os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url") or "")
+    return os.environ.get("DATABASE_URL_ORG", config.get_main_option("sqlalchemy.url") or "")
 
 
 def run_migrations_offline() -> None:

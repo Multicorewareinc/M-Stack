@@ -22,13 +22,14 @@ reaches this over HTTP -- TPM and billing consume its output through NATS
 stream/subject strings, which are plain configuration values, not a
 Service address there is any reason to publish.
 """
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("enricher",)
+SUPPORTED_TYPES: tuple[str, ...] = ("enricher",)
 
 DEFAULT_NAMESPACE = "policy"
 DEFAULT_PORT = 8000
@@ -47,8 +48,13 @@ class EnricherOptions(BaseModel):
 
     release_name: str = "enricher"
     chart: str = "api/microservices/enricher/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     # Input: the gateway's own, unchanged stream (ADR-007). This service
     # consumes it and never modifies its contract.
@@ -105,20 +111,20 @@ class Enricher(CapabilitySpec):
     """Guarantees a usable token count on every gateway response event."""
 
     CAPABILITY: ClassVar[str] = "enricher"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = {"enricher": EnricherOptions}
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {"enricher": DEFAULT_NAMESPACE}
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = {"enricher": EnricherOptions}
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {"enricher": DEFAULT_NAMESPACE}
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster",)
 
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
     }
     # No PROVIDES -- see the module docstring.
 
     type: str = "enricher"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[EnricherOptions] = None
+    namespace: str | None = None
+    options: EnricherOptions | None = None
 
     service_port: int = Field(default=DEFAULT_PORT, gt=0, le=65535)
 
@@ -135,8 +141,14 @@ class Enricher(CapabilitySpec):
     # anywhere else stays ImagePullBackOff with nothing in the release to
     # explain it. The chart's own affinity already keeps pods off the
     # control plane; this is how a caller says *which* worker.
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Dict[str, Any]]] = None
+    # The charts' own default keeps pods off the control plane, which is
+    # right for a multi-node cluster and impossible to satisfy on a
+    # single-node one, where the only node is the control plane. Absent
+    # leaves that default alone; an explicit {} means "schedule
+    # anywhere", which is how a one-node cluster says so deliberately.
+    affinity: dict[str, Any] | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[dict[str, Any]] | None = None
 
     @field_validator("kubeconfig_path")
     @classmethod

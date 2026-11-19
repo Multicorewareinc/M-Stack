@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # Admin database. SQLAlchemy async URL (asyncpg driver in prod). Alembic reads the same
     # value from the environment. Offline tests never use this — they inject an aiosqlite
     # engine into create_app (AD-03/AD-04).
-    database_url: str = "postgresql+asyncpg://admin:admin@localhost:5432/admin_control_plane"
+    database_url_admin: str = "postgresql+asyncpg://admin:admin@localhost:5432/admin_control_plane"
 
     # Super-admin bearer token. Every /v1/* route is checked against this with
     # secrets.compare_digest (AD-05). No default (council review fix: a literal "change-me" default
@@ -31,6 +31,12 @@ class Settings(BaseSettings):
 
     # Seed the default master permission catalog on startup (insert-missing by slug, ADR-019).
     seed_permissions: bool = True
+
+    # e2e/CI only: when BOTH are set, a single org-less super-admin is bootstrapped on startup
+    # (seed_admin.bootstrap_super_admin, single-use/idempotent) so the local-auth login flow can be
+    # exercised without the operator CLI. Empty (the default) disables it; never set in production.
+    seed_admin_email: str | None = None
+    seed_admin_password: str | None = None
 
     # Org CP internal API — Admin CP calls this to initialize an org's tenant record during the
     # org-creation workflow (ADR-018/AD-03); `service_api_key` is the outbound bearer Org CP checks.

@@ -79,7 +79,7 @@ def create_app(
     # injected. Offline tests inject an aiosqlite engine and own its lifecycle.
     owns_engine = engine is None
     if engine is None:
-        engine = build_engine(settings.database_url)
+        engine = build_engine(settings.database_url_billing)
     sessionmaker = build_sessionmaker(engine)
 
     own_consumer = consumer is None and bool(settings.event_backbone_url)

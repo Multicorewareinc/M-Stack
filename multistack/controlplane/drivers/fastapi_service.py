@@ -4,9 +4,9 @@ One driver serves both `type`s: the charts differ in which settings they
 read, not in how they are installed, and the spec's options object
 already carries the per-type chart path and release name.
 """
-import base64
+
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
@@ -19,13 +19,11 @@ class FastAPIControlPlaneDriver:
         self._ready_timeout = ready_timeout
 
     def _helm(self, control_plane: ControlPlane) -> HelmRunner:
-        return HelmRunner(
-            control_plane.kubeconfig_path, error_cls=ControlPlaneError
-        )
+        return HelmRunner(control_plane.kubeconfig_path, error_cls=ControlPlaneError)
 
-    def _values(self, control_plane: ControlPlane) -> Dict[str, Any]:
+    def _values(self, control_plane: ControlPlane) -> dict[str, Any]:
         options = control_plane.options
-        config: Dict[str, Any] = {"logLevel": control_plane.log_level}
+        config: dict[str, Any] = {"logLevel": control_plane.log_level}
 
         # Each chart names the peer differently, because each is written
         # from its own side of the call.
@@ -43,7 +41,7 @@ class FastAPIControlPlaneDriver:
         if control_plane.billing_internal_url:
             config["billingInternalUrl"] = control_plane.billing_internal_url
 
-        values: Dict[str, Any] = {
+        values: dict[str, Any] = {
             "replicaCount": control_plane.replicas,
             "service": {"port": control_plane.service_port},
             "config": config,
@@ -59,29 +57,45 @@ class FastAPIControlPlaneDriver:
                 "backoffLimit": options.migration_backoff_limit,
             },
         }
-        if options.image_tag:
-            values["image"] = {"tag": options.image_tag}
+        if options.image_tag or options.image_repository:
+            image: dict[str, Any] = {}
+            if options.image_repository:
+                image["repository"] = options.image_repository
+            if options.image_tag:
+                image["tag"] = options.image_tag
+            values["image"] = image
         # Absent leaves the chart's own default in place; an explicit {}
         # overrides it with "schedule anywhere", which is a different
         # statement and sometimes the intended one.
+        if control_plane.affinity is not None:
+            # null, not {}, for the empty case: Helm merges user values
+            # into the chart's recursively, so an empty map adds nothing and
+            # the chart's own affinity survives -- the release installs and
+            # the pod stays Pending with the default still in force. An
+            # explicit null is what Helm treats as "delete this key".
+            values["affinity"] = control_plane.affinity or None
         if control_plane.node_selector is not None:
             values["nodeSelector"] = control_plane.node_selector
         if control_plane.tolerations is not None:
             values["tolerations"] = control_plane.tolerations
         return values
 
-    def check_prerequisites(self, control_plane: ControlPlane) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, control_plane: ControlPlane) -> list[str]:
+        warnings: list[str] = []
         require_cli("helm", error_cls=ControlPlanePrerequisiteError)
-        require_cluster(
-            control_plane.kubeconfig_path, capability="a control plane"
-        )
+        require_cluster(control_plane.kubeconfig_path, capability="a control plane")
 
         raw = kubectl(
-            control_plane.kubeconfig_path, "get", "secret",
+            control_plane.kubeconfig_path,
+            "get",
+            "secret",
             control_plane.existing_secret,
-            "-n", control_plane.resolved_namespace, "-o", "json",
-            error_cls=ControlPlaneError, check=False,
+            "-n",
+            control_plane.resolved_namespace,
+            "-o",
+            "json",
+            error_cls=ControlPlaneError,
+            check=False,
         )
         if not (raw or "").strip():
             raise ControlPlanePrerequisiteError(
@@ -99,8 +113,7 @@ class FastAPIControlPlaneDriver:
         except json.JSONDecodeError:
             return warnings
 
-        missing = [k for k in control_plane.required_secret_keys
-                   if k not in present]
+        missing = [k for k in control_plane.required_secret_keys if k not in present]
         if missing:
             # Each of these fails a different way and none of them fail at
             # install: the pod starts, and the first request that needs the
@@ -114,9 +127,11 @@ class FastAPIControlPlaneDriver:
                 "fail closed rather than issue an unsigned token."
             )
 
-        if (control_plane.type == "admin"
-                and control_plane.replicas > 1
-                and control_plane.options.seed_plans):
+        if (
+            control_plane.type == "admin"
+            and control_plane.replicas > 1
+            and control_plane.options.seed_plans
+        ):
             warnings.append(
                 "seed_plans=True with replicas>1: seeding is idempotent per "
                 "row but not concurrency-safe, so two pods racing on a first "

@@ -30,7 +30,7 @@ one-time:
 
 Everything here goes through `kubectl exec` into the already-running
 admin-control-plane pod — the same "no direct connection, only through
-kubectl" discipline `multistack.nats.deployment.NatsAdminClient`
+kubectl" discipline `multistack.queue.drivers.nats.deployment.NatsAdminClient`
 already uses for NATS. That means this script needs no port-forward,
 no cluster DNS reachable from wherever it runs, and no new network
 path: the pod calls its own `localhost:8000`.
@@ -52,6 +52,7 @@ and no terminal is attached to prompt — see
 api/microservices/admin-control-plane/src/seed.py) so this runs
 unattended with nothing set beyond the two passwords.
 """
+
 from __future__ import annotations
 
 import json
@@ -64,8 +65,7 @@ from multistack.controlplane import AdminControlPlaneOptions, ControlPlane
 from multistack.credentials import prompt_secret
 from multistack.kube import KubeCommandError, kubectl, run_local
 
-KUBECONFIG = os.environ.get(
-    "MULTISTACK_KUBECONFIG", os.path.expanduser("~/.multistack/kubeconfig"))
+KUBECONFIG = os.environ.get("MULTISTACK_KUBECONFIG", os.path.expanduser("~/.multistack/kubeconfig"))
 
 # Read off the SDK's own spec rather than named again here, the same
 # reason stage_controlplane() in full_stack.py does — a renamed release
@@ -81,8 +81,15 @@ class SeedError(RuntimeError):
 
 def _admin_pod() -> str:
     out = kubectl(
-        KUBECONFIG, "get", "pods", "-n", NAMESPACE, "-l", POD_SELECTOR,
-        "-o", "jsonpath={.items[0].metadata.name}",
+        KUBECONFIG,
+        "get",
+        "pods",
+        "-n",
+        NAMESPACE,
+        "-l",
+        POD_SELECTOR,
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
         error_cls=SeedError,
     ).strip()
     if not out:
@@ -102,20 +109,17 @@ def _exec_py(pod: str, script: str, *, env: dict | None = None) -> str:
     `multistack.kube.apply()` pipes a manifest into `kubectl apply -f
     -` rather than writing one out first.
     """
-    argv = ["kubectl", "--kubeconfig", KUBECONFIG, "exec", "-i",
-            "-n", NAMESPACE, pod, "--"]
+    argv = ["kubectl", "--kubeconfig", KUBECONFIG, "exec", "-i", "-n", NAMESPACE, pod, "--"]
     if env:
         # `kubectl exec` has no --env of its own; a `sh -c` prefix that
         # assigns each var is the same trick full_stack.py's own Secret
         # data dicts avoid needing, because those go through a manifest
         # instead of a shell.
-        assignments = " ".join(
-            f"{k}={_shell_quote(v)}" for k, v in env.items())
+        assignments = " ".join(f"{k}={_shell_quote(v)}" for k, v in env.items())
         argv += ["sh", "-c", f"{assignments} exec python3"]
     else:
         argv += ["python3"]
-    return run_local(argv, stdin_text=script, error_cls=SeedError,
-                      label=f"kubectl exec {pod}")
+    return run_local(argv, stdin_text=script, error_cls=SeedError, label=f"kubectl exec {pod}")
 
 
 def _shell_quote(value: str) -> str:
@@ -144,11 +148,21 @@ def bootstrap_super_admin(email: str, bootstrap_password: str) -> bool:
     import subprocess
 
     pod = _admin_pod()
-    argv = ["kubectl", "--kubeconfig", KUBECONFIG, "exec", "-n", NAMESPACE, pod,
-            "--", "sh", "-c",
-            f"SEED_ADMIN_EMAIL={_shell_quote(email)} "
-            f"SEED_ADMIN_PASSWORD={_shell_quote(bootstrap_password)} "
-            "python -m seed_admin"]
+    argv = [
+        "kubectl",
+        "--kubeconfig",
+        KUBECONFIG,
+        "exec",
+        "-n",
+        NAMESPACE,
+        pod,
+        "--",
+        "sh",
+        "-c",
+        f"SEED_ADMIN_EMAIL={_shell_quote(email)} "
+        f"SEED_ADMIN_PASSWORD={_shell_quote(bootstrap_password)} "
+        "python -m seed_admin",
+    ]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
@@ -158,14 +172,10 @@ def bootstrap_super_admin(email: str, bootstrap_password: str) -> bool:
         print(f"[seed] super-admin {email} created")
         return True
     if proc.returncode == 2:
-        print(f"[seed] super-admin bootstrap declined: "
-              f"{(proc.stderr or proc.stdout).strip()}")
+        print(f"[seed] super-admin bootstrap declined: {(proc.stderr or proc.stdout).strip()}")
         print("[seed] treating this as already-seeded and continuing")
         return False
-    raise SeedError(
-        f"seed_admin exited {proc.returncode}: "
-        f"{(proc.stderr or proc.stdout).strip()}"
-    )
+    raise SeedError(f"seed_admin exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()}")
 
 
 # Talks to the admin-control-plane API entirely from *inside* its own
@@ -394,42 +404,57 @@ _SEED_ORG_SCRIPT = textwrap.dedent("""
 
 
 def seed_organization(
-    email: str, password: str, *, just_created: bool, bootstrap_password: str,
-    org_name: str, plan_name: str,
-    owner_username: str, owner_email: str, owner_password: str,
+    email: str,
+    password: str,
+    *,
+    just_created: bool,
+    bootstrap_password: str,
+    org_name: str,
+    plan_name: str,
+    owner_username: str,
+    owner_email: str,
+    owner_password: str,
 ) -> dict:
     pod = _admin_pod()
-    out = _exec_py(pod, _SEED_ORG_SCRIPT, env={
-        "SEED_ADMIN_EMAIL": email,
-        "SEED_ADMIN_PASSWORD": password,
-        "SEED_ADMIN_JUST_CREATED": "1" if just_created else "0",
-        "SEED_ADMIN_BOOTSTRAP_PASSWORD": bootstrap_password,
-        "SEED_ORG_NAME": org_name,
-        "SEED_PLAN_NAME": plan_name,
-        "SEED_ORG_OWNER_USERNAME": owner_username,
-        "SEED_ORG_OWNER_EMAIL": owner_email,
-        "SEED_ORG_OWNER_PASSWORD": owner_password,
-    })
+    out = _exec_py(
+        pod,
+        _SEED_ORG_SCRIPT,
+        env={
+            "SEED_ADMIN_EMAIL": email,
+            "SEED_ADMIN_PASSWORD": password,
+            "SEED_ADMIN_JUST_CREATED": "1" if just_created else "0",
+            "SEED_ADMIN_BOOTSTRAP_PASSWORD": bootstrap_password,
+            "SEED_ORG_NAME": org_name,
+            "SEED_PLAN_NAME": plan_name,
+            "SEED_ORG_OWNER_USERNAME": owner_username,
+            "SEED_ORG_OWNER_EMAIL": owner_email,
+            "SEED_ORG_OWNER_PASSWORD": owner_password,
+        },
+    )
     return json.loads(out.strip().splitlines()[-1])
 
 
 def main() -> int:
     email = prompt_secret(
-        "Super-admin email", env_var="SEED_ADMIN_EMAIL",
+        "Super-admin email",
+        env_var="SEED_ADMIN_EMAIL",
         value=os.environ.get("SEED_ADMIN_EMAIL", "admin@example.com"),
     )
     password = prompt_secret(
-        "Super-admin password", env_var="SEED_ADMIN_PASSWORD",
-        generate=True, confirm=True,
+        "Super-admin password",
+        env_var="SEED_ADMIN_PASSWORD",
+        generate=True,
+        confirm=True,
     )
     org_name = os.environ.get("SEED_ORG_NAME", "Acme Inc")
     plan_name = os.environ.get("SEED_PLAN_NAME", "Free")
     owner_username = os.environ.get("SEED_ORG_OWNER_USERNAME", "owner")
-    owner_email = os.environ.get(
-        "SEED_ORG_OWNER_EMAIL", "owner@example.com")
+    owner_email = os.environ.get("SEED_ORG_OWNER_EMAIL", "owner@example.com")
     owner_password = prompt_secret(
         f"Owner password for {org_name!r}",
-        env_var="SEED_ORG_OWNER_PASSWORD", generate=True, confirm=True,
+        env_var="SEED_ORG_OWNER_PASSWORD",
+        generate=True,
+        confirm=True,
     )
 
     # Never the operator's real password (see bootstrap_super_admin's
@@ -440,10 +465,14 @@ def main() -> int:
     try:
         just_created = bootstrap_super_admin(email, bootstrap_password)
         result = seed_organization(
-            email, password, just_created=just_created,
+            email,
+            password,
+            just_created=just_created,
             bootstrap_password=bootstrap_password,
-            org_name=org_name, plan_name=plan_name,
-            owner_username=owner_username, owner_email=owner_email,
+            org_name=org_name,
+            plan_name=plan_name,
+            owner_username=owner_username,
+            owner_email=owner_email,
             owner_password=owner_password,
         )
     except (SeedError, KubeCommandError) as exc:
@@ -452,17 +481,17 @@ def main() -> int:
 
     org = result["organization"]
     if result["skipped"]:
-        print(f"[seed] organization {org_name!r} already exists "
-              f"(id={org.get('id')}) — left untouched")
+        print(
+            f"[seed] organization {org_name!r} already exists (id={org.get('id')}) — left untouched"
+        )
     else:
-        print(f"[seed] organization {org_name!r} created "
-              f"(id={org.get('id')}, plan={plan_name!r})")
-        print(f"[seed] owner login: {owner_email} "
-              f"(username={owner_username})")
+        print(f"[seed] organization {org_name!r} created (id={org.get('id')}, plan={plan_name!r})")
+        print(f"[seed] owner login: {owner_email} (username={owner_username})")
 
     print(f"[seed] super-admin login: {email}")
-    print("[seed] store these — passwords are generated per run and not "
-          "recoverable from this output")
+    print(
+        "[seed] store these — passwords are generated per run and not recoverable from this output"
+    )
     return 0
 
 

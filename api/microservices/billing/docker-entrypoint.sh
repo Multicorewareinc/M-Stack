@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runtime entrypoint. Apply Alembic migrations (the ONLY place production Postgres DDL is
-# created), then serve. DATABASE_URL comes from the environment.
+# created), then serve. DATABASE_URL_BILLING comes from the environment.
 set -e
 
 cd /app

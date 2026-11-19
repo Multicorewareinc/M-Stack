@@ -85,7 +85,7 @@ async def test_seeded_admin_confined_until_rotation():
     # Seed via the CLI core, then drive the real app against the same Postgres.
     await seed_admin.bootstrap_super_admin(SEED_EMAIL, SEED_PASSWORD)
 
-    app = create_app(Settings(database_url=_sa_url(), jwt_secret=JWT_SECRET, admin_api_key="k"))
+    app = create_app(Settings(database_url_admin=_sa_url(), jwt_secret=JWT_SECRET, admin_api_key="k"))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as c:
         login = await c.post(

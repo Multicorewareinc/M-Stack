@@ -10,12 +10,14 @@ spec rather than each having their own. Quota would be a third.
 
 What this buys over passing chart values as a dict: the limits document
 is checked here, at the call site, instead of at deploy time. That
-matters more than it sounds, because the service parses RATE_LIMITS with
+matters more than it sounds, because the service parses its limits
+(RPM_RATE_LIMITS / TPM_RATE_LIMITS) with
 a fallback — a document it cannot read becomes `{}`, every scope goes
 unlimited, and nothing raises. A limiter that is Ready and enforcing
 nothing looks exactly like one that is working.
 """
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+
+from typing import Any, ClassVar
 
 from pydantic import (
     BaseModel,
@@ -28,7 +30,7 @@ from pydantic import (
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("rpm", "tpm")
+SUPPORTED_TYPES: tuple[str, ...] = ("rpm", "tpm")
 
 
 class RateLimits(BaseModel):
@@ -49,24 +51,21 @@ class RateLimits(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_default: int = Field(default=0, ge=0,
-                              description="Per principal. 0 = unlimited.")
-    model_default: int = Field(default=0, ge=0,
-                               description="Per model. 0 = unlimited.")
+    user_default: int = Field(default=0, ge=0, description="Per principal. 0 = unlimited.")
+    model_default: int = Field(default=0, ge=0, description="Per model. 0 = unlimited.")
 
     # Keyed by principal, which the gateway sets to the caller's bearer
     # token. So these maps contain credentials, and that is why the
     # driver puts the rendered document in a Secret rather than a
     # ConfigMap.
-    user_overrides: Dict[str, int] = Field(default_factory=dict)
-    model_overrides: Dict[str, int] = Field(default_factory=dict)
+    user_overrides: dict[str, int] = Field(default_factory=dict)
+    model_overrides: dict[str, int] = Field(default_factory=dict)
     # Keyed "<principal>|<model>". No default for this scope.
-    user_model_overrides: Dict[str, int] = Field(default_factory=dict)
+    user_model_overrides: dict[str, int] = Field(default_factory=dict)
 
-    @field_validator("user_overrides", "model_overrides",
-                     "user_model_overrides")
+    @field_validator("user_overrides", "model_overrides", "user_model_overrides")
     @classmethod
-    def _limits_are_non_negative(cls, value: Dict[str, int], info):
+    def _limits_are_non_negative(cls, value: dict[str, int], info):
         for key, limit in value.items():
             if not isinstance(limit, int) or isinstance(limit, bool):
                 raise ValueError(
@@ -83,7 +82,7 @@ class RateLimits(BaseModel):
 
     @field_validator("user_model_overrides")
     @classmethod
-    def _user_model_keys_are_pairs(cls, value: Dict[str, int]):
+    def _user_model_keys_are_pairs(cls, value: dict[str, int]):
         for key in value:
             if "|" not in key:
                 raise ValueError(
@@ -104,8 +103,13 @@ class RPMOptions(BaseModel):
     release_name: str = "rpm"
     # A path while the chart is unpublished; an oci:// address once it is.
     chart: str = "api/microservices/rate-limiter-rpm/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     # Seconds a request_id is remembered so at-least-once redelivery does
     # not double-count. Must cover the window it protects.
@@ -147,8 +151,13 @@ class TPMOptions(BaseModel):
     release_name: str = "tpm"
     # A path while the chart is unpublished; an oci:// address once it is.
     chart: str = "api/microservices/rate-limiter-tpm/chart"
-    chart_version: Optional[str] = None
-    image_tag: Optional[str] = None
+    chart_version: str | None = None
+    image_tag: str | None = None
+    # Full image path, e.g. ghcr.io/<owner>/<repo>/billing. None leaves the
+    # chart's own default, which names the canonical public registry. The
+    # deploying repo sets this so a deploy never depends on where the chart
+    # happens to point -- see examples/full_stack.py IMAGE_REGISTRY.
+    image_repository: str | None = None
 
     # Seconds a request_id is remembered so at-least-once redelivery does
     # not double-count. Must cover the window it protects.
@@ -182,25 +191,23 @@ class Policy(CapabilitySpec):
     """A pre-request policy service on a Kubernetes cluster."""
 
     CAPABILITY: ClassVar[str] = "policy"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = {
-        "rpm": RPMOptions, "tpm": TPMOptions}
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {
-        "rpm": "policy", "tpm": "policy"}
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = {"rpm": RPMOptions, "tpm": TPMOptions}
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {"rpm": "policy", "tpm": "policy"}
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster",)
 
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
         "cache_url": "cache_url",
         "event_backbone_url": "event_backbone_url",
     }
     # What the gateway needs to attach the chain.
-    PROVIDES: ClassVar[Dict[str, str]] = {"policy_endpoint": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"policy_endpoint": "endpoint"}
 
     type: str = "rpm"
     kubeconfig_path: str
-    namespace: Optional[str] = None
-    options: Optional[Union[RPMOptions, TPMOptions]] = None
+    namespace: str | None = None
+    options: RPMOptions | TPMOptions | None = None
 
     limits: RateLimits = Field(default_factory=RateLimits)
 
@@ -226,7 +233,7 @@ class Policy(CapabilitySpec):
     # None leaves the ConfigMap's value standing, which is correct for a
     # Valkey with auth disabled. It never reaches a command line: the Helm
     # layer passes values to helm on stdin, never through --set.
-    cache_auth_url: Optional[SecretStr] = None
+    cache_auth_url: SecretStr | None = None
 
     # Per-org plan limits (AD-04): resolved from admin-control-plane's
     # GET /internal/v1/organizations/{id}/plan instead of the static
@@ -242,7 +249,7 @@ class Policy(CapabilitySpec):
     # SERVICE_API_KEY exactly, or the lookup 401s and this silently falls
     # back to the static limits -- the same failure shape a mismatched
     # `cache_auth_url` has, just against a different upstream.
-    admin_cp_service_api_key: Optional[SecretStr] = None
+    admin_cp_service_api_key: SecretStr | None = None
 
     # Counting is asynchronous: /check only reads the counters, and a
     # consumer increments them from the gateway's events. Empty means no
@@ -257,15 +264,21 @@ class Policy(CapabilitySpec):
     # reach this service's /check on its port. Empty => the chart installs
     # no NetworkPolicy, so an existing deployment is untouched until a
     # caller opts in (ADR-006: features attach by config, not code).
-    network_policy_allowed_ingress: List[Dict[str, str]] = Field(default_factory=list)
+    network_policy_allowed_ingress: list[dict[str, str]] = Field(default_factory=list)
 
     # Scheduling. There is no in-cluster registry, so a service image
     # exists only on the node it was imported to, and a pod scheduled
     # anywhere else stays ImagePullBackOff with nothing in the release to
     # explain it. The chart's own affinity already keeps pods off the
     # control plane; this is how a caller says *which* worker.
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Dict[str, Any]]] = None
+    # The charts' own default keeps pods off the control plane, which is
+    # right for a multi-node cluster and impossible to satisfy on a
+    # single-node one, where the only node is the control plane. Absent
+    # leaves that default alone; an explicit {} means "schedule
+    # anywhere", which is how a one-node cluster says so deliberately.
+    affinity: dict[str, Any] | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[dict[str, Any]] | None = None
 
     @property
     def service_name(self) -> str:
@@ -288,9 +301,16 @@ class Policy(CapabilitySpec):
 
     @property
     def endpoint(self) -> str:
-        """The URL the gateway puts in POLICY_ENDPOINTS."""
-        return (f"http://{self.service_name}.{self.resolved_namespace}"
-                ".svc:8000/check")
+        """The URL the gateway puts in POLICY_ENDPOINTS.
+
+        .svc.cluster.local, not just .svc -- matches every other spec's
+        .endpoint (Gateway.endpoint was the one exception, fixed
+        2026-09-25 after nginx's resolver directive 502'd on the short
+        form; this one has stayed masked because the gateway's own httpx
+        client resolves it via the pod's search-domain-aware resolver,
+        but the short form is still wrong the same way.
+        """
+        return f"http://{self.service_name}.{self.resolved_namespace}.svc.cluster.local:8000/check"
 
     def validate(self) -> None:
         self.validate_capability()

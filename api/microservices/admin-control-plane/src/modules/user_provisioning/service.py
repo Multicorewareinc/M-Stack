@@ -21,12 +21,24 @@ ORG_HEADER = "X-Organization-Id"
 ORG_ADMIN_ROLE = "org_admin"
 
 
+def actor_headers(actor) -> dict[str, str]:
+    """Identify the acting super-admin to Org CP so its audit log attributes the resulting user /
+    role writes to them rather than to an anonymous service call (Org CP trusts these headers only
+    under the service bearer)."""
+    headers = {"X-Actor-Email": actor.email} if actor.email else {}
+    if actor.id:
+        headers["X-Actor-Id"] = actor.id
+    return headers
+
+
 async def _org_create_user(
-    org_client: httpx.AsyncClient, org_id: uuid.UUID, body: dict
+    org_client: httpx.AsyncClient, org_id: uuid.UUID, body: dict, actor_headers: dict | None = None
 ) -> dict[str, Any]:
     """Proxy Org CP POST /v1/users under the target org. Faithful status mapping."""
     try:
-        resp = await org_client.post("/v1/users", json=body, headers={ORG_HEADER: str(org_id)})
+        resp = await org_client.post(
+            "/v1/users", json=body, headers={ORG_HEADER: str(org_id), **(actor_headers or {})}
+        )
     except httpx.HTTPError as exc:
         raise UpstreamError("Org CP unavailable") from exc
     if resp.status_code == 201:
@@ -39,7 +51,10 @@ async def _org_create_user(
 
 
 async def _assign_org_admin(
-    org_client: httpx.AsyncClient, org_id: uuid.UUID, user_id: uuid.UUID | str
+    org_client: httpx.AsyncClient,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID | str,
+    actor_headers: dict | None = None,
 ) -> None:
     """Look up the org's seeded org_admin role and assign it to the user (fail-closed on error)."""
     try:
@@ -54,7 +69,7 @@ async def _assign_org_admin(
         assign = await org_client.put(
             f"/v1/users/{user_id}/roles",
             json={"role_ids": [role_id]},
-            headers={ORG_HEADER: str(org_id)},
+            headers={ORG_HEADER: str(org_id), **(actor_headers or {})},
         )
         if assign.status_code != 200:
             raise UpstreamError(f"Org CP returned {assign.status_code} assigning org_admin")
@@ -63,14 +78,18 @@ async def _assign_org_admin(
 
 
 async def create_user_for_org(
-    sessionmaker, org_client: httpx.AsyncClient, org_id: uuid.UUID, owner: dict
+    sessionmaker,
+    org_client: httpx.AsyncClient,
+    org_id: uuid.UUID,
+    owner: dict,
+    actor_headers: dict | None = None,
 ) -> dict[str, Any]:
     """Create a login-capable user for an EXISTING org and make them an org_admin. 404 if the org is
     unknown to the Admin CP (no Org CP call attempted)."""
     async with sessionmaker() as session:
         await org_service.get_org(session, org_id)  # 404 if unknown
-    user = await _org_create_user(org_client, org_id, owner)
-    await _assign_org_admin(org_client, org_id, user["id"])
+    user = await _org_create_user(org_client, org_id, owner, actor_headers)
+    await _assign_org_admin(org_client, org_id, user["id"], actor_headers)
     return user
 
 
@@ -80,11 +99,12 @@ async def create_org_with_owner(
     billing_client: httpx.AsyncClient,
     org_data: OrgCreate,
     owner: dict,
+    actor_headers: dict | None = None,
 ) -> dict[str, Any]:
     """Create a NEW org (existing workflow: provisions + Org CP init/default-role seed) then its first
     org_admin owner. Returns {organization, owner}. A downstream owner-create failure surfaces as an
     error; the org remains (ADR-029 — not a distributed transaction)."""
     org = await org_service.create_org_workflow(sessionmaker, org_client, billing_client, org_data)
-    user = await _org_create_user(org_client, org.id, owner)
-    await _assign_org_admin(org_client, org.id, user["id"])
+    user = await _org_create_user(org_client, org.id, owner, actor_headers)
+    await _assign_org_admin(org_client, org.id, user["id"], actor_headers)
     return {"organization": org_service.to_org_out(org).model_dump(mode="json"), "owner": user}

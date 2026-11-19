@@ -1,0 +1,136 @@
+{
+  "info": {
+    "name": "Multistack — API Keys module (Org CP)",
+    "description": "Short manual/Newman collection for the per-org API-key lifecycle in the organization-control-plane (ADR-026/027/028).\n\nPublic surface /api/api-keys is the end-user JWT surface: run the Login request first to mint {{access_token}} (it is captured automatically), then the lifecycle requests (list / create / rotate / update / revoke) ride that Bearer. Create and Rotate are the ONLY responses that carry the plaintext raw_key — each captures {{key_id}} / {{raw_key}} for the next request.\n\nThe internal /internal/v1/api-keys/verify surface is the model-gateway's own contract — it is NOT behind the user JWT; it uses the narrow {{mg_verify_key}} service bearer and a key HASH (never the raw key), and resolves the org from the hash itself.\n\nDefaults target the api/tests/manual-test/docker-compose.full.yml stack (Org CP on :9220, seeded superadmin@platform.local / ChangeMe123!). Point org_url elsewhere to run against another environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "org_url", "value": "http://localhost:9220" },
+    { "key": "mg_verify_key", "value": "test-mg-verify-key" },
+    { "key": "login_email", "value": "superadmin@platform.local" },
+    { "key": "login_password", "value": "ChangeMe123!" },
+    { "key": "access_token", "value": "" },
+    { "key": "key_id", "value": "" },
+    { "key": "raw_key", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Login (mint user JWT)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{org_url}}/api/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{login_email}}\",\n  \"password\": \"{{login_password}}\"\n}"
+        }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "const body = pm.response.json();",
+        "pm.collectionVariables.set('access_token', body.access_token);",
+        "pm.test('has access_token', () => pm.expect(body.access_token).to.be.a('string').and.not.empty);"
+      ] } }]
+    },
+    {
+      "name": "1. List keys",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{org_url}}/api/api-keys"
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('array of key metadata', () => pm.expect(pm.response.json()).to.be.an('array'));",
+        "pm.test('no raw secret leaked', () => pm.expect(pm.response.text()).to.not.include('raw_key'));"
+      ] } }]
+    },
+    {
+      "name": "2. Create key (returns raw_key once)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{org_url}}/api/api-keys",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"postman-smoke-key\",\n  \"expires_at\": null\n}"
+        }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('201', () => pm.response.to.have.status(201));",
+        "const body = pm.response.json();",
+        "pm.collectionVariables.set('key_id', body.id);",
+        "pm.collectionVariables.set('raw_key', body.raw_key);",
+        "pm.test('carries plaintext raw_key', () => pm.expect(body.raw_key).to.be.a('string').and.not.empty);",
+        "pm.test('status active', () => pm.expect(body.status).to.eql('active'));"
+      ] } }]
+    },
+    {
+      "name": "3. Rotate key (new raw_key, same id)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{org_url}}/api/api-keys/{{key_id}}/rotate"
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "const body = pm.response.json();",
+        "pm.test('same key id', () => pm.expect(body.id).to.eql(pm.collectionVariables.get('key_id')));",
+        "pm.test('raw_key changed', () => pm.expect(body.raw_key).to.not.eql(pm.collectionVariables.get('raw_key')));",
+        "pm.collectionVariables.set('raw_key', body.raw_key);"
+      ] } }]
+    },
+    {
+      "name": "4. Update key (rename)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{org_url}}/api/api-keys/{{key_id}}",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"postman-smoke-key-renamed\"\n}"
+        }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('name updated', () => pm.expect(pm.response.json().name).to.eql('postman-smoke-key-renamed'));"
+      ] } }]
+    },
+    {
+      "name": "5. Revoke key",
+      "request": {
+        "method": "DELETE",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{org_url}}/api/api-keys/{{key_id}}"
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('204', () => pm.response.to.have.status(204));"
+      ] } }]
+    },
+    {
+      "name": "6. Internal verify (model-gateway contract)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{mg_verify_key}}" }],
+        "url": {
+          "raw": "{{org_url}}/internal/v1/api-keys/verify?hash=<sha256-of-raw-key>",
+          "host": ["{{org_url}}"],
+          "path": ["internal", "v1", "api-keys", "verify"],
+          "query": [
+            { "key": "hash", "value": "<sha256-of-raw-key>", "description": "Hex SHA-256 of the raw key the gateway received — NOT the raw key itself." }
+          ]
+        }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "// Opaque 404 for an unknown/invalid hash; 200 with a minimal record for a live key.",
+        "pm.test('200 or 404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+      ] } }]
+    }
+  ]
+}

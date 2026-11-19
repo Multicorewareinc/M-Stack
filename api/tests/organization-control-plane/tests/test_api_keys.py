@@ -18,19 +18,21 @@ from conftest import JWT_SECRET, asgi_client, init_schema, make_auth_app, make_a
 from modules.api_keys import cache, keygen
 from modules.auth.jwt import encode_access_token
 
-PERM_ID = uuid.uuid4()
+# One permission id per granular apikey action (ADR-033 split of the old single apikey.manage).
+PERM_IDS = {"create": uuid.uuid4(), "update": uuid.uuid4(), "delete": uuid.uuid4()}
 
 CATALOG = [
     {
-        "id": str(PERM_ID),
+        "id": str(pid),
         "resource": "apikey",
-        "action": "manage",
-        "slug": "apikey.manage",
+        "action": action,
+        "slug": f"apikey.{action}",
         "description": None,
         "is_active": True,
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-01T00:00:00Z",
     }
+    for action, pid in PERM_IDS.items()
 ]
 
 
@@ -50,7 +52,8 @@ def _headers(uid, org_id) -> dict:
 
 async def _seed_user(sessionmaker, *, org_id=None, with_manage=False, org_status="active"):
     """Insert an Organization + a User (no password needed — token minted directly). When
-    with_manage, also create a role holding apikey.manage and assign it. Returns (uid, org_id)."""
+    with_manage, also create a role holding all three granular apikey permissions (create/update/
+    delete) and assign it. Returns (uid, org_id)."""
     from modules.organizations.models import Organization
     from modules.roles.models import Role, RolePermission, UserRole
     from modules.users.models import User
@@ -66,7 +69,8 @@ async def _seed_user(sessionmaker, *, org_id=None, with_manage=False, org_status
             role = Role(organization_id=org_id, name="key-admin")
             s.add(role)
             await s.flush()
-            s.add(RolePermission(role_id=role.id, permission_id=PERM_ID))
+            for pid in PERM_IDS.values():
+                s.add(RolePermission(role_id=role.id, permission_id=pid))
             s.add(UserRole(user_id=u.id, role_id=role.id))
         await s.commit()
         return u.id, org_id
@@ -74,7 +78,8 @@ async def _seed_user(sessionmaker, *, org_id=None, with_manage=False, org_status
 
 def _app(*, catalog=CATALOG, admin_unavailable=False):
     admin = make_admin_client(
-        known_permission_ids=[PERM_ID], permission_catalog=catalog, unavailable=admin_unavailable
+        known_permission_ids=list(PERM_IDS.values()), permission_catalog=catalog,
+        unavailable=admin_unavailable,
     )
     app, engine = make_auth_app(admin_client=admin)
     return app, engine
@@ -194,7 +199,7 @@ async def test_list_org_scoped_no_raw():
 async def test_list_allows_plain_member():
     app, engine = _app()
     await init_schema(engine)
-    uid, org_id = await _seed_user(app.state.sessionmaker, with_manage=False)  # no apikey.manage
+    uid, org_id = await _seed_user(app.state.sessionmaker, with_manage=False)  # no apikey.* perms
     other_uid, other_org = await _seed_user(app.state.sessionmaker, with_manage=True)
     async with asgi_client(app) as c:
         # Seeded by a DIFFERENT (manage-capable) user in a DIFFERENT org — must not leak into the
@@ -355,7 +360,7 @@ async def test_revoke_idempotent_soft_delete(monkeypatch):
 
 # ── gating ────────────────────────────────────────────────────────────────────────────────────
 
-async def test_mutations_require_apikey_manage():
+async def test_mutations_require_granular_apikey_permissions():
     app, engine = _app()
     await init_schema(engine)
     uid, org_id = await _seed_user(app.state.sessionmaker, with_manage=False)  # lacks the permission
@@ -372,8 +377,57 @@ async def test_mutations_require_apikey_manage():
         assert list(await s.scalars(__import__("sqlalchemy").select(ApiKey))) == []  # nothing created
 
 
+async def _seed_user_with_actions(sessionmaker, actions, *, org_id=None):
+    """Like _seed_user(with_manage=True) but grants only the given granular apikey action(s), so
+    tests can prove the split is real (a create-only role can't delete, etc.)."""
+    from modules.organizations.models import Organization
+    from modules.roles.models import Role, RolePermission, UserRole
+    from modules.users.models import User
+
+    org_id = org_id or uuid.uuid4()
+    async with sessionmaker() as s:
+        if await s.get(Organization, org_id) is None:
+            s.add(Organization(id=org_id, name="Acme", status="active"))
+        u = User(organization_id=org_id, username=f"u{uuid.uuid4().hex[:8]}", email="u@acme.com")
+        s.add(u)
+        await s.flush()
+        role = Role(organization_id=org_id, name="scoped")
+        s.add(role)
+        await s.flush()
+        for action in actions:
+            s.add(RolePermission(role_id=role.id, permission_id=PERM_IDS[action]))
+        s.add(UserRole(user_id=u.id, role_id=role.id))
+        await s.commit()
+        return u.id, org_id
+
+
+async def test_create_only_role_cannot_delete():
+    """The whole point of the split: apikey.create no longer implies apikey.delete."""
+    app, engine = _app()
+    await init_schema(engine)
+    uid, org_id = await _seed_user_with_actions(app.state.sessionmaker, ["create"])
+    async with asgi_client(app) as c:
+        h = _headers(uid, org_id)
+        created = await c.post("/api/api-keys", json={"name": "k"}, headers=h)
+        assert created.status_code == 201
+        key_id = created.json()["id"]
+        assert (await c.delete(f"/api/api-keys/{key_id}", headers=h)).status_code == 403
+        assert (await c.patch(f"/api/api-keys/{key_id}", json={"name": "x"}, headers=h)).status_code == 403
+
+
+async def test_update_only_role_cannot_create_or_delete():
+    app, engine = _app()
+    await init_schema(engine)
+    uid, org_id = await _seed_user_with_actions(app.state.sessionmaker, ["update"])
+    async with asgi_client(app) as c:
+        h = _headers(uid, org_id)
+        assert (await c.post("/api/api-keys", json={"name": "k"}, headers=h)).status_code == 403
+        fake_id = uuid.uuid4()
+        assert (await c.delete(f"/api/api-keys/{fake_id}", headers=h)).status_code == 403
+
+
 async def test_gate_fails_closed_when_permission_unresolved():
-    # Admin catalog has no apikey.manage entry ⇒ permission id unresolved ⇒ deny even a would-be admin.
+    # Admin catalog has no apikey.* entries ⇒ permission id unresolved ⇒ deny even a would-be admin.
     app, engine = _app(catalog=[])
     await init_schema(engine)
     uid, org_id = await _seed_user(app.state.sessionmaker, with_manage=True)

@@ -5,9 +5,11 @@ without, so the value that matters is the connection URL a consumer
 gets from it -- and the scheduling, because CloudNativePG emits none of
 its own and rke2-cp01 carries no taint.
 """
+
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from multistack.database import CNPGOptions, Database, DatabaseConfig
 
@@ -21,8 +23,9 @@ def database(**kwargs) -> DatabaseConfig:
 
 
 def cnpg(**kwargs) -> Database:
-    base = dict(kubeconfig_path=KUBECONFIG, name="admin-pg",
-                namespace="platform-db", database=database())
+    base = dict(
+        kubeconfig_path=KUBECONFIG, name="admin-pg", namespace="platform-db", database=database()
+    )
     base.update(kwargs)
     return Database(**base)
 
@@ -33,14 +36,13 @@ def test_the_endpoint_is_the_primary_service():
     cluster and only the primary accepts writes; a consumer handed the
     read-only one fails on its first INSERT, not at connect time."""
     assert cnpg().endpoint == (
-        "postgresql://admin@admin-pg-rw.platform-db.svc.cluster.local:5432"
-        "/admin_control_plane"
+        "postgresql://admin@admin-pg-rw.platform-db.svc.cluster.local:5432/admin_control_plane"
     )
 
 
 def test_the_endpoint_carries_no_password():
     """It goes into non-secret configuration -- the control-plane charts
-    put DATABASE_URL in a Secret precisely because a URL with a password
+    put DATABASE_URL_* in a Secret precisely because a URL with a password
     in it must not reach a ConfigMap. CloudNativePG already writes the
     credentials to <cluster>-app-secret."""
     spec = cnpg(database=database(password="hunter2"))
@@ -75,11 +77,14 @@ def test_pods_are_kept_off_the_control_plane_by_default():
     without this Postgres is eligible for rke2-cp01 -- next to etcd,
     competing for the same disk. scratch/rebuild/postgres-clusters.yaml
     carries the same block by hand for exactly this reason."""
-    terms = cnpg().affinity["nodeAffinity"][
-        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    terms = cnpg().affinity["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
     expressions = [e for t in terms for e in t["matchExpressions"]]
-    assert {"key": "node-role.kubernetes.io/control-plane",
-            "operator": "DoesNotExist"} in expressions
+    assert {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "DoesNotExist",
+    } in expressions
 
 
 def test_the_default_affinity_is_not_shared_between_specs():
@@ -99,8 +104,7 @@ def test_naming_a_cluster_does_not_require_its_password():
     """validate_cluster_identity exists for the read and delete paths.
     Folded into validate_cluster, asking whether a cluster existed --
     or deleting one -- meant typing its password into a spec first."""
-    spec = Database(kubeconfig_path=KUBECONFIG, name="admin-pg",
-                namespace="platform-db")
+    spec = Database(kubeconfig_path=KUBECONFIG, name="admin-pg", namespace="platform-db")
     spec.validate_cluster_identity()
 
     with pytest.raises(ValueError, match="database configuration is required"):
@@ -135,7 +139,7 @@ def test_there_is_no_ambient_kubeconfig():
 
 
 def test_a_misspelled_field_is_refused():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         Database(kubeconfig_path=KUBECONFIG, storagesize="10Gi")
 
 
@@ -171,8 +175,9 @@ def test_the_operator_settings_live_in_the_implementation_s_options():
     assert spec.operator_chart_version == "0.29.0"
     assert spec.crd_name == "clusters.postgresql.cnpg.io"
 
-    chosen = cnpg(options=CNPGOptions(operator_release_name="pg-operator",
-                                      values={"replicaCount": 2}))
+    chosen = cnpg(
+        options=CNPGOptions(operator_release_name="pg-operator", values={"replicaCount": 2})
+    )
     assert chosen.operator_release_name == "pg-operator"
     assert chosen.values == {"replicaCount": 2}
 

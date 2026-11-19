@@ -1,13 +1,16 @@
 """Covers specs/event-enricher/spec.md: republish + field preservation, normalized usage
 (provider/estimated/none + breakdown), idempotency, republish safety (no-ack/terminal/poison),
-and the degraded/error tokenizer paths. Offline — MockTransport tokenizer + capturing FakeJS,
-no live NATS."""
+and the degraded/error tokenizer paths. Offline — MockTransport tokenizer + a capturing
+fake multistack.queue Connection, no live backbone (ADR-033)."""
 
 from __future__ import annotations
 
 from prometheus_client import REGISTRY
 
-from conftest import FakeMsg, raw_msg, response_event
+import pytest
+
+from conftest import response_event
+from consumer import _RepublishError
 
 
 def _sample(name: str, **labels) -> float:
@@ -21,7 +24,7 @@ async def test_response_republished_to_enriched_subject_preserving_fields(consum
                         ts=99.0, duration_ms=5.5, stream=True, usage={"total_tokens": 42},
                         api_key_id="key-7", owner_id="owner-5",
                         body={"choices": [{"message": {"content": "should be dropped"}}]})
-    await consumer._on_msg(FakeMsg(ev))
+    await consumer._on_msg(ev)
 
     assert len(js.published) == 1
     subject, enriched, _headers = js.published[0]
@@ -38,7 +41,7 @@ async def test_response_republished_to_enriched_subject_preserving_fields(consum
 async def test_provider_usage_preserved_with_breakdown_and_no_tokenizer_call(consumer_factory):
     consumer, js, calls = consumer_factory(tokenizer_url="http://tok/tokenize", tokenizer_tokens=999)
     ev = response_event(usage={"total_tokens": 150, "prompt_tokens": 100, "completion_tokens": 50})
-    await consumer._on_msg(FakeMsg(ev))
+    await consumer._on_msg(ev)
 
     _subject, enriched, _headers = js.published[0]
     assert enriched["usage"] == {"total_tokens": 150, "source": "provider",
@@ -51,7 +54,7 @@ async def test_usage_without_numeric_total_falls_through(consumer_factory):
     consumer, js, _calls = consumer_factory(tokenizer_url="http://tok/tokenize", tokenizer_tokens=11)
     ev = response_event(usage={"prompt_tokens": 5},  # no total_tokens
                         body={"choices": [{"message": {"content": "hi"}}]})
-    await consumer._on_msg(FakeMsg(ev))
+    await consumer._on_msg(ev)
     _subject, enriched, _headers = js.published[0]
     assert enriched["usage"]["source"] == "estimated"
     assert enriched["usage"]["total_tokens"] == 11
@@ -61,7 +64,7 @@ async def test_usage_without_numeric_total_falls_through(consumer_factory):
 async def test_missing_usage_estimated_from_body(consumer_factory):
     consumer, js, calls = consumer_factory(tokenizer_url="http://tok/tokenize", tokenizer_tokens=42)
     ev = response_event(usage=None, body={"choices": [{"message": {"content": "hello world"}}]})
-    await consumer._on_msg(FakeMsg(ev))
+    await consumer._on_msg(ev)
     _subject, enriched, _headers = js.published[0]
     assert enriched["usage"] == {"total_tokens": 42, "source": "estimated"}
     assert calls["n"] == 1
@@ -70,7 +73,7 @@ async def test_missing_usage_estimated_from_body(consumer_factory):
 # --- Un-countable: no usage, no body (S5) ---------------------------------------------------
 async def test_no_usage_no_body_is_none_no_body(consumer_factory):
     consumer, js, _calls = consumer_factory(tokenizer_url="http://tok/tokenize")
-    await consumer._on_msg(FakeMsg(response_event(usage=None, body=None)))
+    await consumer._on_msg(response_event(usage=None, body=None))
     _subject, enriched, _headers = js.published[0]
     assert enriched["usage"] == {"total_tokens": None, "source": "none", "reason": "no_body"}
 
@@ -78,8 +81,8 @@ async def test_no_usage_no_body_is_none_no_body(consumer_factory):
 # --- Non-response events are ignored (S2) ---------------------------------------------------
 async def test_request_and_chunk_events_are_ignored(consumer_factory):
     consumer, js, _calls = consumer_factory()
-    await consumer._on_msg(FakeMsg({"type": "request", "request_id": "r"}))
-    await consumer._on_msg(FakeMsg({"type": "chunk", "request_id": "r", "seq": 1}))
+    await consumer._on_msg({"type": "request", "request_id": "r"})
+    await consumer._on_msg({"type": "chunk", "request_id": "r", "seq": 1})
     assert js.published == []
 
 
@@ -90,7 +93,7 @@ async def test_attribution_fields_null_when_absent_on_source(consumer_factory):
     ev = response_event()
     ev.pop("api_key_id", None)  # ensure absent (the helper doesn't set them anyway)
     ev.pop("owner_id", None)
-    await consumer._on_msg(FakeMsg(ev))
+    await consumer._on_msg(ev)
 
     _subject, enriched, _headers = js.published[0]
     assert "api_key_id" in enriched and enriched["api_key_id"] is None
@@ -101,43 +104,47 @@ async def test_attribution_fields_null_when_absent_on_source(consumer_factory):
 async def test_redelivery_dedupes_and_msgid_is_request_id(consumer_factory):
     consumer, js, _calls = consumer_factory()
     ev = response_event(request_id="dup-1")
-    await consumer._on_msg(FakeMsg(ev))
-    await consumer._on_msg(FakeMsg(ev))  # redelivery, same request_id
+    await consumer._on_msg(ev)
+    await consumer._on_msg(ev)  # redelivery, same request_id
     assert len(js.published) == 1  # exactly one enriched event retained
-    _subject, _enriched, headers = js.published[0]
-    assert headers["Nats-Msg-Id"] == "dup-1"
+    _subject, _enriched, msg_id = js.published[0]
+    assert msg_id == "dup-1"  # AC5: dedup identity == request_id, carried through the seam
 
 
 # --- Republish safety: failure not acked; un-parseable acked; terminal metered (S7/S8/S10) --
 async def test_republish_failure_is_not_acked(consumer_factory):
+    """A failed republish must RAISE: under AckMode.ON_SUCCESS the SDK then withholds the
+    ack and the backbone redelivers. This is the successor to the old no-ack path."""
     consumer, _js, _calls = consumer_factory(publish_error=RuntimeError("stream down"), max_deliver=5)
-    msg = FakeMsg(response_event(), num_delivered=1)
-    await consumer._on_msg(msg)
-    assert msg.acked is False  # not acked -> JetStream redelivers
+    with pytest.raises(_RepublishError):
+        await consumer._on_msg(response_event())
 
 
-async def test_unparseable_message_is_acked_and_skipped(consumer_factory):
+async def test_unparseable_message_never_reaches_the_handler(consumer_factory):
+    """Un-parseable payloads are the SDK driver's business now: it logs and acks them before
+    dispatch (redelivery cannot fix malformed JSON), so the handler only ever sees a dict.
+    A non-response dict is skipped and acked by returning normally."""
     consumer, js, _calls = consumer_factory()
-    msg = raw_msg(b"not json{")
-    await consumer._on_msg(msg)
-    assert msg.acked is True
-    assert js.published == []
+    await consumer._on_msg({"type": "response"})  # no request_id/usage -> still handled, no crash
+    assert len(js.published) == 1
 
 
-async def test_terminal_republish_failure_is_metered(consumer_factory):
+async def test_republish_failure_is_metered(consumer_factory):
+    """Republish failures are still metered, but terminal exhaustion is no longer
+    distinguishable: the SDK handler contract carries no delivery count, so the label is
+    "unknown" rather than a silently-wrong "false" (ADR-033; see the TODO in consumer.py)."""
     consumer, _js, _calls = consumer_factory(publish_error=RuntimeError("stream down"), max_deliver=3)
-    before = _sample("enricher_republish_failures_total", terminal="true")
-    msg = FakeMsg(response_event(), num_delivered=3)  # == max_deliver -> terminal
-    await consumer._on_msg(msg)
-    assert msg.acked is False
-    assert _sample("enricher_republish_failures_total", terminal="true") - before == 1.0
+    before = _sample("enricher_republish_failures_total", terminal="unknown")
+    with pytest.raises(_RepublishError):
+        await consumer._on_msg(response_event())
+    assert _sample("enricher_republish_failures_total", terminal="unknown") - before == 1.0
 
 
 # --- Tokenizer degraded/error (S11/S12) -----------------------------------------------------
 async def test_tokenizer_unset_degrades_to_none(consumer_factory):
     consumer, js, calls = consumer_factory(tokenizer_url="")  # unset
-    await consumer._on_msg(FakeMsg(response_event(usage=None,
-                                                  body={"choices": [{"message": {"content": "hi"}}]})))
+    await consumer._on_msg(response_event(usage=None,
+                                             body={"choices": [{"message": {"content": "hi"}}]}))
     _subject, enriched, _headers = js.published[0]
     assert enriched["usage"] == {"total_tokens": None, "source": "none", "reason": "tokenizer_unset"}
     assert calls["n"] == 0  # no tokenizer call when unset
@@ -146,8 +153,8 @@ async def test_tokenizer_unset_degrades_to_none(consumer_factory):
 async def test_tokenizer_error_degrades_to_none_and_meters(consumer_factory):
     before = _sample("enricher_tokenizer_fallback_total", outcome="error")
     consumer, js, _calls = consumer_factory(tokenizer_url="http://tok/tokenize", tokenizer_raises=True)
-    await consumer._on_msg(FakeMsg(response_event(usage=None,
-                                                  body={"choices": [{"message": {"content": "hi"}}]})))
+    await consumer._on_msg(response_event(usage=None,
+                                             body={"choices": [{"message": {"content": "hi"}}]}))
     _subject, enriched, _headers = js.published[0]
     assert enriched["usage"] == {"total_tokens": None, "source": "none", "reason": "tokenizer_error"}
     assert _sample("enricher_tokenizer_fallback_total", outcome="error") - before == 1.0

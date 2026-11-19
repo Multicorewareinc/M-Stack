@@ -15,9 +15,53 @@ from errors import ConflictError, NotFoundError, UnprocessableError, UpstreamErr
 from modules.users.models import User
 
 from .models import Role, RolePermission, UserRole
-from .schemas import RoleCreate, RoleUpdate
+from .schemas import RoleCreate, RoleOut, RoleUpdate
+
+
+def to_role_out(role: Role, user_count: int = 0, permission_count: int = 0) -> RoleOut:
+    """Mirrors Admin CP's `to_org_out` — user_count/permission_count are computed (get_role_counts
+    / list_role_counts below), never real columns on Role, so they're attached here rather than
+    left to RoleOut's from_attributes conversion (which would silently default them to 0)."""
+    return RoleOut.model_validate(role).model_copy(
+        update={"user_count": user_count, "permission_count": permission_count}
+    )
+
+
+async def get_role_counts(session: AsyncSession, role_id: uuid.UUID) -> tuple[int, int]:
+    """(user_count, permission_count) for one role."""
+    user_count = await session.scalar(
+        select(func.count()).select_from(UserRole).where(UserRole.role_id == role_id)
+    )
+    permission_count = await session.scalar(
+        select(func.count()).select_from(RolePermission).where(RolePermission.role_id == role_id)
+    )
+    return user_count or 0, permission_count or 0
+
+
+async def list_role_counts(
+    session: AsyncSession, role_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, tuple[int, int]]:
+    """Bulk (user_count, permission_count) per role id — two grouped queries total, never one
+    pair of queries per row (§184 convention, same as Admin CP's org user-counts)."""
+    if not role_ids:
+        return {}
+    user_rows = await session.execute(
+        select(UserRole.role_id, func.count())
+        .where(UserRole.role_id.in_(role_ids))
+        .group_by(UserRole.role_id)
+    )
+    user_counts = dict(user_rows.all())
+    permission_rows = await session.execute(
+        select(RolePermission.role_id, func.count())
+        .where(RolePermission.role_id.in_(role_ids))
+        .group_by(RolePermission.role_id)
+    )
+    permission_counts = dict(permission_rows.all())
+    return {rid: (user_counts.get(rid, 0), permission_counts.get(rid, 0)) for rid in role_ids}
+
 
 # ---- Role CRUD (tenant-scoped) ------------------------------------------------------------
+
 
 async def _flush_unique(session: AsyncSession, name: str) -> None:
     try:
@@ -81,6 +125,7 @@ async def delete_role(session: AsyncSession, org_id: uuid.UUID, role_id: uuid.UU
 
 # ---- Permission composition (validate against Admin CP master list) ------------------------
 
+
 async def _validate_permission(client: httpx.AsyncClient, permission_id: uuid.UUID) -> None:
     """422 if the id is unknown to the master list; 502 if Admin CP is unreachable (fail closed)."""
     try:
@@ -122,6 +167,7 @@ async def get_role_permission_ids(
 
 # ---- User-role assignment (tenant-scoped) --------------------------------------------------
 
+
 async def _require_user(session: AsyncSession, org_id: uuid.UUID, user_id: uuid.UUID) -> User:
     user = await session.scalar(
         select(User).where(User.id == user_id, User.organization_id == org_id)
@@ -153,6 +199,7 @@ async def get_user_role_ids(
 
 # ---- Reverse-reference check for Admin CP (ADR-019) --------------------------------------
 
+
 async def permission_in_use(session: AsyncSession, permission_id: uuid.UUID) -> bool:
     """Whether ANY role, in any org, currently composes this permission id.
 
@@ -162,8 +209,8 @@ async def permission_in_use(session: AsyncSession, permission_id: uuid.UUID) -> 
     a dangling id. Platform-wide by design — unlike every other roles/service.py function, this
     one is NOT org-scoped, because the master permission list has no org boundary either."""
     count = await session.scalar(
-        select(func.count()).select_from(RolePermission).where(
-            RolePermission.permission_id == permission_id
-        )
+        select(func.count())
+        .select_from(RolePermission)
+        .where(RolePermission.permission_id == permission_id)
     )
     return bool(count)

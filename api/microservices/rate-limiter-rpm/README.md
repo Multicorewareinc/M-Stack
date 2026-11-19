@@ -19,7 +19,7 @@ rate-limiter-rpm/
     ├── main.py       # app factory, JSON logging, redis wiring
     ├── router.py     # routes: POST /check, GET /health, GET /metrics
     ├── service.py    # RPM enforcement over the fixed 60s Valkey window
-    ├── settings.py   # env-driven config (VALKEY_URL, RATE_LIMITS)
+    ├── settings.py   # env-driven config (VALKEY_URL, RPM_RATE_LIMITS)
     └── errors.py     # generic error handlers
 ```
 
@@ -51,9 +51,9 @@ and denies if **any** exceeds its limit within the current epoch-minute.
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | Log level |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Shared Redis holding the counters (prefix `rl:rpm:`) |
-| `RATE_LIMITS` | `{}` | JSON limits (below); empty ⇒ everything unlimited |
+| `RPM_RATE_LIMITS` | `{}` | JSON limits (below); empty ⇒ everything unlimited |
 
-`RATE_LIMITS` shape (any field absent or `0` ⇒ that scope is unlimited / skipped):
+`RPM_RATE_LIMITS` shape (any field absent or `0` ⇒ that scope is unlimited / skipped):
 
 ```json
 {
@@ -81,7 +81,7 @@ gateway code changes:
 POLICY_ENDPOINTS=http://rate-limiter-rpm:8000/check
 # on the rate-limiter-rpm container
 VALKEY_URL=redis://redis:6379/0
-RATE_LIMITS={"user_default":60,"model_overrides":{"gpt-4o":120}}
+RPM_RATE_LIMITS={"user_default":60,"model_overrides":{"gpt-4o":120}}
 ```
 
 ## Run with Docker
@@ -90,7 +90,7 @@ RATE_LIMITS={"user_default":60,"model_overrides":{"gpt-4o":120}}
 docker build -t rate-limiter-rpm .
 docker run --rm -p 8000:8000 \
   -e VALKEY_URL=redis://host.docker.internal:6379/0 \
-  -e RATE_LIMITS='{"user_default":60}' \
+  -e RPM_RATE_LIMITS='{"user_default":60}' \
   rate-limiter-rpm
 ```
 

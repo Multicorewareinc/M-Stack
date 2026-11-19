@@ -60,7 +60,7 @@ async def platform_list(org_client: httpx.AsyncClient = Depends(get_org_client))
 @platform_router.get("/{user_id}")
 async def platform_detail(
     user_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     org_client: httpx.AsyncClient = Depends(get_org_client),
 ) -> Any:
     return await service.get_platform_user_detail(session, org_client, user_id)

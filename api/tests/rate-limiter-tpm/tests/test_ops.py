@@ -39,7 +39,7 @@ def test_ready_ok_and_inert_when_no_backbone(client_factory):
 
 
 def test_metrics(client_factory):
-    client, _redis = client_factory(rate_limits='{"user_default":1}')
+    client, _redis = client_factory(tpm_rate_limits='{"user_default":1}')
     check = client.post("/check", json={"principal": "u1", "model": None, "path": "/v1/x"})
     assert check.status_code == 200 and check.json()["decision"] == "allow"
     resp = client.get("/metrics")

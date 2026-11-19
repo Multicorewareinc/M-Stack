@@ -15,9 +15,13 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    # Backbone connection. Empty EVENT_BACKBONE_URL => no consumer runs => the enricher
-    # is inert (nothing to consume/republish). Same discipline as the other consumers.
-    event_backbone_url: str = ""  # e.g. "nats://nats:4222"; empty = no consumer
+    # Backbone connection through the multistack.queue SDK seam (ADR-033). Empty
+    # EVENT_BACKBONE_URL => no consumer runs => the enricher is inert (nothing to
+    # consume/republish). QUEUE_BACKEND selects the backend the seam maps to (AD-04).
+    queue_backend: str = "nats"  # env QUEUE_BACKEND; SDK maps this to a driver
+    event_backbone_url: str = (
+        ""  # e.g. "nats://nats:4222" (the seam's connection url); empty = no consumer
+    )
 
     # Input: the gateway's canonical stream (unchanged, ADR-007). The enricher consumes
     # its `response` events; it never modifies the gateway or this stream's contract.
@@ -31,6 +35,12 @@ class Settings(BaseSettings):
     enriched_subject: str = "gateway.events.enriched"
 
     # Bounded redelivery for the not-ack-on-republish-failure path (ADR-030 D5). A failing
+    # Since ADR-033 these are NOT read by this service: the durable consumer is provisioned
+    # by NACK, and max_deliver/ack_wait are set on that manifest
+    # (multistack/queue/drivers/nats/nack/manifests/consumers/enricher.yaml). They stay here
+    # as the documented contract those manifest values must match, and as the threshold a
+    # future terminal-exhaustion metric would compare a delivery count against, once the SDK
+    # can supply one (ADR-033 known gap).
     # republish is retried up to max_deliver times (AckWait between attempts); terminal
     # exhaustion is logged + metered, never silently dropped. ack_wait_seconds MUST be >=
     # tokenizer_timeout_ms + a republish margin, else JetStream redelivers mid-flight.

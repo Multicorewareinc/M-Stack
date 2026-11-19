@@ -11,20 +11,19 @@ calls the other over the cluster network, so they are installed together.
 Needs `helm` and `kubectl` on PATH, a reachable cluster, a Postgres
 database, a Valkey cache, and the Secret named below.
 
-No credential appears in this file. Both charts read DATABASE_URL,
+No credential appears in this file. The charts read DATABASE_URL_ADMIN / DATABASE_URL_ORG,
 VALKEY_URL, JWT_SECRET and their API keys from a Kubernetes Secret, and
 the spec carries only that Secret's name — a spec is a file people
 commit. Create the Secret with `multistack.kube.apply`, which pipes the
 manifest to stdin; `kubectl create secret --from-literal` puts the value
 in the process arguments, where any local user can read it.
 """
+
 import os
 
 from multistack import ControlPlane, ControlPlaneBackend
 
-KUBECONFIG = os.path.expanduser(
-    os.environ.get("MULTISTACK_KUBECONFIG", "~/.multistack/kubeconfig")
-)
+KUBECONFIG = os.path.expanduser(os.environ.get("MULTISTACK_KUBECONFIG", "~/.multistack/kubeconfig"))
 
 # One Secret per service. Each must carry every key in
 # multistack.controlplane.REQUIRED_SECRET_KEYS for its type — the backend

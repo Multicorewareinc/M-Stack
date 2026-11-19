@@ -13,23 +13,22 @@ the Secret below for a usage-metering-only deployment.
 Needs `helm` and `kubectl` on PATH, a reachable cluster, a Postgres
 database for this service alone, and the Secret named below.
 
-No credential appears in this file. The chart reads DATABASE_URL and
+No credential appears in this file. The chart reads DATABASE_URL_BILLING and
 SERVICE_API_KEY (and optionally the two Stripe secrets) from a Kubernetes
 Secret, and the spec carries only that Secret's name — a spec is a file
 people commit. Create the Secret with `multistack.kube.apply`, which
 pipes the manifest to stdin; `kubectl create secret --from-literal` puts
 the value in the process arguments, where any local user can read it.
 """
+
 import os
 
 from multistack import Billing, BillingBackend
 
-KUBECONFIG = os.path.expanduser(
-    os.environ.get("MULTISTACK_KUBECONFIG", "~/.multistack/kubeconfig")
-)
+KUBECONFIG = os.path.expanduser(os.environ.get("MULTISTACK_KUBECONFIG", "~/.multistack/kubeconfig"))
 
 # Must carry every key in multistack.billing.REQUIRED_SECRET_KEYS
-# (DATABASE_URL, SERVICE_API_KEY), plus optionally STRIPE_SECRET_KEY and
+# (DATABASE_URL_BILLING, SERVICE_API_KEY), plus optionally STRIPE_SECRET_KEY and
 # STRIPE_WEBHOOK_SECRET. SERVICE_API_KEY must equal admin-control-plane's
 # own SERVICE_API_KEY exactly — it is the outbound bearer admin-cp reuses
 # to notify this service of org/plan changes.
@@ -48,11 +47,14 @@ BILLING_SECRET = os.environ.get("MULTISTACK_BILLING_SECRET", "billing-secrets")
 EVENT_BACKBONE = os.environ.get(
     "MULTISTACK_EVENT_BACKBONE", "nats://nats.platform.svc.cluster.local:4222"
 )
-BACKBONE_ARGS = ({"event_backbone_url": EVENT_BACKBONE} if EVENT_BACKBONE
-                 else {"allow_no_backbone": True})
+BACKBONE_ARGS = (
+    {"event_backbone_url": EVENT_BACKBONE} if EVENT_BACKBONE else {"allow_no_backbone": True}
+)
 if not EVENT_BACKBONE:
-    print("[billing] no event backbone: nothing will be metered until "
-          "one exists (MULTISTACK_EVENT_BACKBONE)")
+    print(
+        "[billing] no event backbone: nothing will be metered until "
+        "one exists (MULTISTACK_EVENT_BACKBONE)"
+    )
 
 # There is no in-cluster registry, so the service image exists only on
 # the node it was imported to; a pod scheduled anywhere else stays

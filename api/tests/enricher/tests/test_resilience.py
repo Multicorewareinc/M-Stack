@@ -1,100 +1,99 @@
 """Covers specs/event-enricher/spec.md "Resilient, off-hot-path consumer": backbone down at
-startup does not crash, and the durable rebinds on reconnect (ADR-016 pattern)."""
+startup does not crash, and the durable binds to its NACK-provisioned consumer (ADR-016
+pattern), now over the multistack.queue SDK (ADR-033).
+
+Reconnect is no longer this service's job: the SDK's own NATS client reconnects and restores
+the push subscription, so there is no rebind hook to drive here."""
 
 from __future__ import annotations
 
-import sys
-import types
-
 from fastapi.testclient import TestClient
 
-from conftest import FakeMsg, FakeNC, FakeJS, _install_fake_nats, response_event
+from conftest import FakeQueue, _install_fake_queue, response_event
 from main import create_app
 from settings import Settings
 
 
 async def test_start_leaves_inactive_on_connect_failure_without_crashing(consumer_factory, monkeypatch):
-    # nats-py has no first-connect retry option (retry_on_failed_connect was never a real
-    # parameter, at any version) -- connect() raises immediately when the backbone is down.
-    # start() must swallow that, stay inactive, and schedule a background retry rather than
-    # crash or give up forever.
-    consumer, _js, _calls = consumer_factory()
-    _install_fake_nats(monkeypatch, connect_error=ConnectionRefusedError("nats down"))
+    # A backbone that fails to connect must be swallowed: stay inactive, schedule a
+    # background retry, never crash or give up forever.
+    consumer, _queue, _calls = consumer_factory(event_backbone_url="nats://test")
+    _install_fake_queue(monkeypatch, connect_error=ConnectionRefusedError("backbone down"))
     scheduled = []
     monkeypatch.setattr("consumer.asyncio.create_task", lambda coro: scheduled.append(coro) or coro.close())
     await consumer.start()
     assert consumer.active is False
-    assert consumer._nc is None
+    assert consumer._queue is None
     assert len(scheduled) == 1
 
 
 async def test_retry_connect_recovers_after_repeated_failures(consumer_factory, monkeypatch):
-    consumer, _js, _calls = consumer_factory()
-    js = FakeJS()
-    nc = FakeNC(connected=True, js=js)
+    consumer, _queue, _calls = consumer_factory(event_backbone_url="nats://test")
+    queue = FakeQueue()
     calls = {"n": 0}
 
-    async def flaky_connect(url, **kwargs):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise ConnectionRefusedError("nats down")
-        return nc
-
-    mod = types.ModuleType("nats")
-    mod.connect = flaky_connect
-    js_api = types.ModuleType("nats.js.api")
-
-    class DeliverPolicy:
-        NEW = "new"
-
-    class ConsumerConfig:
-        def __init__(self, **kwargs):
+    class _FlakyQueue:
+        def __init__(self, config):
             pass
 
-    js_api.DeliverPolicy = DeliverPolicy
-    js_api.ConsumerConfig = ConsumerConfig
-    monkeypatch.setitem(sys.modules, "nats", mod)
-    monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
-    monkeypatch.setitem(sys.modules, "nats.js.api", js_api)
+        async def connect(self):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionRefusedError("backbone down")
+
+        def __getattr__(self, item):
+            return getattr(queue, item)
+
+    import multistack.queue as mq
+
+    monkeypatch.setattr(mq, "Queue", _FlakyQueue)
 
     async def instant_sleep(_seconds):
         return None
 
     monkeypatch.setattr("consumer.asyncio.sleep", instant_sleep)
 
+    consumer._queue = None  # the down-at-startup state start() leaves before scheduling retry
     assert consumer.active is False
     await consumer._retry_connect()
     assert calls["n"] == 3
-    assert consumer.active is True
+    assert consumer.active is True  # bound after the third (successful) connect
 
 
-async def test_reconnect_rebinds_and_resumes(consumer_factory, monkeypatch):
-    consumer, _js, _calls = consumer_factory()
-    js = FakeJS()
-    nc = FakeNC(connected=False, js=js)
-    _install_fake_nats(monkeypatch, nc=nc)
+async def test_bind_uses_the_nack_provisioned_consumer_and_republishes(consumer_factory, monkeypatch):
+    """Binds by stream + durable with ON_SUCCESS acking (ADR-030 D5), then republishing works
+    over the same single Queue that serves the subscription."""
+    from multistack.queue.drivers.nats.messaging import AckMode
+
+    consumer, _queue, _calls = consumer_factory(event_backbone_url="nats://test")
+    queue = FakeQueue()
+    _install_fake_queue(monkeypatch, queue=queue)
+
     await consumer.start()
+    assert consumer.active is True
+    assert queue.subscribe_calls == 1
+    binding = queue.bindings[0]
+    assert binding.stream == "GATEWAY_EVENTS"
+    assert binding.durable == "enricher"
+    assert binding.ack_mode is AckMode.ON_SUCCESS
+
+    # One Queue serves both roles: the bound consumer's handler republishes through it.
+    await consumer._on_msg(response_event(request_id="after-bind"))
+    assert any(e["request_id"] == "after-bind" for _s, e, _mid in queue.published)
+
+
+async def test_durable_conflict_is_classified_and_inactive(consumer_factory, monkeypatch, caplog):
+    consumer, _queue, _calls = consumer_factory(event_backbone_url="nats://test")
+    _install_fake_queue(monkeypatch, queue=FakeQueue(subscribe_error=Exception("consumer already exists")))
+    with caplog.at_level("WARNING"):
+        await consumer.start()  # must not raise
     assert consumer.active is False
-
-    nc.is_connected = True
-    await consumer._on_reconnected()
-    assert consumer.active is True
-
-    # Republishing resumes after rebind.
-    await consumer._on_msg(FakeMsg(response_event(request_id="after-reconnect")))
-    assert any(e["request_id"] == "after-reconnect" for _s, e, _h in js.published)
-
-    # A later reconnect drains the live sub before rebinding (no duplicate JS push binding).
-    live = consumer._sub
-    await consumer._on_reconnected()
-    assert live.unsubscribed is True
-    assert consumer.active is True
-    assert js.subscribe_calls == 2
+    assert any("durable_conflict" in r.getMessage() for r in caplog.records)
 
 
 def test_backbone_down_at_startup_does_not_crash(monkeypatch):
-    # A backbone that is unreachable at startup must leave the service up and /health green.
-    _install_fake_nats(monkeypatch, connect_error=RuntimeError("nats unreachable"))
+    # A backbone unreachable at startup must leave the service up and /health green.
+    _install_fake_queue(monkeypatch, connect_error=RuntimeError("backbone unreachable"))
     app = create_app(Settings(event_backbone_url="nats://unreachable:4222"))
     with TestClient(app, raise_server_exceptions=False) as client:  # runs lifespan (start/stop)
         resp = client.get("/health")

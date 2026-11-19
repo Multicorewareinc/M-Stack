@@ -1,4 +1,4 @@
-"""Async Alembic environment. Reads DATABASE_URL from the environment and targets the shared
+"""Async Alembic environment. Reads DATABASE_URL_BILLING from the environment and targets the shared
 Base.metadata. models is imported so both tables are registered before autogenerate/upgrade
 runs. Mirrors admin-control-plane/migrations/env.py."""
 
@@ -22,7 +22,7 @@ target_metadata = Base.metadata
 
 
 def _get_url() -> str:
-    return os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url") or "")
+    return os.environ.get("DATABASE_URL_BILLING", config.get_main_option("sqlalchemy.url") or "")
 
 
 def run_migrations_offline() -> None:

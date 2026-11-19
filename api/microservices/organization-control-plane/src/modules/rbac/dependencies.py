@@ -2,8 +2,8 @@
 is wired into a route. `require_permission(slug)` gates a mutating route on the authenticated
 org-user holding a permission from the Admin CP master catalog.
 
-Permission slug->id resolution mirrors the `apikey.manage` idiom (modules/api_keys/dependencies):
-the id is owned by Admin CP (ADR-019), resolved from `GET /internal/v1/permissions` and cached on
+Permission slug->id resolution: the id is owned by Admin CP (ADR-019), resolved from
+`GET /internal/v1/permissions` and cached on
 `app.state.permission_ids`; a one-shot lazy refresh self-heals a late-starting Admin CP. Failure is
 fail-closed: an unresolved id denies (403), never opens. The actual outbound call lives in
 `rbac.service.fetch_permission_id_by_slug` — no httpx call site in this module (router →

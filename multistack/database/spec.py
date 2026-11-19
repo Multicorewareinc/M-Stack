@@ -36,13 +36,13 @@ So the cluster fields are optional: a spec carrying only
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from ..capability import CapabilitySpec
 
-SUPPORTED_TYPES: Tuple[str, ...] = ("cnpg",)
+SUPPORTED_TYPES: tuple[str, ...] = ("cnpg",)
 
 DEFAULT_OPERATOR_CHART = "cloudnative-pg"
 DEFAULT_OPERATOR_NAMESPACE = "cnpg-system"
@@ -66,7 +66,7 @@ POSTGRES_PORT = 5432
 # for the control plane -- next to etcd, competing for the same disk.
 # The operator chart is a plain Helm install and takes its own affinity
 # through `values`; this is for the Cluster resource.
-DEFAULT_CLUSTER_AFFINITY: Dict[str, Any] = {
+DEFAULT_CLUSTER_AFFINITY: dict[str, Any] = {
     "nodeAffinity": {
         "requiredDuringSchedulingIgnoredDuringExecution": {
             "nodeSelectorTerms": [
@@ -101,11 +101,11 @@ class CNPGOptions(BaseModel):
     operator_release_name: str = DEFAULT_OPERATOR_RELEASE
     operator_namespace: str = DEFAULT_OPERATOR_NAMESPACE
     operator_chart: str = DEFAULT_OPERATOR_CHART
-    operator_chart_version: Optional[str] = DEFAULT_OPERATOR_CHART_VERSION
+    operator_chart_version: str | None = DEFAULT_OPERATOR_CHART_VERSION
 
     # Optional Helm values used to override the CloudNativePG
     # operator chart's default values.yaml configuration.
-    values: Optional[Dict[str, Any]] = None
+    values: dict[str, Any] | None = None
 
     install_timeout: str = "15m"
 
@@ -155,7 +155,7 @@ class DatabaseConfig(BaseModel):
     password: SecretStr
 
     @model_validator(mode="after")
-    def _validate_on_construction(self) -> "DatabaseConfig":
+    def _validate_on_construction(self) -> DatabaseConfig:
         self.validate()
         return self
 
@@ -174,12 +174,12 @@ class Database(CapabilitySpec):
     """A SQL database deployed into an existing Kubernetes cluster."""
 
     CAPABILITY: ClassVar[str] = "database"
-    SUPPORTED_TYPES: ClassVar[Tuple[str, ...]] = SUPPORTED_TYPES
-    OPTIONS_FOR_TYPE: ClassVar[Dict[str, type]] = {"cnpg": CNPGOptions}
-    DEFAULT_NAMESPACES: ClassVar[Dict[str, str]] = {"cnpg": DEFAULT_NAMESPACE}
-    REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
+    SUPPORTED_TYPES: ClassVar[tuple[str, ...]] = SUPPORTED_TYPES
+    OPTIONS_FOR_TYPE: ClassVar[dict[str, type]] = {"cnpg": CNPGOptions}
+    DEFAULT_NAMESPACES: ClassVar[dict[str, str]] = {"cnpg": DEFAULT_NAMESPACE}
+    REQUIRES: ClassVar[tuple[str, ...]] = ("cluster",)
 
-    FROM_STACK: ClassVar[Dict[str, str]] = {
+    FROM_STACK: ClassVar[dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
     }
 
@@ -188,24 +188,24 @@ class Database(CapabilitySpec):
     # and the Secret holding it is announced with
     # stack.provide(database_secret_name=...) the same way the object
     # store's credentials Secret is.
-    PROVIDES: ClassVar[Dict[str, str]] = {"database_url": "endpoint"}
+    PROVIDES: ClassVar[dict[str, str]] = {"database_url": "endpoint"}
 
     type: str = "cnpg"
     kubeconfig_path: str
-    options: Optional[CNPGOptions] = None
+    options: CNPGOptions | None = None
 
     # PostgreSQL Cluster configuration. These fields are optional so the
     # same model also drives operator-only lifecycle operations.
-    name: Optional[str] = None
-    namespace: Optional[str] = None
+    name: str | None = None
+    namespace: str | None = None
 
     instances: int = Field(default=3, ge=1)
     image: str = DEFAULT_POSTGRES_IMAGE
 
     storage_size: str = DEFAULT_STORAGE_SIZE
-    storage_class: Optional[str] = None
+    storage_class: str | None = None
 
-    database: Optional[DatabaseConfig] = None
+    database: DatabaseConfig | None = None
 
     ready_timeout: int = Field(default=900, gt=0)
     ready_poll_interval: int = Field(default=15, gt=0)
@@ -215,14 +215,14 @@ class Database(CapabilitySpec):
     # deepcopy, not the constant itself: a default_factory returning one
     # shared dict would let an edit on one spec reach the module-level
     # default and every spec built after it.
-    affinity: Optional[Dict[str, Any]] = Field(
+    affinity: dict[str, Any] | None = Field(
         default_factory=lambda: deepcopy(DEFAULT_CLUSTER_AFFINITY)
     )
-    node_selector: Optional[Dict[str, str]] = None
-    tolerations: Optional[List[Any]] = None
+    node_selector: dict[str, str] | None = None
+    tolerations: list[Any] | None = None
 
     @model_validator(mode="after")
-    def _validate_on_construction(self) -> "Database":
+    def _validate_on_construction(self) -> Database:
         """Runs `validate()` at construction, and again on assignment.
 
         `CapabilitySpec`'s own validator runs `validate_capability()`
@@ -245,9 +245,7 @@ class Database(CapabilitySpec):
             )
 
         if self.ready_poll_interval > self.ready_timeout:
-            raise ValueError(
-                "ready_poll_interval cannot be greater than ready_timeout."
-            )
+            raise ValueError("ready_poll_interval cannot be greater than ready_timeout.")
 
     def validate_cluster_identity(self) -> None:
         """Validate what it takes to *name* a Cluster.
@@ -283,7 +281,7 @@ class Database(CapabilitySpec):
 
     # -- what a consumer needs to reach this ------------------------------
     @property
-    def endpoint(self) -> Optional[str]:
+    def endpoint(self) -> str | None:
         """In-cluster URL for the primary, with no credential in it.
 
         None until this spec describes a database -- the same model also
@@ -296,7 +294,7 @@ class Database(CapabilitySpec):
         carrying the password would copy it into every ConfigMap that
         quotes this value. A consumer that must authenticate overrides
         it from that Secret -- which is why the control-plane charts
-        take DATABASE_URL from a secretRef listed after their
+        take their DATABASE_URL_* from a secretRef listed after their
         configMapRef.
 
         `postgresql://`, not `postgresql+asyncpg://`: the driver suffix
@@ -305,21 +303,13 @@ class Database(CapabilitySpec):
         if not self.name or self.database is None:
             return None
 
-        host = (
-            f"{self.name}{PRIMARY_SERVICE_SUFFIX}"
-            f".{self.resolved_namespace}.svc.cluster.local"
-        )
-        return (
-            f"postgresql://{self.database.owner}@{host}"
-            f":{POSTGRES_PORT}/{self.database.name}"
-        )
+        host = f"{self.name}{PRIMARY_SERVICE_SUFFIX}.{self.resolved_namespace}.svc.cluster.local"
+        return f"postgresql://{self.database.owner}@{host}:{POSTGRES_PORT}/{self.database.name}"
 
     @property
     def secret_name(self) -> str:
         if not self.name:
-            raise ValueError(
-                "database cluster name is required to determine secret name."
-            )
+            raise ValueError("database cluster name is required to determine secret name.")
 
         return f"{self.name}-app-secret"
 
@@ -341,11 +331,11 @@ class Database(CapabilitySpec):
         return self.options.operator_chart
 
     @property
-    def operator_chart_version(self) -> Optional[str]:
+    def operator_chart_version(self) -> str | None:
         return self.options.operator_chart_version
 
     @property
-    def values(self) -> Optional[Dict[str, Any]]:
+    def values(self) -> dict[str, Any] | None:
         return self.options.values
 
     @property

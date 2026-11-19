@@ -1,11 +1,12 @@
 """The first-party gateway, installed from its chart via the Helm layer."""
-import json
-from typing import Any, Dict, List
 
-from ..base import GatewayError, GatewayPrerequisiteError
-from ..spec import REQUIRED_SECRET_KEYS, Gateway
+import json
+from typing import Any
+
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ..base import GatewayError, GatewayPrerequisiteError
+from ..spec import REQUIRED_SECRET_KEYS, Gateway
 
 
 class ModelGatewayDriver:
@@ -15,9 +16,9 @@ class ModelGatewayDriver:
     def _helm(self, gateway: Gateway) -> HelmRunner:
         return HelmRunner(gateway.kubeconfig_path, error_cls=GatewayError)
 
-    def _values(self, gateway: Gateway) -> Dict[str, Any]:
+    def _values(self, gateway: Gateway) -> dict[str, Any]:
         options = gateway.options
-        values: Dict[str, Any] = {
+        values: dict[str, Any] = {
             "replicaCount": gateway.replicas,
             "service": {"port": gateway.service_port},
             "config": {
@@ -48,19 +49,31 @@ class ModelGatewayDriver:
                 "enabled": True,
                 "allowedIngress": gateway.network_policy_allowed_ingress,
             }
-        if options.image_tag:
-            values["image"] = {"tag": options.image_tag}
+        if options.image_tag or options.image_repository:
+            image: dict[str, Any] = {}
+            if options.image_repository:
+                image["repository"] = options.image_repository
+            if options.image_tag:
+                image["tag"] = options.image_tag
+            values["image"] = image
         # Absent leaves the chart's own default in place; an explicit {}
         # overrides it with "schedule anywhere", which is a different
         # statement and sometimes the intended one.
+        if gateway.affinity is not None:
+            # null, not {}, for the empty case: Helm merges user values
+            # into the chart's recursively, so an empty map adds nothing and
+            # the chart's own affinity survives -- the release installs and
+            # the pod stays Pending with the default still in force. An
+            # explicit null is what Helm treats as "delete this key".
+            values["affinity"] = gateway.affinity or None
         if gateway.node_selector is not None:
             values["nodeSelector"] = gateway.node_selector
         if gateway.tolerations is not None:
             values["tolerations"] = gateway.tolerations
         return values
 
-    def check_prerequisites(self, gateway: Gateway) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, gateway: Gateway) -> list[str]:
+        warnings: list[str] = []
         require_cli("helm", error_cls=GatewayPrerequisiteError)
         require_cluster(gateway.kubeconfig_path, capability="a gateway")
 
@@ -71,9 +84,16 @@ class ModelGatewayDriver:
         # reveals it, as a 503 from verify_api_key rather than anything
         # that names this Secret.
         raw = kubectl(
-            gateway.kubeconfig_path, "get", "secret", gateway.api_key_secret,
-            "-n", gateway.resolved_namespace, "-o", "json",
-            error_cls=GatewayError, check=False,
+            gateway.kubeconfig_path,
+            "get",
+            "secret",
+            gateway.api_key_secret,
+            "-n",
+            gateway.resolved_namespace,
+            "-o",
+            "json",
+            error_cls=GatewayError,
+            check=False,
         )
         if not (raw or "").strip():
             raise GatewayPrerequisiteError(

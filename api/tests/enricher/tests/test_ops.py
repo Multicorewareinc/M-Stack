@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from conftest import FakeMsg, StubConsumer, response_event
+from conftest import StubConsumer, response_event
 
 
 def test_health(client_factory):
@@ -29,14 +29,14 @@ def _series_value(text: str, name: str, **labels) -> float | None:
 async def test_metrics_exposes_labelled_series_values(consumer_factory, client_factory):
     consumer, _js, _calls = consumer_factory(tokenizer_url="http://tok/tokenize", tokenizer_tokens=7)
     # Drive one event of each source / none-reason so the series exist with real values.
-    await consumer._on_msg(FakeMsg(response_event(request_id="p", usage={"total_tokens": 10})))
-    await consumer._on_msg(FakeMsg(response_event(request_id="e", usage=None,
-                                                  body={"choices": [{"message": {"content": "hi"}}]})))
-    await consumer._on_msg(FakeMsg(response_event(request_id="n", usage=None, body=None)))
+    await consumer._on_msg(response_event(request_id="p", usage={"total_tokens": 10}))
+    await consumer._on_msg(response_event(request_id="e", usage=None,
+                                          body={"choices": [{"message": {"content": "hi"}}]}))
+    await consumer._on_msg(response_event(request_id="n", usage=None, body=None))
 
     consumer_unset, _j2, _c2 = consumer_factory(tokenizer_url="")
-    await consumer_unset._on_msg(FakeMsg(response_event(request_id="nu", usage=None,
-                                                        body={"choices": [{"message": {"content": "hi"}}]})))
+    await consumer_unset._on_msg(response_event(request_id="nu", usage=None,
+                                                body={"choices": [{"message": {"content": "hi"}}]}))
 
     text = client_factory(consumer=StubConsumer(active=True)).get("/metrics").text
 
