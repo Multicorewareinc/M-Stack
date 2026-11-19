@@ -21,6 +21,7 @@ class AdminControlPlaneOptions(BaseModel):
     chart: str = "api/microservices/admin-control-plane/chart"
     chart_version: Optional[str] = None
     image_tag: Optional[str] = None
+    image_repository: Optional[str] = None   # full image path; None = the chart's own registry. Set it only when the user names a registry or mirror
     migration_deadline_seconds: int = 120     # > 0
     migration_backoff_limit: int = 2
     # Admin-only. Idempotent per row but NOT concurrency-safe: two
@@ -35,6 +36,7 @@ class OrganizationControlPlaneOptions(BaseModel):
     chart: str = "api/microservices/organization-control-plane/chart"
     chart_version: Optional[str] = None
     image_tag: Optional[str] = None
+    image_repository: Optional[str] = None   # full image path; None = the chart's own registry. Set it only when the user names a registry or mirror
     migration_deadline_seconds: int = 120
     migration_backoff_limit: int = 2
 
@@ -57,6 +59,7 @@ class ControlPlane(CapabilitySpec):
     # to explain it. None (the default) leaves the chart's own default in
     # place; an explicit {} OVERRIDES it with "schedule anywhere", which
     # is a different statement.
+    affinity: Optional[Dict[str, Any]] = None
     node_selector: Optional[Dict[str, str]] = None
     tolerations: Optional[List[Dict[str, Any]]] = None
 
@@ -95,7 +98,7 @@ Rules when generating code:
   cluster. Use the Billing spec's `endpoint` — `build_full_stack_plan`
   fills it in when billing is composed. Never guess a URL.
 - Leave `options` unset unless the user names a specific need — it
-- `node_selector`/`tolerations` pin this service to a particular node. They matter here because there is no in-cluster registry: a service image exists only on the node it was imported to, so a pod scheduled anywhere else sits in `ImagePullBackOff` with nothing in the release to explain it. Leave both unset unless the user tells you which node holds the image — a node name or label is a real fact about their cluster, never one to invent. Note `None` and `{}` are different statements: unset leaves the chart's own default in place, while an explicit `{}` overrides it with "schedule anywhere".
+- `affinity`/`node_selector`/`tolerations` pin this service to a particular node. They matter here because there is no in-cluster registry: a service image exists only on the node it was imported to, so a pod scheduled anywhere else sits in `ImagePullBackOff` with nothing in the release to explain it. Leave both unset unless the user tells you which node holds the image — a node name or label is a real fact about their cluster, never one to invent. Note `None` and `{}` are different statements for `affinity`/`node_selector`: unset leaves the chart's own default in place (pods off the control plane), while an explicit `{}` overrides it with "schedule anywhere" -- the only way a single-node cluster, where the control plane is the only node, can actually schedule these pods.
   auto-fills from `type` with the right class. If they do ask for
   something, note `seed_plans`/`seed_permissions` exist only on the
   admin type, and should be turned off when redeploying against a

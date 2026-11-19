@@ -26,7 +26,7 @@ handling. Until then, this tool must NEVER invent a password -- always
 require the real one from the user, same as any other required field
 it can't guess.
 
-Like Storage/MinIO/Gateway/Policy/Inference/IngressGateway/Valkey, a
+Like Storage/SeaweedFS/Gateway/Policy/Inference/IngressGateway/Valkey, a
 database deploys into an EXISTING cluster -- it needs a real
 kubeconfig_path."""
 
@@ -37,7 +37,7 @@ from pydantic import validate_call
 from multistack import Database
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(cnpg: Database) -> str:
@@ -57,10 +57,7 @@ def _render_script(cnpg: Database) -> str:
     dict, same as mcp_tools.valkey._render_script. It gained an options
     model when the capability moved out of the `core/` + `backends/`
     split."""
-    field_lines = [
-        f"    {k}={v!r}," for k, v in dump(cnpg).items()
-        if k not in ("database", "options")
-    ]
+    field_lines = dumped_lines(cnpg, dump(cnpg), skip=("database", "options"))
     if cnpg.options is not None:
         opt_args = ", ".join(
             f"{k}={v!r}" for k, v in dump(cnpg.options).items())

@@ -11,7 +11,7 @@ a caller actually reaches depends on both `name` and whatever `values`
 were given, not just `name` alone. See multistack/core/valkey.py's own
 `service_name` property for exactly what it accounts for.
 
-Like Storage/MinIO/Gateway/Policy/Inference/IngressGateway, Valkey
+Like Storage/SeaweedFS/Gateway/Policy/Inference/IngressGateway, Valkey
 deploys into an EXISTING cluster -- it needs a real kubeconfig_path."""
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pydantic import validate_call
 from multistack import Cache
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(valkey: Cache) -> str:
@@ -35,10 +35,7 @@ def _render_script(valkey: Cache) -> str:
     generated script constructs it -- same as
     mcp_tools.gateway._render_script. It gained an options model when
     the capability moved out of the `core/` + `backends/` split."""
-    field_lines = [
-        f"    {k}={v!r}," for k, v in dump(valkey).items()
-        if k != "options"
-    ]
+    field_lines = dumped_lines(valkey, dump(valkey), skip=("options",))
     if valkey.options is not None:
         opt_args = ", ".join(
             f"{k}={v!r}" for k, v in dump(valkey.options).items())

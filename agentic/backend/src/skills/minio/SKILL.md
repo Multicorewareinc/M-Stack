@@ -1,5 +1,9 @@
 ---
 name: minio
+# Disabled: the platform replaced MinIO with SeaweedFS, whose images need no
+# authenticated pull. Kept, with mcp_tools/minio.py (not registered with the
+# model), to reuse later: set this to true and register the tool again.
+enabled: false
 description: Use this skill when the user's request mentions MinIO, object storage, S3, buckets, or a tenant for storing model weights/datasets. Covers the real MultiStack SDK MinIOTenant/MinIOBackend classes.
 ---
 

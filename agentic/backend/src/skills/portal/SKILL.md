@@ -1,6 +1,6 @@
 ---
 name: portal
-description: Use this skill when the user's request mentions a portal, admin UI, organization UI, web UI, or frontend. Covers the real MultiStack SDK Portal/PortalBackend classes.
+description: Use this skill when the user's request mentions a portal, a UI, a web UI, or a frontend. Covers the real MultiStack SDK Portal/PortalBackend classes.
 ---
 
 # MultiStack SDK — Portal / PortalBackend

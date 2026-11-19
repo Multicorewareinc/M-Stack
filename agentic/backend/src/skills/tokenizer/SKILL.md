@@ -18,6 +18,7 @@ class TiktokenOptions(BaseModel):
     chart: str = "api/microservices/tokenizer/chart"
     chart_version: Optional[str] = None
     image_tag: Optional[str] = None
+    image_repository: Optional[str] = None   # full image path; None = the chart's own registry. Set it only when the user names a registry or mirror
     default_encoding: str = "cl100k_base"
 
 class Tokenizer(CapabilitySpec):
@@ -33,6 +34,7 @@ class Tokenizer(CapabilitySpec):
     # to explain it. None (the default) leaves the chart's own default in
     # place; an explicit {} OVERRIDES it with "schedule anywhere", which
     # is a different statement.
+    affinity: Optional[Dict[str, Any]] = None
     node_selector: Optional[Dict[str, str]] = None
     tolerations: Optional[List[Dict[str, Any]]] = None
 
@@ -48,7 +50,7 @@ Rules when generating code:
 - It holds no credential and needs no Secret — it counts tokens and
   nothing else, reachable only inside the cluster.
 - Once deployed, this Tokenizer's `endpoint` is what a `type="tpm"`
-- `node_selector`/`tolerations` pin this service to a particular node. They matter here because there is no in-cluster registry: a service image exists only on the node it was imported to, so a pod scheduled anywhere else sits in `ImagePullBackOff` with nothing in the release to explain it. Leave both unset unless the user tells you which node holds the image — a node name or label is a real fact about their cluster, never one to invent. Note `None` and `{}` are different statements: unset leaves the chart's own default in place, while an explicit `{}` overrides it with "schedule anywhere".
+- `affinity`/`node_selector`/`tolerations` pin this service to a particular node. They matter here because there is no in-cluster registry: a service image exists only on the node it was imported to, so a pod scheduled anywhere else sits in `ImagePullBackOff` with nothing in the release to explain it. Leave both unset unless the user tells you which node holds the image — a node name or label is a real fact about their cluster, never one to invent. Note `None` and `{}` are different statements for `affinity`/`node_selector`: unset leaves the chart's own default in place (pods off the control plane), while an explicit `{}` overrides it with "schedule anywhere" -- the only way a single-node cluster, where the control plane is the only node, can actually schedule these pods.
   Policy's `TPMOptions.tokenizer_url` should be set to (see the `policy`
   skill) — that wiring is manual, not automatic, since `tokenizer_url`
   lives on Policy's options object rather than on Policy itself, and

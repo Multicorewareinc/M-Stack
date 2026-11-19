@@ -32,8 +32,10 @@ from typing import Dict, Iterable, List, Tuple
 DEPENDS_ON: Dict[str, Tuple[str, ...]] = {
     "storage": (),
     "minio": ("storage",),
+    "seaweedfs": ("storage",),
     "observability": ("storage",),
     "queue": ("storage",),
+    "vault": ("storage",),
     "accelerator": (),
     "inference": (),
     "valkey": (),
@@ -60,6 +62,7 @@ REASON: Dict[Tuple[str, str], str] = {
     ("enricher", "tokenizer"): "the tokenizer is its synchronous fallback when an event has no token count",
     ("tokenizer", "enricher"): "the enricher is the tokenizer's only caller -- on its own it counts nothing",
     ("queue", "storage"): "JetStream persists its streams to a StorageClass",
+    ("seaweedfs", "storage"): "its volumes bind against a StorageClass block storage provides",
 }
 
 # selection.py works in skill names; a few differ from the parameter.

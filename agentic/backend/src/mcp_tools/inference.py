@@ -2,10 +2,10 @@
 
 Inference is the OpenAI-compatible model server itself -- vLLM today,
 serving whatever `model` the caller names. It's what a Gateway's
-`upstream_url` points at. Like Storage/MinIO/Gateway/Policy, it deploys
+`upstream_url` points at. Like Storage/SeaweedFS/Gateway/Policy, it deploys
 into an EXISTING cluster -- it needs a real kubeconfig_path. See
 mcp_tools/full_stack.py for composing this with other layers via Stack
-(its object-store fields auto-wire from a composed MinIO layer)."""
+(its object-store fields auto-wire from a composed SeaweedFS layer)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pydantic import validate_call
 from multistack import Inference, RKE2Node
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(inference: Inference, nodes: Optional[List[RKE2Node]]) -> str:
@@ -28,16 +28,18 @@ def _render_script(inference: Inference, nodes: Optional[List[RKE2Node]]) -> str
     `nodes` is optional (unlike Storage's, which is required) -- the
     real SDK only uses it to check prerequisites and pick a CPU dtype;
     without it, create() still works, it just skips that check."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(inference).items() if k != "options"]
-    if inference.options is not None:
-        opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(inference.options).items())
-        field_lines.append(f"    options={type(inference.options).__name__}({opt_args}),")
-
+    field_lines = dumped_lines(inference, dump(inference), skip=("options",))
     core_names = "Inference, InferenceBackend, RKE2Node" if nodes else "Inference, InferenceBackend"
-    imports = [
-        f"from multistack import {core_names}",
-        "from multistack.inference import VLLMOptions",
-    ]
+    imports = [f"from multistack import {core_names}"]
+    if inference.options is not None:
+        # Whichever options class `type` actually selected -- VLLMOptions,
+        # LlamaCppOptions or KServeOptions -- not hardcoded to one, same
+        # reasoning as mcp_tools.policy._render_script: a script importing
+        # the wrong class name constructs one that was never imported.
+        options_cls = type(inference.options).__name__
+        imports.append(f"from multistack.inference import {options_cls}")
+        opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(inference.options).items())
+        field_lines.append(f"    options={options_cls}({opt_args}),")
     body = [
         "inference = Inference(",
         "\n".join(field_lines),
@@ -77,7 +79,7 @@ def build_inference_plan(inference: Inference, nodes: Optional[List[RKE2Node]] =
     `gpu_count` on a CPU device, and never invent a GPU count the user
     didn't give.
 
-    To serve weights already in MinIO instead of pulling from a model
+    To serve weights already in SeaweedFS instead of pulling from a model
     registry, set `model` to an `s3://bucket/path` address, plus
     `s3_endpoint_url` and `s3_secret_name` (the Secret holding
     AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) -- all three or none; the

@@ -20,7 +20,7 @@ from pydantic import validate_call
 from multistack.accelerator import Accelerator
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(accelerator: Accelerator) -> str:
@@ -28,7 +28,7 @@ def _render_script(accelerator: Accelerator) -> str:
     script that installs it -- same reasoning as
     mcp_tools.rke2._render_script: built from the validated object's own
     fields, not a hand-typed template that could silently drop one."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(accelerator).items() if k != "options"]
+    field_lines = dumped_lines(accelerator, dump(accelerator), skip=("options",))
 
     imports = ["from multistack.accelerator import Accelerator, AcceleratorBackend"]
     if accelerator.options is not None:

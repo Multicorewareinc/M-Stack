@@ -65,22 +65,32 @@ def _with_replay_status(chat_openai):
     return ResponsesChatOpenAI
 
 
-def get_chat_model() -> BaseChatModel:
+def get_chat_model(*, temperature: float | None = None) -> BaseChatModel:
     """Constructs the configured chat model, reading LLM_PROVIDER/LLM_MODEL
     from the environment (see module docstring). Raises ValueError for an
-    unrecognized provider rather than silently falling back to one."""
+    unrecognized provider rather than silently falling back to one.
+
+    `temperature`, when given, overrides LLM_TEMPERATURE for this one
+    instance -- for a judgement call (selection, source_check,
+    request_check: "which of these applies", not prose to write), where
+    the same input landing on a different answer from one call to the
+    next is noise, not variety worth keeping. The conversational loop
+    (call_model) still gets the configured or provider-default
+    temperature; only these narrower judgement calls ask for their own."""
     provider = os.environ.get("LLM_PROVIDER", "groq").lower()
     model = os.environ.get("LLM_MODEL") or None
 
     if provider == "groq":
         from langchain_groq import ChatGroq
 
-        return ChatGroq(model=model or "openai/gpt-oss-20b", max_tokens=DEFAULT_MAX_TOKENS)
+        sampling = {"temperature": temperature} if temperature is not None else {}
+        return ChatGroq(model=model or "openai/gpt-oss-20b", max_tokens=DEFAULT_MAX_TOKENS, **sampling)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=model or "claude-opus-5", max_tokens=DEFAULT_MAX_TOKENS)
+        sampling = {"temperature": temperature} if temperature is not None else {}
+        return ChatAnthropic(model=model or "claude-opus-5", max_tokens=DEFAULT_MAX_TOKENS, **sampling)
 
     if provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -102,12 +112,22 @@ def get_chat_model() -> BaseChatModel:
         # no /v1/responses at all.
         use_responses_api = os.environ.get("LLM_USE_RESPONSES_API", "").lower() in ("1", "true", "yes")
         chat_cls = _with_replay_status(ChatOpenAI) if use_responses_api else ChatOpenAI
+        # The explicit override wins; otherwise LLM_TEMPERATURE; otherwise
+        # the server's own default applies -- 1.0 for gpt-oss on vLLM,
+        # which words the same answer differently on every request.
+        if temperature is not None:
+            sampling = {"temperature": temperature}
+        elif os.environ.get("LLM_TEMPERATURE"):
+            sampling = {"temperature": float(os.environ["LLM_TEMPERATURE"])}
+        else:
+            sampling = {}
         return chat_cls(
             model=model or "gpt-5",
             max_tokens=DEFAULT_MAX_TOKENS,
             base_url=base_url,
             api_key=api_key,
             use_responses_api=use_responses_api,
+            **sampling,
         )
 
     if provider == "ollama":
@@ -129,10 +149,12 @@ def get_chat_model() -> BaseChatModel:
         # request silently doesn't fit otherwise, which surfaced in
         # practice as the model hanging rather than a clean error.
         # 16384 leaves headroom for a multi-turn conversation too.
+        sampling = {"temperature": temperature} if temperature is not None else {}
         return ChatOllama(
             model=model or "qwen2.5:7b",
             num_predict=DEFAULT_MAX_TOKENS,
             num_ctx=16384,
+            **sampling,
         )
 
     raise ValueError(

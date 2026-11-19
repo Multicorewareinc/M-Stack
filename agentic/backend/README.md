@@ -8,7 +8,7 @@ any target, with no exceptions. Running the script it produces is
 entirely up to whoever receives it.
 
 This layer is written to be **resource-agnostic**. It has seventeen
-resources registered today — RKE2 clusters, block storage, MinIO,
+resources registered today — RKE2 clusters, block storage, SeaweedFS object storage,
 inference (vLLM), the model gateway, rate-limiting policy (rpm/tpm),
 the ingress gateway (MetalLB + Istio), Valkey, CNPG/PostgreSQL,
 observability (kube-prometheus-stack), the tokenizer, the control
@@ -44,13 +44,64 @@ scope this is deliberately kept to.
 | **Orchestration (LangGraph)** | Decides whether/when to call a tool, retries on failure, hands back the model's final reply | No — has zero resource-specific logic anywhere |
 
 The one thing that *is* resource-specific is each tool function itself
-(`mcp_tools/rke2.py`, `storage.py`, `minio.py`, `inference.py`, `gateway.py`,
+(`mcp_tools/rke2.py`, `storage.py`, `seaweedfs.py`, `inference.py`, `gateway.py`,
 `policy.py`, `ingress_gateway.py`, `valkey.py`, `cnpg.py`, `observability.py`,
 `tokenizer.py`, `controlplane.py`, `portal.py`) and its matching SKILL.md content — by design, that's the only part
 that should ever need to change when a new resource is added. `mcp_tools/full_stack.py`
 is the one exception worth knowing about: it composes multiple
 resources via the SDK's `Stack` object, so it necessarily knows about
 more than one resource at a time — see its own module docstring for why.
+
+## How a turn asks the user for something
+
+The model fills in the plan. What to ask the user, and how, is decided in
+code from what the tool itself reports, so a question never depends on how
+the model happens to word a reply.
+
+1. A request to build or change something goes to its tool first, with
+   whatever the user gave. A question written before any tool call is held
+   back once and the model is told to call the tool.
+2. [`src/orchestration/needs.py`](src/orchestration/needs.py) reads the call
+   once and reports everything it still needs, together:
+   - **values** only the user can give (a name, a secret, a password, the
+     kubeconfig of an existing cluster),
+   - **choices** the user has to make (new cluster or existing one; a field
+     a skill flags with `must_ask`),
+   - **corrections** the model can make itself (a missing dependency, a
+     value the SDK rejects, a plan that contradicts the request).
+3. Corrections go back to the model, with the values that will be needed
+   once they are made. A choice pauses the turn and is offered as options.
+   Values are asked for in one message.
+4. The model words the question for the values. The reply is checked before
+   it goes out: a value it left out is added, and wording that asks for a
+   field the system fills in itself, or that strays off topic, is replaced
+   by a plain list of the values.
+5. An answer to a pause is taken in like any new message: skills and tools
+   are selected again for it and the turn budget starts over.
+
+A plan that left a `type` at its default where the SDK lists alternatives
+says so in the reply ("Assumed, since the request didn't say: ...").
+
+A skill makes a choice the user's by naming the field in its frontmatter.
+The options come from the SDK; the question and the wordings that count as
+stating an option are optional:
+
+```
+must_ask: type | Requests or tokens? | rpm = requests per minute; tpm = tokens per minute
+```
+
+A field left at its default while the user's words name another of its
+options is sent back to the model before anything is built: "a server node
+and two agent nodes" with no `role` on any node would otherwise build three
+servers. The options are the SDK's own for a component's `type`. For a
+field the SDK checks without listing its values, the skill lists them:
+
+```
+options: role | server, agent
+```
+
+A field the plan states explicitly is the model's decision and is not
+corrected a second time.
 
 ## Directory layout
 
@@ -88,7 +139,9 @@ agentic/backend/
     mcp_tools/
       rke2.py                       build_rke2_cluster_plan
       storage.py                     build_storage_plan
-      minio.py                        build_minio_plan
+      seaweedfs.py                    build_seaweedfs_plan (object storage)
+      minio.py                        build_minio_plan -- kept, not registered
+                                        (MinIO was replaced by SeaweedFS)
       inference.py                     build_inference_plan
       gateway.py                        build_gateway_plan
       policy.py                          build_policy_plan
@@ -106,7 +159,7 @@ agentic/backend/
                                                kube_prometheus_stack
                                                (Prometheus/Alertmanager/
                                                Grafana); requires storage,
-                                               same as MinIO
+                                               same as SeaweedFS
       tokenizer.py                          build_tokenizer_plan -- a
                                               token-counting service; its
                                               endpoint wires into a
@@ -129,7 +182,7 @@ agentic/backend/
                                               Stack; four combinations
                                               auto-wire (see its own module
                                               docstring): valkey->policy
-                                              cache_url, minio->inference
+                                              cache_url, seaweedfs->inference
                                               s3_endpoint_url, tokenizer->
                                               tpm policy tokenizer_url, and
                                               controlplane->portal
@@ -144,13 +197,25 @@ agentic/backend/
                                         needs, from the triggers each
                                         SKILL.md declares about itself --
                                         no hand-maintained keyword list
+      grounding.py                    Asks the RAG service for source
+                                        passages per message, behind
+                                        RAG_ENABLED; never raises
+      needs.py                        What one tool call still needs:
+                                        values and choices for the user,
+                                        corrections for the model
+      source_check.py                 Checks a plan's values against the
+                                        services' own code (RAG on)
+      request_check.py                Checks a plan's values against what
+                                        the user asked for
+      scope_check.py                  Keeps an off-topic reply from going
+                                        out
       tools.py                        Wraps each mcp_tools/ function for
                                         in-process use by the orchestrator
     skills/
       <resource-name>/SKILL.md      Domain rules for one resource -- e.g.
                                       skills/rke2-cluster/SKILL.md,
                                       skills/storage/SKILL.md,
-                                      skills/minio/SKILL.md,
+                                      skills/seaweedfs/SKILL.md,
                                       skills/gateway/SKILL.md,
                                       skills/policy/SKILL.md,
                                       skills/ingress-gateway/SKILL.md,
@@ -165,8 +230,13 @@ agentic/backend/
       chat.py                        Interactive REPL for manual/live testing
       agentic_orchestration.py        Scripted example run
   tests/                           conftest.py (fake orchestration graph,
-                                     offline) + tests for each mcp_tools/
-                                     module and the HTTP service
+                                     offline; retrieval forced off) + tests
+                                     for each mcp_tools/ module, the HTTP
+                                     service and grounding.py
+    eval/                          Scored question sets: cases.py, and
+                                     run_live.py / score_retrieval.py to
+                                     run them against a live agent or the
+                                     RAG service
 ```
 
 ## Adding a new resource type
@@ -225,8 +295,19 @@ Fill in `agentic/backend/.env`:
 - The matching API key for that provider (`GROQ_API_KEY`, etc.)
 - `SERVICE_API_KEY` — required for `src/main.py`; generate one with
   `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+- Optional, for reference search: `RAG_ENABLED`, `RAG_SERVICE_URL`,
+  `RAG_SERVICE_API_KEY`, `RAG_TIMEOUT_SECONDS` (see below)
+- Optional, to keep conversations across restarts: `AGENTIC_STATE_DB`,
+  the path of a SQLite file
 
 ## Running it
+
+**Everything at once, for local use** (search database, RAG service, this
+backend on :8000 and the console on :5175). Safe to run again at any time,
+for example after a reboot: a part that is already up is left alone.
+```bash
+agentic/dev.sh start      # also: stop, status
+```
 
 **Interactive chat** (manual testing, demos — talks to the orchestrator
 directly, no server needed):
@@ -247,6 +328,28 @@ cd agentic/backend/src && uvicorn main:create_app --factory --host 0.0.0.0 --por
 ```
 See the docstring at the top of [`src/main.py`](src/main.py) for the
 full endpoint list and request/response shapes.
+
+**With reference search (RAG).** Off by default. With it on, each message
+is sent to the RAG service
+([`api/microservices/rag`](../../api/microservices/rag/README.md)), and the
+SDK and service source it finds is added to that turn's model call only,
+never to the stored conversation. The stream emits a `sources` event before
+the first model call, and the console shows the files read as "Reference
+read". Retrieval changes only what the model reads: tool selection,
+dependency composition and plan validation are untouched. Any failure
+(service unset, down, slow, or erroring) leaves the turn exactly as it
+would be without RAG.
+
+```
+RAG_ENABLED=true
+RAG_SERVICE_URL=http://localhost:8020
+RAG_SERVICE_API_KEY=<the RAG service's SERVICE_API_KEY>
+# RAG_TIMEOUT_SECONDS=8
+```
+
+The RAG service's README covers running it and its database. Set
+`RAG_ENABLED=false` and restart to turn it off; start a new chat, since a
+saved turn keeps its trace.
 
 **The standalone MCP server** (for an external MCP client — Claude
 Desktop, another AI tool — to reach the same tool directly, over the
@@ -275,6 +378,22 @@ further for the composed tool: it actually `exec()`s a generated script
 (with only the real infra calls stubbed) to prove the `Stack` wiring
 between layers resolves correctly, not just that the script's syntax is
 valid.
+
+**Live evaluation** (a real model; not part of the automated suite). One
+command runs the script-generation cases with retrieval off and on, on its
+own agent on :8011, and scores both:
+```bash
+bash tests/eval/run_all.sh                      # the cases the agent was developed against
+CASES=fresh:7 bash tests/eval/run_all.sh        # a generated set of new requests, for seed 7
+```
+`tests/eval/script_cases.py` is the hand-written set. `tests/eval/fresh_cases.py`
+generates another from a seed: what to build, on which cluster, one or two
+settings in a user's words, and the names and secrets a user would give are
+all drawn, and the expected plan is assembled from the same parts. Every
+seed gives a different set, so the agent can be measured on requests it has
+never been run on; `tests/test_fresh_cases.py` holds a generated set to the
+same checks as the hand-written one. A case counts as right only if every
+one of its runs is.
 
 `test_sdk_sync_capabilities.py` is the drift guard across all thirteen
 resources (`test_sdk_sync_rke2.py` is the older, RKE2-specific version
@@ -314,35 +433,56 @@ within.
 
 ## Known limitations
 
-- **State is in-memory only.** Sessions are lost on restart. See
-  `docs/architecture-decision.md` Phase D.
+- **State is in memory unless `AGENTIC_STATE_DB` names a file.** In
+  memory, sessions are lost on restart. With the setting they are kept in
+  that SQLite file, a question still waiting for its answer included; one
+  file serves one backend process, not several.
 - **One shared API key**, not per-user accounts or role-based access.
   See Phase F.
 - **No locking** around shared state — a real concern once more than
   one caller uses this at once.
-- **Every capability the SDK currently ships is registered here** (17
-  resources plus the composed whole-stack tool). One platform component is
-  deliberately absent, because there is nothing in the SDK to wrap:
-  **NATS**, which the SDK never deploys — it's referenced only as an
-  external URL (`event_backbone_url`) that the gateway, the enricher,
-  the limiters and billing all point at. The pattern above is what keeps adding more from requiring changes
-  to `orchestration/` or `service.py`.
-- **Skills and tools are selected per request, by literal matching.**
-  Loading all thirteen SKILL.md files and binding all fourteen tool
-  schemas costs ~48,000 tokens before the user has typed anything — more
-  than the 32,768-token context of the model this layer runs against, so
-  every request overflowed. `orchestration/selection.py` now picks only
-  what a request needs (typically 3,000–25,000 tokens, hard-capped below
-  a budget so it cannot overflow again). This is the Phase C selection
-  step from `docs/architecture-decision.md`, done by matching the trigger
-  terms each SKILL.md already declares in its own frontmatter rather than
-  by embeddings — no index to build, nothing to call at run time.
-  Embeddings remain the better answer once ranking, not just matching, is
-  what the skill set needs.
+- **Every capability the SDK currently ships is registered here** (19
+  resources, NATS as `queue` and SeaweedFS object storage among them,
+  plus the composed whole-stack tool). MinIO is no longer offered: the
+  platform replaced it with SeaweedFS, since MinIO's images now need an
+  authenticated pull. Its tool (`mcp_tools/minio.py`) and skill note are
+  kept for reuse but switched off: the tool is not registered, and the
+  skill note has `enabled: false` in its frontmatter, which makes
+  `load_skills()` skip it. To bring it back, set that to true and register
+  the tool in `orchestration/tools.py`, `selection.py` and `mcp_server.py`. The pattern above is what keeps adding more from requiring
+  changes to `orchestration/` or `service.py`. The RAG service is not one
+  of them yet: it has no SDK capability, so the agent can call it but
+  cannot plan its deployment.
+- **Skills and tools are selected per request, by a model call.** Loading
+  every SKILL.md and binding every tool schema costs more than the prompt
+  can hold, so `orchestration/selection.py` picks only what a request
+  needs and trims it to `LLM_PROMPT_BUDGET_TOKENS`. The chat model reads
+  each skill's own description and names the components the request asks
+  for; with RAG on, each description carries its match score as a hint.
+  Matching the trigger words in those descriptions is the fallback when
+  that call fails. This is the Phase C selection step from
+  `docs/architecture-decision.md`.
+- **A vague request is not asked which component it means.** The pause
+  meant for that (`selection_ambiguity`, `confirm_selection`) reads the RAG
+  match score and does not fire: measured on 2026-10-13, none of the 46
+  evaluation requests and none of 5 deliberately vague ones ("Make it
+  store things.") fell in its band, because a clear request that names
+  several components scores in the same range (0.40–0.63) as a vague one
+  (0.55–0.59). Having the selection call list the components it is unsure
+  of was tried on the same five and flagged them in 4 of 10 trials. What
+  happens instead: the agent settles on the closest component and asks
+  for what that component needs. In all 5, nothing was built before a
+  question was asked.
+- **A question is checked by code only after a tool call.** A question the
+  model writes before calling any tool is held back once; if it asks
+  again without calling the tool, that wording goes out as written, so it
+  can leave out a value the tool would have listed.
 
 ## Roadmap
 
 See [`../../docs/architecture-decision.md`](../../docs/architecture-decision.md)
 for the full phased plan (MCP -> LangGraph -> RAG, in that order, each
 adopted when its own trigger fires) and the reasoning behind every
-choice made in this layer.
+choice made in this layer. The RAG step is built as its own service,
+[`api/microservices/rag`](../../api/microservices/rag/README.md), which
+this layer calls behind `RAG_ENABLED`.

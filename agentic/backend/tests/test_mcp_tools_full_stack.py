@@ -8,8 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from mcp_tools.full_stack import build_full_stack_plan
-from multistack.backends.minio_client import MinIOBackend
 from multistack.backends.rke2_client import RKE2Backend
+from multistack.backends.seaweedfs_client import SeaweedFSBackend
 from multistack.database import DatabaseBackend
 from multistack.cache import CacheBackend
 from multistack.controlplane.registry import ControlPlaneBackend
@@ -25,12 +25,12 @@ from multistack.tokenizer.registry import TokenizerBackend
 
 BASE_CLUSTER = {"name": "ai-cluster", "nodes": [{"address": "10.0.0.11", "role": "server"}], "cni": "cilium"}
 STORAGE_ARGS = {"type": "longhorn", "kubeconfig_path": "placeholder", "replica_count": 1}
-MINIO_ARGS = {
+SEAWEEDFS_ARGS = {
     "kubeconfig_path": "placeholder",
-    "name": "minio-test",
+    "name": "weights",
     "storage_class": "placeholder",
-    "servers": 2,
-    "volumes_per_server": 2,
+    "volume_replicas": 2,
+    "replication": "001",
 }
 GATEWAY_ARGS = {
     "kubeconfig_path": "placeholder",
@@ -41,6 +41,9 @@ GATEWAY_ARGS = {
 POLICY_ARGS = {
     "kubeconfig_path": "placeholder",
     "cache_url": "redis://valkey.platform.svc:6379/0",
+    # Required once a plan composes its own Valkey (see
+    # invented_values()): that chart's auth is on by default.
+    "cache_auth_url": "redis://:test-pass@valkey.platform.svc:6379/0",
     "allow_no_backbone": True,
     "limits": {"user_default": 60},
 }
@@ -74,6 +77,7 @@ TOKENIZER_ARGS = {
 TPM_POLICY_ARGS = {
     "kubeconfig_path": "placeholder",
     "cache_url": "redis://valkey.platform.svc:6379/0",
+    "cache_auth_url": "redis://:test-pass@valkey.platform.svc:6379/0",
     "allow_no_backbone": True,
     "type": "tpm",
     "limits": {"user_default": 60},
@@ -129,10 +133,11 @@ def run_script(script: str, **returns) -> dict:
     class name."""
     from contextlib import ExitStack
 
-    from multistack import BillingBackend, QueueBackend
+    from multistack import BillingBackend
+    from multistack.queue.registry import QueueBackend
 
     backends = [
-        RKE2Backend, StorageBackend, MinIOBackend, InferenceBackend, CacheBackend,
+        RKE2Backend, StorageBackend, SeaweedFSBackend, InferenceBackend, CacheBackend,
         DatabaseBackend, ObservabilityBackend, QueueBackend, TokenizerBackend,
         EnricherBackend, PolicyBackend, GatewayBackend, IngressGatewayBackend,
         ControlPlaneBackend, PortalBackend, BillingBackend,
@@ -146,6 +151,16 @@ def run_script(script: str, **returns) -> dict:
         namespace: dict = {}
         exec(compile(script, "<generated>", "exec"), namespace)
     return namespace
+
+
+def test_the_docstring_says_which_cluster_each_storage_field_is_for():
+    # Regression: the old wording ("storage, or existing_storage_class on
+    # an existing cluster") read as either field working anywhere, and the
+    # model composed `storage` onto an existing cluster repeatedly before
+    # the rejection taught it otherwise.
+    doc = build_full_stack_plan.__doc__
+    assert "a NEW `cluster` needs `storage`" in doc
+    assert "an EXISTING cluster" in doc and "needs `existing_storage_class`" in doc
 
 
 def test_cluster_only_needs_no_other_layer():
@@ -162,14 +177,8 @@ def test_cluster_and_storage():
     assert result["valid"] is True
     assert result["layers"] == ["rke2", "storage"]
     assert "stack.build(\n    Storage," in result["script"]
-    assert "MinIOTenant" not in result["script"]
+    assert "SeaweedFSCluster" not in result["script"]
     compile(result["script"], "<rendered>", "exec")
-
-
-def test_minio_without_storage_is_rejected():
-    result = build_full_stack_plan(cluster=BASE_CLUSTER, minio=MINIO_ARGS)
-    assert result["valid"] is False
-    assert "storage" in result["error"]
 
 
 def test_cluster_only_has_no_gateway_or_policy_endpoint():
@@ -186,14 +195,14 @@ def test_gateway_and_policy_endpoints_are_real_computed_values():
     result = build_full_stack_plan(
         cluster=BASE_CLUSTER, gateway=GATEWAY_ARGS, policy=POLICY_ARGS, **GATEWAY_BASELINE_KWARGS,
     )
-    assert result["gateway_endpoint"] == "http://gateway-model-gateway.gateway.svc:8080"
-    assert result["policy_endpoint"] == "http://rpm-rate-limiter-rpm.policy.svc:8000/check"
+    assert result["gateway_endpoint"] == "http://gateway-model-gateway.gateway.svc.cluster.local:8080"
+    assert result["policy_endpoint"] == "http://rpm-rate-limiter-rpm.policy.svc.cluster.local:8000/check"
 
 
 def test_gateway_requires_an_organization_control_plane():
     """Every request is verified synchronously against it
     (org_cp_internal_url); without one, gateway is deployed, healthy,
-    and rejects every real request. Unlike minio's storage requirement,
+    and rejects every real request. Unlike seaweedfs's storage requirement,
     this cascades: composing an organization controlplane already
     requires a real database and cache (see that check), which is the
     platform's own baseline satisfied by this one rule."""
@@ -521,8 +530,8 @@ def test_inference_placeholder_kubeconfig_never_leaks_but_model_is_real():
     assert "Qwen/Qwen2.5-0.5B-Instruct" in result["script"]
 
 
-def test_inference_without_minio_renders_s3_fields_as_literal_none():
-    # No minio composed and no s3 model -- s3_endpoint_url/s3_secret_name
+def test_inference_without_seaweedfs_renders_s3_fields_as_literal_none():
+    # No seaweedfs composed and no s3 model -- s3_endpoint_url/s3_secret_name
     # have no placeholder role to play here, so they render as their
     # real (unset) value, same as any other field would.
     result = build_full_stack_plan(cluster=BASE_CLUSTER, inference=INFERENCE_ARGS)
@@ -531,36 +540,36 @@ def test_inference_without_minio_renders_s3_fields_as_literal_none():
     assert "s3_secret_name=None" in result["script"]
 
 
-def test_inference_with_minio_and_s3_model_treats_s3_endpoint_url_as_a_placeholder():
+def test_inference_with_seaweedfs_and_s3_model_treats_s3_endpoint_url_as_a_placeholder():
     # The one case s3_endpoint_url joins kubeconfig_path as a REQUIRED
-    # placeholder: minio also composed, model is an s3:// path. The SDK
+    # placeholder: seaweedfs also composed, model is an s3:// path. The SDK
     # requires a real-looking value at construction, so the caller still
     # passes one (here, the same "placeholder" sentinel used for
     # kubeconfig_path elsewhere) -- but it must never survive into the
     # rendered script, since Stack fills the real one from the recorded
-    # MinIO tenant instead. s3_secret_name is NEVER a placeholder, so
+    # SeaweedFS cluster instead. s3_secret_name is NEVER a placeholder, so
     # the real value given for it must survive.
     result = build_full_stack_plan(
-        cluster=BASE_CLUSTER, storage=STORAGE_ARGS, minio=MINIO_ARGS,
+        cluster=BASE_CLUSTER, storage=STORAGE_ARGS, seaweedfs=SEAWEEDFS_ARGS,
         inference={
             **INFERENCE_ARGS,
             "model": "s3://models/Qwen2.5-0.5B",
             "s3_endpoint_url": "placeholder",
-            "s3_secret_name": "minio-creds",
+            "s3_secret_name": "seaweedfs-creds",
         },
     )
     assert result["valid"] is True
     assert "placeholder" not in result["script"]
-    assert "s3_secret_name='minio-creds'" in result["script"]
+    assert "s3_secret_name='seaweedfs-creds'" in result["script"]
     compile(result["script"], "<rendered>", "exec")
 
 
-def test_inference_with_minio_but_non_s3_model_never_treats_s3_endpoint_url_as_a_placeholder():
-    # minio being present is NOT enough on its own -- a non-s3 model
+def test_inference_with_seaweedfs_but_non_s3_model_never_treats_s3_endpoint_url_as_a_placeholder():
+    # seaweedfs being present is NOT enough on its own -- a non-s3 model
     # must never get an auto-wired s3_endpoint_url, since the real SDK
     # rejects s3_endpoint_url being set on a non-s3 model outright.
     result = build_full_stack_plan(
-        cluster=BASE_CLUSTER, storage=STORAGE_ARGS, minio=MINIO_ARGS, inference=INFERENCE_ARGS,
+        cluster=BASE_CLUSTER, storage=STORAGE_ARGS, seaweedfs=SEAWEEDFS_ARGS, inference=INFERENCE_ARGS,
     )
     assert result["valid"] is True
     assert "s3_endpoint_url=None" in result["script"]
@@ -568,8 +577,8 @@ def test_inference_with_minio_but_non_s3_model_never_treats_s3_endpoint_url_as_a
     compile(result["script"], "<rendered>", "exec")
 
 
-def test_inference_with_s3_model_but_no_minio_renders_s3_endpoint_url_literally():
-    # Without minio composed, there's nothing to auto-wire s3_endpoint_url
+def test_inference_with_s3_model_but_no_seaweedfs_renders_s3_endpoint_url_literally():
+    # Without seaweedfs composed, there's nothing to auto-wire s3_endpoint_url
     # from at all -- even for an s3:// model, it's a real field like any
     # other and the caller's real value must survive as-is.
     result = build_full_stack_plan(
@@ -577,12 +586,12 @@ def test_inference_with_s3_model_but_no_minio_renders_s3_endpoint_url_literally(
         inference={
             **INFERENCE_ARGS,
             "model": "s3://models/Qwen2.5-0.5B",
-            "s3_endpoint_url": "https://external-minio.example.com",
+            "s3_endpoint_url": "https://external-s3.example.com",
             "s3_secret_name": "external-creds",
         },
     )
     assert result["valid"] is True
-    assert "s3_endpoint_url='https://external-minio.example.com'" in result["script"]
+    assert "s3_endpoint_url='https://external-s3.example.com'" in result["script"]
     assert "s3_secret_name='external-creds'" in result["script"]
     compile(result["script"], "<rendered>", "exec")
 
@@ -590,13 +599,13 @@ def test_inference_with_s3_model_but_no_minio_renders_s3_endpoint_url_literally(
 def test_placeholder_kubeconfig_and_storage_class_never_appear_in_the_script():
     # The whole point of the FROM_STACK-based exclusion (see
     # full_stack.py's module docstring): whatever placeholder the caller
-    # passes for storage.kubeconfig_path / minio.kubeconfig_path /
-    # minio.storage_class must never leak into the generated script --
+    # passes for storage.kubeconfig_path / seaweedfs.kubeconfig_path /
+    # seaweedfs.storage_class must never leak into the generated script --
     # Stack supplies the real values at run time instead.
     result = build_full_stack_plan(
         cluster=BASE_CLUSTER,
         storage={**STORAGE_ARGS, "kubeconfig_path": "SENTINEL-STORAGE-KC"},
-        minio={**MINIO_ARGS, "kubeconfig_path": "SENTINEL-MINIO-KC", "storage_class": "SENTINEL-STORAGE-CLASS"},
+        seaweedfs={**SEAWEEDFS_ARGS, "kubeconfig_path": "SENTINEL-SEAWEEDFS-KC", "storage_class": "SENTINEL-STORAGE-CLASS"},
     )
     assert result["valid"] is True
     assert "SENTINEL" not in result["script"]
@@ -607,20 +616,22 @@ def test_full_stack_script_actually_executes_with_correct_wiring():
     # (with only the real infra calls stubbed) and confirm Stack really
     # threads the cluster's kubeconfig and storage's StorageClass through
     # to the next layer, not the placeholders that were passed in.
-    result = build_full_stack_plan(cluster=BASE_CLUSTER, storage=STORAGE_ARGS, minio=MINIO_ARGS)
+    result = build_full_stack_plan(cluster=BASE_CLUSTER, storage=STORAGE_ARGS, seaweedfs=SEAWEEDFS_ARGS)
     assert result["valid"] is True
 
     with patch.object(RKE2Backend, "create", return_value="/tmp/fake-kubeconfig.yaml"), \
          patch.object(StorageBackend, "install_prerequisites", return_value=None), \
          patch.object(StorageBackend, "create", return_value="longhorn"), \
-         patch.object(MinIOBackend, "create", return_value={"endpoint": "https://minio.minio.svc.cluster.local"}):
+         patch.object(SeaweedFSBackend, "create", return_value=None):
         namespace = {}
         exec(compile(result["script"], "<generated>", "exec"), namespace)
 
     assert namespace["storage"].kubeconfig_path == "/tmp/fake-kubeconfig.yaml"
-    assert namespace["tenant"].kubeconfig_path == "/tmp/fake-kubeconfig.yaml"
-    assert namespace["tenant"].storage_class == "longhorn"
-    assert namespace["stack"].outputs["s3_endpoint_url"] == "https://minio.minio.svc.cluster.local"
+    assert namespace["objectstore"].kubeconfig_path == "/tmp/fake-kubeconfig.yaml"
+    assert namespace["objectstore"].storage_class == "longhorn"
+    assert namespace["stack"].outputs["s3_endpoint_url"] == (
+        "http://weights-seaweedfs-s3.seaweedfs.svc.cluster.local:8333"
+    )
 
 
 def test_gateway_script_actually_executes_with_correct_wiring():
@@ -632,13 +643,13 @@ def test_gateway_script_actually_executes_with_correct_wiring():
          patch.object(DatabaseBackend, "create", return_value=None), \
          patch.object(DatabaseBackend, "create_cluster", return_value=None), \
          patch.object(ControlPlaneBackend, "create", return_value=None), \
-         patch.object(GatewayBackend, "create", return_value="http://gateway-model-gateway.gateway.svc:8080"):
+         patch.object(GatewayBackend, "create", return_value="http://gateway-model-gateway.gateway.svc.cluster.local:8080"):
         namespace = {}
         exec(compile(result["script"], "<generated>", "exec"), namespace)
 
     assert namespace["gateway"].kubeconfig_path == "/tmp/fake-kubeconfig.yaml"
     assert namespace["gateway"].api_key_secret == "gateway-keys"
-    assert namespace["stack"].outputs["gateway_endpoint"] == "http://gateway-model-gateway.gateway.svc:8080"
+    assert namespace["stack"].outputs["gateway_endpoint"] == "http://gateway-model-gateway.gateway.svc.cluster.local:8080"
 
 
 def test_gateway_upstream_url_wires_from_a_composed_inference():
@@ -685,6 +696,37 @@ def test_policy_script_actually_executes_with_correct_wiring():
     assert namespace["stack"].outputs["policy_endpoint"] == namespace["policy"].endpoint
 
 
+def test_a_composed_valkeys_policy_must_be_given_a_real_cache_auth_url():
+    """The composed Valkey's chart enables auth by default (see
+    multistack/cache/spec.py); a policy beside it with no cache_auth_url
+    would get NOAUTH from that chart and silently enforce nothing."""
+    result = build_full_stack_plan(
+        cluster=BASE_CLUSTER,
+        policy={k: v for k, v in POLICY_ARGS.items() if k != "cache_auth_url"},
+        **POLICY_DEPS,
+    )
+    assert result["valid"] is False
+    assert "policy.cache_auth_url" in result["error"] and "Ask the user" in result["error"]
+
+
+def test_an_externally_supplied_cache_needs_no_cache_auth_url():
+    """Only a Valkey THIS plan composes is known to default to auth-on --
+    an existing external cache's auth is the user's own to know. Checked
+    directly against invented_values(): every real plan shape that gets
+    this far already composes valkey (controlplane requires it too), so
+    this configuration can't be reached through build_full_stack_plan
+    itself -- only the unit it's actually enforced in."""
+    from multistack import Policy
+
+    from mcp_tools.full_stack import invented_values
+
+    policy = Policy(
+        kubeconfig_path="placeholder", cache_url="redis://external.example.com:6379/0",
+        allow_no_backbone=True, limits={"user_default": 60},
+    )
+    assert invented_values({"valkey": None, "policy": policy}) == []
+
+
 def test_ingress_script_actually_executes_with_correct_wiring():
     result = build_full_stack_plan(cluster=BASE_CLUSTER, ingress=INGRESS_ARGS)
     assert result["valid"] is True
@@ -720,33 +762,6 @@ def test_inference_script_actually_executes_with_correct_wiring():
     assert namespace["inference"].kubeconfig_path == "/tmp/fake-kubeconfig.yaml"
     assert namespace["inference"].model == "Qwen/Qwen2.5-0.5B-Instruct"
     assert namespace["stack"].outputs["inference_endpoint"] == "http://vllm.inference.svc.cluster.local:8000"
-
-
-def test_inference_actually_receives_minios_real_s3_endpoint_at_runtime():
-    # The real payoff of the placeholder treatment: run cluster+storage+
-    # minio+inference together and confirm the Inference object Stack
-    # actually builds has MinIO's real (mocked) endpoint, not the
-    # placeholder string that was passed in and not None.
-    result = build_full_stack_plan(
-        cluster=BASE_CLUSTER, storage=STORAGE_ARGS, minio=MINIO_ARGS,
-        inference={
-            **INFERENCE_ARGS,
-            "model": "s3://models/Qwen2.5-0.5B",
-            "s3_endpoint_url": "placeholder",
-            "s3_secret_name": "minio-creds",
-        },
-    )
-    assert result["valid"] is True
-
-    with patch.object(RKE2Backend, "create", return_value="/tmp/fake-kubeconfig.yaml"), \
-         patch.object(StorageBackend, "install_prerequisites", return_value=None), \
-         patch.object(StorageBackend, "create", return_value="longhorn"), \
-         patch.object(MinIOBackend, "create", return_value={"endpoint": "https://minio.minio.svc.cluster.local"}), \
-         patch.object(InferenceBackend, "create", return_value="http://vllm.inference.svc.cluster.local:8000"):
-        namespace = {}
-        exec(compile(result["script"], "<generated>", "exec"), namespace)
-
-    assert namespace["inference"].s3_endpoint_url == "https://minio.minio.svc.cluster.local"
 
 
 def test_valkey_script_actually_executes_with_correct_wiring():
@@ -994,8 +1009,8 @@ def test_both_rate_limiters_compose_together():
     assert result["layers"].index("policy:rpm") < result["layers"].index("gateway")
     assert "policy:tpm" in result["layers"]
     assert result["policy_endpoints"] == {
-        "rpm": "http://rpm-rate-limiter-rpm.policy.svc:8000/check",
-        "tpm": "http://tpm-rate-limiter-tpm.policy.svc:8000/check",
+        "rpm": "http://rpm-rate-limiter-rpm.policy.svc.cluster.local:8000/check",
+        "tpm": "http://tpm-rate-limiter-tpm.policy.svc.cluster.local:8000/check",
     }
     # Distinct variables, or the second would overwrite the first.
     assert "policy_rpm = stack.build(" in result["script"]
@@ -1515,3 +1530,156 @@ def test_prepare_args_does_not_invent_an_upstream_without_inference():
 
     args = prepare_args({"controlplane": {"type": "organization"}, "gateway": {"api_key_secret": "k"}})
     assert "upstream_url" not in args["gateway"]
+
+
+# ---- SeaweedFS, the platform's object storage
+
+
+def test_seaweedfs_without_storage_is_rejected():
+    result = build_full_stack_plan(cluster=BASE_CLUSTER, seaweedfs=SEAWEEDFS_ARGS)
+    assert result["valid"] is False and "seaweedfs requires storage" in result["error"]
+
+
+def test_inference_actually_receives_seaweedfs_real_s3_endpoint_at_runtime():
+    result = build_full_stack_plan(
+        cluster=BASE_CLUSTER, storage=STORAGE_ARGS, seaweedfs=SEAWEEDFS_ARGS,
+        inference={
+            **INFERENCE_ARGS,
+            "model": "s3://models/Qwen2.5-0.5B",
+            "s3_endpoint_url": "placeholder",
+            "s3_secret_name": "seaweedfs-creds",
+        },
+    )
+    assert result["valid"] is True
+    assert "placeholder" not in result["script"]
+
+    with patch.object(RKE2Backend, "create", return_value="/tmp/fake-kubeconfig.yaml"), \
+         patch.object(StorageBackend, "install_prerequisites", return_value=None), \
+         patch.object(StorageBackend, "create", return_value="longhorn"), \
+         patch.object(SeaweedFSBackend, "create", return_value=None), \
+         patch.object(InferenceBackend, "create", return_value="http://vllm.inference.svc.cluster.local:8000"):
+        namespace = {}
+        exec(compile(result["script"], "<generated>", "exec"), namespace)
+
+    assert namespace["inference"].s3_endpoint_url == (
+        "http://weights-seaweedfs-s3.seaweedfs.svc.cluster.local:8333"
+    )
+
+
+def test_seaweedfs_on_an_existing_cluster_uses_its_storage_class():
+    result = build_full_stack_plan(
+        kubeconfig_path="/home/me/kc.yaml", existing_storage_class="longhorn", seaweedfs=SEAWEEDFS_ARGS
+    )
+    assert result["valid"] is True
+    assert "placeholder" not in result["script"]
+
+
+# ---- stand-ins for the user's real values are refused
+
+
+@pytest.mark.parametrize(
+    "override, field",
+    [
+        ({"cnpg": {**CNPG_WITH_DB_ARGS, "database": {"name": "appdb", "owner": "appuser", "password": "placeholder"}}}, "cnpg.database.password"),
+        ({"gateway": {**GATEWAY_ARGS, "api_key_secret": "<your-secret>"}}, "gateway.api_key_secret"),
+        ({"gateway": {**GATEWAY_ARGS, "upstream_url": "http://model.example.com/v1"}}, "gateway.upstream_url"),
+        ({"controlplane": {**CONTROLPLANE_ORG_ARGS, "existing_secret": "changeme"}}, "controlplane.existing_secret"),
+        ({"valkey": {**VALKEY_ARGS, "name": "placeholder"}}, "valkey.name"),
+    ],
+)
+def test_a_stand_in_for_a_real_value_is_refused_by_name(override, field):
+    result = build_full_stack_plan(cluster=BASE_CLUSTER, **{**REQUEST_PATH_KWARGS, **override})
+    assert result["valid"] is False
+    assert field in result["error"] and "Ask the user" in result["error"]
+    assert "script" not in result
+
+
+def test_an_existing_clusters_kubeconfig_path_must_be_real():
+    result = build_full_stack_plan(kubeconfig_path="placeholder", **REQUEST_PATH_KWARGS)
+    assert result["valid"] is False and "kubeconfig_path" in result["error"]
+
+
+def test_the_fields_this_tool_wires_may_still_be_stand_ins():
+    """A component's own kubeconfig_path is filled from the stack, so a
+    stand-in there is what the tool asks for, not an invented value."""
+    from mcp_tools.full_stack import invented_values
+
+    assert invented_values({"gateway": None, "kubeconfig_path": None}) == []
+    assert invented_values({"kubeconfig_path": "/etc/rancher/rke2/rke2.yaml"}) == []
+
+
+# ---- a missing dependency is named before any field is validated
+
+
+def test_a_tpm_policy_alone_is_told_its_whole_chain():
+    from mcp_tools.full_stack import missing_dependencies
+
+    error = missing_dependencies(
+        {"kubeconfig_path": "/k", "policy": {"type": "tpm"}, "gateway": {"upstream_url": "u"}}
+    )
+    for component in ("cnpg", 'controlplane (type="organization")', "valkey", "queue", "enricher", "tokenizer"):
+        assert component in error
+    assert "existing_storage_class" in error and "never ask the user" in error
+
+
+def test_an_rpm_policy_does_not_need_the_enricher():
+    from mcp_tools.full_stack import missing_dependencies
+
+    error = missing_dependencies({"cluster": {}, "storage": {}, "policy": {"type": "rpm"}})
+    assert "gateway" in error and "enricher" not in error
+
+
+def test_a_policy_with_no_real_limit_is_rejected():
+    # Seen live: a request only describing the gateway's own fail-open
+    # behavior led the model to compose a Policy with no limits at all --
+    # 0/empty is unlimited, not blocked, so that enforces nothing.
+    from mcp_tools.full_stack import pointless_policy
+
+    error = pointless_policy({"policy": {"type": "rpm"}})
+    assert error is not None and "no real limit" in error
+
+
+def test_a_policy_with_any_real_limit_is_not_rejected():
+    from mcp_tools.full_stack import pointless_policy
+
+    assert pointless_policy({"policy": {"type": "rpm", "limits": {"user_default": 60}}}) is None
+    assert pointless_policy(
+        {"policy": {"type": "tpm", "limits": {"model_overrides": {"llama-3.1-8b": 50000}}}}
+    ) is None
+    assert pointless_policy({"policy": None}) is None
+
+
+def test_a_complete_chain_with_default_components_passes():
+    from mcp_tools.full_stack import missing_dependencies
+
+    chain = {k: {} for k in ("cnpg", "valkey", "controlplane", "gateway", "queue", "enricher", "tokenizer")}
+    args = {"kubeconfig_path": "/k", "existing_storage_class": "longhorn", "policy": {"type": "tpm"}, **chain}
+    assert missing_dependencies(args) is None
+
+
+# ---- a plan that contradicts what the user said about model serving
+
+
+def test_a_new_model_server_is_refused_when_the_user_runs_one():
+    from mcp_tools.full_stack import against_the_user
+
+    error = against_the_user(
+        {"inference": {"model": "Qwen/Qwen2.5-0.5B-Instruct"}},
+        "Add TPM limits. Models on vLLM at http://vllm.models.svc:8000/v1.",
+    )
+    assert "http://vllm.models.svc:8000/v1" in error and "gateway.upstream_url" in error
+
+
+def test_a_model_the_user_never_named_is_refused():
+    from mcp_tools.full_stack import against_the_user
+
+    error = against_the_user({"inference": {"model": "Qwen/Qwen2.5-0.5B-Instruct"}}, "serve a model with vLLM")
+    assert "ask which model" in error
+
+
+def test_a_model_the_user_named_is_accepted():
+    from mcp_tools.full_stack import against_the_user
+
+    args = {"inference": {"model": "meta-llama/Llama-3.1-8B-Instruct"}}
+    assert against_the_user(args, "serve Llama-3.1-8B-Instruct with vLLM") is None
+    assert against_the_user({"gateway": {}}, "upstream is http://x:8000/v1") is None

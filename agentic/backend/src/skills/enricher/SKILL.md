@@ -1,6 +1,6 @@
 ---
 name: enricher
-description: Use this skill when the user's request mentions an enricher, token counting on events, enriched events, or guaranteeing a usage count for billing and token limits. Covers the real MultiStack SDK Enricher/EnricherBackend classes.
+description: Use this skill when the user's request mentions an enricher, token counting on events, enriched events, or guaranteeing a usage count for billing and the TPM limiter. Covers the real MultiStack SDK Enricher/EnricherBackend classes.
 ---
 
 # MultiStack SDK — Enricher / EnricherBackend
@@ -23,6 +23,7 @@ class EnricherOptions(BaseModel):
     chart: str = "api/microservices/enricher/chart"
     chart_version: Optional[str] = None
     image_tag: Optional[str] = None
+    image_repository: Optional[str] = None   # full image path; None = the chart's own registry. Set it only when the user names a registry or mirror
     event_stream_name: str = "GATEWAY_EVENTS"       # the RAW stream it consumes
     event_stream_subject: str = "gateway.events"
     durable_name: str = "enricher"
@@ -42,12 +43,14 @@ class Enricher(CapabilitySpec):
     event_backbone_url: str = ""      # required unless allow_no_backbone
     allow_no_backbone: bool = False
     replicas: int = 1                 # at most 1 -- see rules
+    affinity: Optional[Dict[str, Any]] = None
     node_selector: Optional[Dict[str, str]] = None
     tolerations: Optional[List[Dict[str, Any]]] = None
 ```
 
 Rules when generating code:
 - Every field above except `kubeconfig_path` has a default. Leave them at it unless the user asks for something specific -- never ask the user for ports, retry counts or timeouts.
+- `affinity`/`node_selector`/`tolerations` pin this service to a particular node — there is no in-cluster registry, so a service image exists only on the node it was imported to, and a pod scheduled elsewhere sits in `ImagePullBackOff`. Leave unset unless the user names the node — unset keeps the chart's own default (off the control plane); an explicit `{}` means "schedule anywhere", the only way a single-node cluster can actually schedule these pods.
 - `replicas` must be 1: the SDK rejects any other value (`ge=1, le=1`).
 - `kubeconfig_path` is required and has no ambient fallback — the SDK deliberately never reads `$KUBECONFIG`/`~/.kube/config`.
 - `event_backbone_url` is required **unless** `allow_no_backbone=True` is explicitly set. The enricher exists to consume one stream and publish another, so with no backbone it is deployed, healthy, and doing nothing — and the things downstream of it (a tpm limiter, and billing) then count **nothing at all** rather than erroring. Never set `allow_no_backbone=True` on your own judgement; only when the user explicitly asks to deploy ahead of the backbone.

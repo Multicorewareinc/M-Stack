@@ -25,11 +25,11 @@ def test_build_rejects_missing_kubeconfig_path():
 def test_build_script_includes_options_when_set():
     result = build_tokenizer_plan(tokenizer={
         "kubeconfig_path": "/tmp/kc.yaml",
-        "options": {"default_encoding": "o200k_base"},
+        "options": {"image_tag": "1.4.0"},
     })
     assert result["valid"] is True
     assert "TiktokenOptions(" in result["script"]
-    assert "default_encoding='o200k_base'" in result["script"]
+    assert "image_tag='1.4.0'" in result["script"]
     compile(result["script"], "<rendered>", "exec")
 
 

@@ -1,5 +1,5 @@
 """Whole-stack tool -- composes RKE2 + (optionally) Storage +
-(optionally) MinIO + (optionally) a GPU Accelerator + (optionally)
+(optionally) SeaweedFS object storage + (optionally) a GPU Accelerator + (optionally)
 Inference (model serving) + (optionally) Valkey + (optionally) CNPG
 (PostgreSQL) + (optionally) Observability (metrics/dashboards/alerting)
 + (optionally) a Tokenizer + (optionally) an Enricher (guarantees a
@@ -11,7 +11,7 @@ metering + Stripe) + (optionally) one or more Routes into ONE script,
 using the real SDK's Stack object to wire the layers together (see
 multistack/stack.py and examples/full_stack.py). For "build me a whole
 platform" requests, not just one resource; see mcp_tools/rke2.py,
-storage.py, minio.py, accelerator.py, inference.py, valkey.py, cnpg.py,
+storage.py, seaweedfs.py, accelerator.py, inference.py, valkey.py, cnpg.py,
 observability.py, tokenizer.py, enricher.py, gateway.py, policy.py,
 ingress_gateway.py, controlplane.py, portal.py, billing.py, route.py
 for adding one layer to infrastructure that already exists.
@@ -64,14 +64,14 @@ Cache.PROVIDES a real `cache_url` (see mcp_tools/valkey.py) -- so
 unlike Gateway/Policy (which never auto-link to each other), a
 composed Policy's `cache_url` IS wired in automatically from a
 composed `valkey` layer, the same way Inference's `s3_endpoint_url`
-wires in from a composed `minio` layer. See the SCOPE NOTE below for
+wires in from a composed `seaweedfs` layer. See the SCOPE NOTE below for
 exactly which field is a placeholder under which condition.
 
 SCOPE NOTE on kubeconfig_path/storage_class: Storage.kubeconfig_path,
-MinIOTenant.storage_class/kubeconfig_path, Inference.kubeconfig_path,
+SeaweedFSCluster.storage_class/kubeconfig_path, Inference.kubeconfig_path,
 Gateway.kubeconfig_path, Policy.kubeconfig_path, and
 IngressGateway.kubeconfig_path are REQUIRED fields on those types (so
-build_storage_plan/build_minio_plan/build_inference_plan/
+build_storage_plan/build_seaweedfs_plan/build_inference_plan/
 build_gateway_plan/build_policy_plan/build_ingress_gateway_plan can
 validate a real, already-known cluster). But a cluster this tool is ALSO
 building has no kubeconfig_path yet -- Stack fills it in for real, from
@@ -82,14 +82,14 @@ _render_script drops it entirely and lets Stack supply the real value
 at run time instead. Pass any non-empty string for it.
 
 Inference.s3_endpoint_url joins kubeconfig_path as a second REQUIRED
-placeholder, but only conditionally: only when `minio` is ALSO composed
+placeholder, but only conditionally: only when `seaweedfs` is ALSO composed
 in this same call AND `inference.model` is an `s3://` path. Inference's
 own validate() requires a real-looking s3_endpoint_url the instant an
 s3:// model is built -- that check runs eagerly, before this tool's own
 code ever sees the object -- so the caller still has to pass some
 non-empty string for it, exactly like kubeconfig_path; it is then
-discarded the same way, since MinIOTenant.PROVIDES will publish the
-real one once recorded. Outside that specific combination (no minio,
+discarded the same way, since SeaweedFSCluster.PROVIDES will publish the
+real one once recorded. Outside that specific combination (no seaweedfs,
 or a non-s3 model), s3_endpoint_url is a real field like any other, and
 whatever the caller passes (including None, its default) is rendered
 as-is.
@@ -106,12 +106,13 @@ real one from the recorded Cache (Cache.PROVIDES = {"cache_url":
 "endpoint"}). Without `valkey` composed, cache_url is a real field
 like any other and whatever the caller passes is rendered as-is.
 
-Gateway.org_cp_internal_url is REAL-VALUE-ONLY too, and deliberately
-not in Gateway.FROM_STACK: a Stack records whichever ControlPlane was
-recorded last and cannot tell an admin one from an organization one,
-and only the ORGANIZATION control plane can verify a bearer token. So
-even when `controlplane` is composed in this same call, this is never
-wired from it -- the caller passes the real URL.
+Gateway.org_cp_internal_url is deliberately not in Gateway.FROM_STACK:
+a Stack records whichever ControlPlane was recorded last and cannot tell
+an admin one from an organization one, and only the ORGANIZATION control
+plane can verify a bearer token. This tool can tell them apart, so when
+an organization `controlplane` is composed in this same call it wires
+that one's endpoint in itself, whatever the caller passed; the caller
+supplies a real URL only when no organization control plane is composed.
 
 Gateway.api_key_secret/event_backbone_url and Inference.s3_secret_name
 are also in their spec's FROM_STACK (see multistack/stack.py), but
@@ -143,7 +144,7 @@ to a composed `ingress` (see the IMPORTANT paragraph below).
 
 Observability.storage_class/kubeconfig_path are BOTH placeholders,
 unconditionally, whenever `observability` is composed at all -- this
-capability REQUIRES storage the same way MinIO does (see
+capability REQUIRES storage the same way SeaweedFS does (see
 mcp_tools/observability.py), and this tool only allows composing it
 alongside a composed `storage` layer, so its storage_class placeholder
 never depends on a conditional the way s3_endpoint_url/cache_url do.
@@ -167,7 +168,7 @@ driver-honored override, see multistack/policy/drivers/tpm.py); a
 `type="rpm"` one does not, since it reads the raw gateway.events stream
 directly. `billing` REQUIRES a composed `enricher` too, unconditionally
 -- its consumer subject isn't even configurable the way tpm's is.
-Neither requirement is optional the way MinIO's storage one technically
+Neither requirement is optional the way SeaweedFS's storage one technically
 could be worked around some other way: both capabilities are deployed,
 healthy, and silently do nothing without it.
 
@@ -179,7 +180,7 @@ that already exists on the cluster. ControlPlane.REQUIRES = ("cluster",
 "database", "cache"), enforced here as a real dependency check: composing
 `controlplane` requires BOTH a composed `cnpg` (with `cnpg.database`
 set) and a composed `valkey` in the same call. This is an ordering
-check only, like MinIO's storage requirement -- database_url/cache_url
+check only, like SeaweedFS's storage requirement -- database_url/cache_url
 are never wired into ControlPlane's own fields, because
 ControlPlane.FROM_STACK doesn't declare either (they are deliberately
 credential-free at the Stack level, so they cannot serve as the real
@@ -227,10 +228,13 @@ schedulable resource."""
 
 from __future__ import annotations
 
+import re
+
 from typing import List, Optional, Union
 
 from pydantic import validate_call
 
+from multistack.queue.spec import Queue
 from multistack import (
     Billing,
     ControlPlane,
@@ -238,23 +242,23 @@ from multistack import (
     Enricher,
     Gateway,
     Inference,
-    MinIOTenant,
     Observability,
     Policy,
     Portal,
-    Queue,
     RKE2Cluster,
     Route,
+    SeaweedFSCluster,
     Storage,
     Tokenizer,
     Cache,
+    Vault,
 )
 from multistack.accelerator import Accelerator
 from multistack.ingress_gateway import IngressGateway
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
-from mcp_tools.architecture import DEPENDS_ON, REASON
+from mcp_tools._script import check_script, dump, dumped_lines
+from mcp_tools.architecture import DEPENDS_ON, REASON, closure
 from mcp_tools.policy import admin_cp_key_error
 
 
@@ -268,11 +272,238 @@ def _layer_names(label, items):
 def _field_lines(model, *, exclude: frozenset[str] = frozenset()) -> str:
     """`    field=value,` lines from dump(model), skipping any
     field named in `exclude` (typically a spec's own FROM_STACK keys --
-    see the module docstring)."""
-    return "\n".join(f"    {k}={v!r}," for k, v in dump(model).items() if k not in exclude)
+    see the module docstring). A field left at its class default, rather
+    than one this tool or the model actually chose, is marked `# system-
+    generated default` (see mcp_tools._script.dumped_lines) -- one place
+    to change for every composed resource this tool renders, same reason
+    PLACEHOLDER and WIRED_FIELDS are each a single shared definition
+    below rather than repeated per resource."""
+    return "\n".join(dumped_lines(model, dump(model), skip=exclude))
 
 
 PLACEHOLDER = "wired"
+
+# Fields this tool fills in from the component they come from once that
+# component is composed in the same call; never the user's to give.
+WIRED_FIELDS = (
+    "cache_url",
+    "event_backbone_url",
+    "org_cp_internal_url",
+    "tokenizer_url",
+    "policy_endpoints",
+)
+
+# A value that stands in for one the user hasn't given. In a field this
+# tool wires itself that is fine (prepare_args fills those); in a field that
+# must be real it is an invented value, and a script built from it -- a
+# database password of "placeholder" -- looks deployable and isn't.
+_INVENTED = re.compile(
+    r"^\s*(?:<.*>|\.{2,}|x{3,}|\*{3,}|wired|changeme|change[-_ ]?me|todo|tbd|n/?a|none|null|password"
+    r"|.*placeholder.*|(?:your|my|some|example|sample|dummy|fake)[-_ ].*|.*example\.(?:com|org)(?:[:/].*)?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _secret(value) -> str:
+    return value.get_secret_value() if hasattr(value, "get_secret_value") else value
+
+
+def _field(spec, name: str):
+    """A field of a component, given as the validated spec or as the raw
+    arguments it will be validated from."""
+    return spec.get(name) if isinstance(spec, dict) else getattr(spec, name, None)
+
+
+def invented_values(args: dict) -> list:
+    """`component.field (why)` for each field that must hold the user's
+    real value: either it holds a stand-in (a placeholder, an example,
+    `<...>`), or it was left out where there's no safe default."""
+    return [f"{label} ({reason})" for label, reason in invented_fields(args)]
+
+
+def invented_fields(args: dict) -> list[tuple[str, str]]:
+    """invented_values() as (field, why) pairs. Each component may be its
+    validated spec or its raw arguments, so the same rules can be read
+    before the SDK types have accepted the call."""
+    found = []
+
+    def check(label: str, value) -> None:
+        values = value if isinstance(value, list) else [value]
+        for v in values:
+            v = _secret(v)
+            if isinstance(v, str) and _INVENTED.match(v):
+                found.append((label, repr(v)))
+                return
+
+    def specs(name):
+        value = args.get(name)
+        return [value] if value is not None and not isinstance(value, list) else (value or [])
+
+    check("kubeconfig_path", args.get("kubeconfig_path"))
+    check("existing_storage_class", args.get("existing_storage_class"))
+    for spec in specs("gateway"):
+        if args.get("inference") is None:
+            check("gateway.upstream_url", _field(spec, "upstream_url"))
+        check("gateway.api_key_secret", _field(spec, "api_key_secret"))
+    for spec in specs("controlplane"):
+        check("controlplane.existing_secret", _field(spec, "existing_secret"))
+    for spec in specs("billing"):
+        check("billing.existing_secret", _field(spec, "existing_secret"))
+    needs_database = bool(specs("controlplane")) or args.get("billing") is not None
+    for spec in specs("cnpg"):
+        check("cnpg.name", _field(spec, "name"))
+        database = _field(spec, "database")
+        if database is not None:
+            for field in ("name", "owner", "password"):
+                check(f"cnpg.database.{field}", _field(database, field))
+        elif needs_database:
+            found.append((
+                "cnpg.database",
+                "left out -- a control plane and billing keep their data in a real database: "
+                "its name, owner and password",
+            ))
+    for spec in specs("valkey"):
+        check("valkey.name", _field(spec, "name"))
+    # A Valkey this same plan composes has its chart's own auth enabled by
+    # default (see multistack/cache/spec.py: Cache.endpoint never carries
+    # the password, by design) -- a policy beside it with no real
+    # cache_auth_url gets NOAUTH from that chart and silently enforces
+    # nothing. Left out, not a placeholder, so `check()` above never
+    # catches it; only checked when this plan is the one composing Valkey,
+    # since an existing external cache's auth is the user's own to know.
+    valkey_composed = args.get("valkey") is not None
+    for spec in specs("policy"):
+        cache_auth_url = _field(spec, "cache_auth_url")
+        if valkey_composed and cache_auth_url is None:
+            found.append((
+                "policy.cache_auth_url",
+                "left out -- the Valkey this plan composes has auth "
+                "enabled by its chart's default; without the real password the limiter fails open",
+            ))
+        else:
+            check("policy.cache_auth_url", cache_auth_url)
+        check("policy.admin_cp_service_api_key", _field(spec, "admin_cp_service_api_key"))
+    for spec in specs("inference"):
+        check("inference.s3_secret_name", _field(spec, "s3_secret_name"))
+    for spec in specs("ingress"):
+        check("ingress.address_pool", _field(spec, "address_pool"))
+    return found
+
+
+_HTTP_URL = re.compile(r"https?://[^\s,;)'\"]+")
+
+
+def model_server_given(user_text: str) -> str | None:
+    """The URL of the model server the user already runs, as their message
+    gives it, or None. With one, inference isn't composed."""
+    urls = [u.rstrip(".") for u in _HTTP_URL.findall(user_text)]
+    return urls[0] if urls else None
+
+
+def against_the_user(args: dict, user_text: str) -> str | None:
+    """A plan that contradicts what the user said about model serving, as
+    the error to return, or None.
+
+    Live, a request naming the vLLM server the user already runs came back
+    with a new vLLM deployment of a model nobody asked for, and the user's
+    URL replaced by the one that deployment would have. Both look valid to
+    the SDK, so only the conversation can tell."""
+    inference = args.get("inference")
+    if not isinstance(inference, dict):
+        return None
+    server = model_server_given(user_text)
+    if server:
+        return (
+            f"the user already runs a model server ({server}): set gateway.upstream_url to it "
+            "and leave inference out. Compose inference only when they ask to deploy a model."
+        )
+    model = str(inference.get("model") or "")
+    if model and model.lower().rsplit("/", 1)[-1] not in user_text.lower():
+        return (
+            f"inference.model {model!r} is not one the user named: ask which model to serve, "
+            "or leave inference out if they already run one."
+        )
+    return None
+
+
+def pointless_policy(args: dict) -> str | None:
+    """A composed `policy` with no real limit configured anywhere, as the
+    error to return, or None.
+
+    0 and {} are UNLIMITED in RateLimits, not blocked (see the policy
+    skill) -- so a Policy left entirely at its defaults is deployed,
+    healthy, and enforces nothing. Seen live: a request only describing
+    a gateway's own fail-open/fail-closed behavior led to a Policy
+    composed with no limits at all, because the model built one instead
+    of asking what limit to apply -- or realizing none was asked for."""
+    policies = args.get("policy")
+    policies = policies if isinstance(policies, list) else [policies] if policies is not None else []
+    for p in policies:
+        if not isinstance(p, dict):
+            continue
+        limits = p.get("limits") or {}
+        if not isinstance(limits, dict):
+            continue
+        if not any(limits.get(k) for k in (
+            "user_default", "model_default",
+            "user_overrides", "model_overrides", "user_model_overrides",
+        )):
+            return (
+                "policy has no real limit set (every scope is at its 0/empty default, which "
+                "means unlimited, not blocked) -- deployed like that it enforces nothing. Ask "
+                "the user what limit to apply, or leave policy out if they didn't actually ask "
+                "for rate limiting."
+            )
+    return None
+
+
+def missing_parts(args: dict) -> tuple[list[str], str | None]:
+    """What the raw arguments leave out of the dependency chain: the
+    components to add, and how storage is missing -- "storage" (a new
+    cluster composes it), "existing_storage_class" (an existing cluster
+    names the one it has), or None."""
+    def given(name: str) -> bool:
+        # An empty component ({}) is given: every field at its default.
+        value = args.get(name)
+        return value is not None and value != "" and value != []
+
+    present = {name for name in DEPENDS_ON if given(name)}
+    policies = args.get("policy")
+    policies = policies if isinstance(policies, list) else [policies] if policies else []
+    needed = set(closure(present))
+    if any(isinstance(p, dict) and str(p.get("type", "")).lower() == "tpm" for p in policies):
+        needed |= set(closure(["enricher"]))
+    storage_ok = given("storage") or given("existing_storage_class")
+    components = sorted(n for n in needed - present if n != "storage")
+    storage = None
+    if "storage" in needed and not storage_ok:
+        storage = "existing_storage_class" if given("kubeconfig_path") else "storage"
+    return components, storage
+
+
+def missing_dependencies(args: dict) -> str | None:
+    """What the raw arguments leave out of the dependency chain, as the
+    error to return, or None when the chain is complete.
+
+    Checked before the arguments are validated against the SDK types. A
+    plan with only a policy and a gateway fails validation on the fields
+    the chain would have wired -- the gateway's control-plane URL, the
+    policy's cache URL -- and the model, told those are missing, asked the
+    user for them instead of adding the control plane and the cache."""
+    missing, storage = missing_parts(args)
+    if storage == "existing_storage_class":
+        missing.append("existing_storage_class (ask the user which StorageClass the cluster has)")
+    elif storage:
+        missing.append(storage)
+    if not missing:
+        return None
+    return (
+        "the plan leaves out what its components depend on -- add "
+        + ", ".join(m if m != "controlplane" else 'controlplane (type="organization")' for m in missing)
+        + " and call again. Fields this tool wires between components ("
+        + ", ".join(WIRED_FIELDS)
+        + ") are filled in once they are composed; never ask the user for those."
+    )
 
 
 def prepare_args(args: dict) -> dict:
@@ -300,12 +531,12 @@ def prepare_args(args: dict) -> dict:
         if not spec.get(field):
             spec[field] = PLACEHOLDER
 
-    for name in ("storage", "minio", "inference", "valkey", "cnpg", "observability", "queue",
+    for name in ("storage", "seaweedfs", "inference", "valkey", "cnpg", "observability", "queue",
                  "tokenizer", "enricher", "accelerator", "gateway", "policy", "ingress",
-                 "controlplane", "portal", "billing", "route"):
+                 "controlplane", "portal", "billing", "route", "vault"):
         for spec in items(name):
             fill(spec, "kubeconfig_path")
-    for spec in items("minio"):
+    for spec in items("seaweedfs"):
         fill(spec, "storage_class")
     controlplanes = items("controlplane")
     for spec in items("gateway"):
@@ -394,7 +625,7 @@ def _render_script(
     kubeconfig_path: Optional[str],
     existing_storage_class: Optional[str],
     storage: Optional[Storage],
-    minio: Optional[MinIOTenant],
+    seaweedfs: Optional[SeaweedFSCluster],
     inference: Optional[Inference],
     valkey: Optional[Cache],
     cnpg: Optional[Database],
@@ -410,6 +641,7 @@ def _render_script(
     portals: List[Portal],
     billing: Optional[Billing],
     routes: List[Route],
+    vault: Optional[Vault],
 ) -> str:
     if cluster is not None:
         node_lines = "\n".join(
@@ -467,19 +699,19 @@ def _render_script(
             "stack.record(storage)",
         ]
 
-    if minio is not None:
-        imports.append("from multistack import MinIOTenant")
-        imports.append("from multistack.backends.minio_client import MinIOBackend")
-        minio_lines = _field_lines(minio, exclude=frozenset(MinIOTenant.FROM_STACK))
+    if seaweedfs is not None:
+        imports.append("from multistack import SeaweedFSCluster")
+        imports.append("from multistack.backends.seaweedfs_client import SeaweedFSBackend")
+        seaweedfs_lines = _field_lines(seaweedfs, exclude=frozenset(SeaweedFSCluster.FROM_STACK))
         body += [
             "",
-            "tenant = stack.build(",
-            "    MinIOTenant,",
-            minio_lines,
+            "objectstore = stack.build(",
+            "    SeaweedFSCluster,",
+            seaweedfs_lines,
             ")",
-            "minio_backend = MinIOBackend()",
-            "minio_backend.create(tenant)",
-            "stack.record(tenant)",
+            "seaweedfs_backend = SeaweedFSBackend()",
+            "seaweedfs_backend.create(objectstore)",
+            "stack.record(objectstore)",
         ]
 
     if accelerator is not None:
@@ -507,27 +739,27 @@ def _render_script(
         imports.append("from multistack import Inference, InferenceBackend")
         # kubeconfig_path is always a placeholder (Stack fills it for
         # real). s3_endpoint_url joins it as a SECOND placeholder, but
-        # only when minio is also composed AND model is an s3:// path --
+        # only when seaweedfs is also composed AND model is an s3:// path --
         # Inference's own validate() requires a real-looking
         # s3_endpoint_url the instant an s3:// model is constructed (it
         # runs eagerly, before this function ever sees the object), so
         # unlike kubeconfig_path the caller can't simply leave it unset
         # here; they pass any non-empty string to satisfy that check,
         # and -- exactly like kubeconfig_path -- it's discarded rather
-        # than rendered, since MinIOTenant.PROVIDES will publish the
-        # real one once recorded. Excluding it whenever minio merely
+        # than rendered, since SeaweedFSCluster.PROVIDES will publish the
+        # real one once recorded. Excluding it whenever seaweedfs merely
         # happens to be present, regardless of whether this Inference
         # wants S3 weights at all, previously made an otherwise-valid,
         # non-s3 Inference fail the real SDK's own validation instead.
         #
         # s3_secret_name is NEVER a placeholder -- unlike
         # s3_endpoint_url, nothing in this script creates a Secret
-        # (MinIOTenant.PROVIDES has no entry for it), so it stays a
+        # (SeaweedFSCluster.PROVIDES has no entry for it), so it stays a
         # real, caller-supplied value here exactly as
         # build_inference_plan already requires standalone, same
         # reasoning as Gateway.api_key_secret/Policy.cache_url.
         exclude = {"kubeconfig_path", "options"}
-        if minio is not None and inference.model_is_s3:
+        if seaweedfs is not None and inference.model_is_s3:
             exclude.add("s3_endpoint_url")
         inference_lines = _field_lines(inference, exclude=exclude)
         if inference.options is not None:
@@ -655,7 +887,7 @@ def _render_script(
         # allows composing observability alongside a composed `storage`
         # layer (see build_full_stack_plan's own dependency check), so
         # both entries are always placeholders whenever this block
-        # renders at all -- same reasoning as MinIO's storage_class.
+        # renders at all -- same reasoning as SeaweedFS's storage_class.
         observability_lines = _field_lines(
             observability, exclude=frozenset(Observability.FROM_STACK) | {"options"}
         )
@@ -674,10 +906,35 @@ def _render_script(
             "stack.record(observability)",
         ]
 
+    if vault is not None:
+        imports.append("from multistack import Vault, VaultBackend")
+        # kubeconfig_path AND storage_class are both placeholders here, same
+        # reasoning as observability just above -- Vault.FROM_STACK declares
+        # both, and this tool only allows composing vault alongside a
+        # composed `storage` layer (see build_full_stack_plan's own
+        # dependency check).
+        vault_lines = _field_lines(vault, exclude=frozenset(Vault.FROM_STACK) | {"options"})
+        if vault.options is not None:
+            imports.append("from multistack import VaultOptions")
+            opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(vault.options).items())
+            vault_lines += f"\n    options=VaultOptions({opt_args}),"
+        body += [
+            "",
+            "vault = stack.build(",
+            "    Vault,",
+            vault_lines,
+            ")",
+            "vault_backend = VaultBackend()",
+            "vault_backend.create(vault)",
+            "stack.record(vault)",
+        ]
+
     if queue is not None:
-        imports.append("from multistack import Queue, QueueBackend")
+        imports.append("from multistack.queue.registry import QueueBackend")
         if queue.options is not None:
-            imports.append("from multistack import NatsQueueOptions")
+            imports.append("from multistack.queue.spec import NatsQueueOptions, Queue")
+        else:
+            imports.append("from multistack.queue.spec import Queue")
         # kubeconfig_path and storage_class come from the Stack. Recording
         # the queue publishes event_backbone_url, which Stack fills into the
         # gateway and policies; the enricher and billing read queue.endpoint.
@@ -1011,7 +1268,7 @@ def build_full_stack_plan(
     kubeconfig_path: Optional[str] = None,
     existing_storage_class: Optional[str] = None,
     storage: Optional[Storage] = None,
-    minio: Optional[MinIOTenant] = None,
+    seaweedfs: Optional[SeaweedFSCluster] = None,
     inference: Optional[Inference] = None,
     valkey: Optional[Cache] = None,
     cnpg: Optional[Database] = None,
@@ -1027,6 +1284,7 @@ def build_full_stack_plan(
     portal: Union[Portal, List[Portal], None] = None,
     billing: Optional[Billing] = None,
     route: Union[Route, List[Route], None] = None,
+    vault: Optional[Vault] = None,
 ) -> dict:
     """
     Validate and render ONE script that deploys a Multistack platform, or
@@ -1034,14 +1292,14 @@ def build_full_stack_plan(
     Does NOT provision anything -- read-only, safe to call freely.
 
     Use this for any component that depends on others -- gateway, policy,
-    enricher, tokenizer, billing, controlplane, portal, queue, minio,
-    observability, route. The plan must include the whole dependency
+    enricher, tokenizer, billing, controlplane, portal, queue, seaweedfs,
+    observability, vault, route. The plan must include the whole dependency
     chain below, never the requested component alone.
 
     Target cluster -- give exactly one:
     - `cluster`: a new RKE2 cluster, built first.
     - `kubeconfig_path`: an EXISTING cluster; the user's real path. For
-      queue/minio/observability, ask which StorageClass it already has and
+      queue/seaweedfs/observability, ask which StorageClass it already has and
       pass it as `existing_storage_class` -- never ask for node addresses,
       `storage` can only be composed onto a new cluster.
 
@@ -1057,8 +1315,11 @@ def build_full_stack_plan(
       `tokenizer` needs `enricher` (its only caller).
     - `billing` needs `cnpg` (with `cnpg.database`), `enricher` and `queue`.
     - each `portal` needs a `controlplane` of the same type.
-    - `queue`, `minio` and `observability` need storage: `storage`, or
-      `existing_storage_class` on an existing cluster.
+    - `queue`, `seaweedfs` and `observability` need storage, and the target
+      cluster decides which field: a NEW `cluster` needs `storage` composed
+      (it has the node list Longhorn installs onto); an EXISTING cluster
+      (`kubeconfig_path`) needs `existing_storage_class` instead -- never
+      compose `storage` there, it has no node list and is rejected.
     - `route` needs `ingress`.
     When a dependency needs a real value you don't have, ask the user for
     it -- never drop the dependency. Ask only for fields that are required,
@@ -1070,7 +1331,7 @@ def build_full_stack_plan(
     valkey -> `policy.cache_url`; organization controlplane ->
     `gateway.org_cp_internal_url`; inference -> `gateway.upstream_url`;
     every policy -> `gateway.policy_endpoints`; tokenizer ->
-    `enricher.options.tokenizer_url`; minio -> `inference.s3_endpoint_url`
+    `enricher.options.tokenizer_url`; seaweedfs -> `inference.s3_endpoint_url`
     (s3:// model only); controlplane -> `portal.api_upstream` (one
     controlplane only; with both, give each portal its real upstream);
     ingress -> `route.ingress_address`; billing ->
@@ -1079,7 +1340,7 @@ def build_full_stack_plan(
     (only when `admin_cp_service_api_key` is given).
     A wired field that the SDK requires at construction is a PLACEHOLDER:
     pass any non-empty string and it is discarded. The same goes for every
-    component's `kubeconfig_path` and for `storage_class` on minio,
+    component's `kubeconfig_path` and for `storage_class` on seaweedfs,
     observability and queue. For `event_backbone_url` with `queue`
     composed, pass the queue's default, nats://nats.platform.svc.cluster.local:4222.
     Optional wired fields (`policy_endpoints`, `admin_cp_url`,
@@ -1121,6 +1382,30 @@ def build_full_stack_plan(
             "error": (
                 "give exactly one of `cluster` (a new RKE2 cluster, built first) or "
                 "`kubeconfig_path` (the real path to an existing cluster's kubeconfig)"
+            ),
+        }
+    invented = invented_values(
+        {
+            "kubeconfig_path": kubeconfig_path,
+            "existing_storage_class": existing_storage_class,
+            "gateway": gateway,
+            "controlplane": controlplanes,
+            "billing": billing,
+            "cnpg": cnpg,
+            "valkey": valkey,
+            "policy": policies,
+            "inference": inference,
+            "ingress": ingress,
+        }
+    )
+    if invented:
+        return {
+            "valid": False,
+            "error": (
+                "these need the user's real value -- a stand-in, or left out with no safe "
+                "default: "
+                + ", ".join(invented)
+                + ". Ask the user for them, all in one message; until then leave them out of the call."
             ),
         }
     if cluster is not None and existing_storage_class:
@@ -1250,11 +1535,14 @@ def build_full_stack_plan(
         except ValueError as e:
             return {"valid": False, "error": str(e)}
 
-    if minio is not None and not has_storage:
-        return {"valid": False, "error": "minio requires storage -- pass storage too (or existing_storage_class on an existing cluster), or drop minio"}
+    if seaweedfs is not None and not has_storage:
+        return {"valid": False, "error": "seaweedfs requires storage -- pass storage too (or existing_storage_class on an existing cluster), or drop seaweedfs"}
 
     if observability is not None and not has_storage:
         return {"valid": False, "error": "observability requires storage -- pass storage too (or existing_storage_class on an existing cluster), or drop observability"}
+
+    if vault is not None and not has_storage:
+        return {"valid": False, "error": "vault requires storage -- pass storage too (or existing_storage_class on an existing cluster), or drop vault"}
 
     if cnpg is not None and cnpg.database is not None:
         # Constructing a Database checks the operator half only -- the
@@ -1326,12 +1614,13 @@ def build_full_stack_plan(
 
     error = _missing_dependency(
         {
-            "storage": has_storage, "minio": minio, "observability": observability,
+            "storage": has_storage, "seaweedfs": seaweedfs,
+            "observability": observability,
             "queue": queue, "accelerator": accelerator, "inference": inference,
             "valkey": valkey, "cnpg": cnpg, "controlplane": controlplanes,
             "portal": portals, "gateway": gateway, "policy": policies,
             "enricher": enricher, "tokenizer": tokenizer, "billing": billing,
-            "ingress": ingress, "route": routes,
+            "ingress": ingress, "route": routes, "vault": vault,
         },
         opted_out_of_backbone={
             "policy": bool(policies) and all(p.allow_no_backbone for p in policies),
@@ -1344,9 +1633,9 @@ def build_full_stack_plan(
 
     try:
         script = _render_script(
-            cluster, kubeconfig_path, existing_storage_class, storage, minio, inference,
+            cluster, kubeconfig_path, existing_storage_class, storage, seaweedfs, inference,
             valkey, cnpg, observability, queue, tokenizer, enricher, accelerator, gateway,
-            policies, ingress, controlplanes, portals, billing, routes,
+            policies, ingress, controlplanes, portals, billing, routes, vault,
         )
     except AssertionError as e:
         return {"valid": False, "error": str(e)}
@@ -1354,7 +1643,7 @@ def build_full_stack_plan(
     layers = (
         (["rke2"] if cluster is not None else [])
         + (["storage"] if storage else [])
-        + (["minio"] if minio else [])
+        + (["seaweedfs"] if seaweedfs else [])
         # accelerator is listed here, ahead of inference, to match the
         # order the script actually builds them in -- it has to exist
         # before inference does, or a GPU pod is created before
@@ -1367,6 +1656,7 @@ def build_full_stack_plan(
         # gateway that verifies keys against the organization one.
         + _layer_names("controlplane", controlplanes)
         + (["observability"] if observability else [])
+        + (["vault"] if vault else [])
         + (["queue"] if queue else [])
         + (["tokenizer"] if tokenizer else [])
         + (["enricher"] if enricher else [])

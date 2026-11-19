@@ -46,16 +46,17 @@ from mcp_tools import (  # noqa: E402,F401 -- see module docstring
     gateway,
     inference,
     ingress_gateway,
-    minio,
     observability,
     policy,
     portal,
     queue,
     rke2,
     route,
+    seaweedfs,
     storage,
     tokenizer,
     valkey,
+    vault,
 )
 
 if __name__ == "__main__":

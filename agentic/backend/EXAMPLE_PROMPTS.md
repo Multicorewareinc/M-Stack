@@ -22,11 +22,12 @@ what can you do
 **What happens:** Plain conversational reply, no tool call — the model
 describes itself using the SKILL.md knowledge it was given plus its own
 general knowledge. Good icebreaker; also a natural place to mention that
-only 14 things below are real *actions* (`build_rke2_cluster_plan`,
-`build_storage_plan`, `build_minio_plan`, `build_inference_plan`,
-`build_gateway_plan`, `build_policy_plan`, `build_ingress_gateway_plan`,
-`build_valkey_plan`, `build_cnpg_plan`, `build_observability_plan`,
-`build_tokenizer_plan`, `build_controlplane_plan`, `build_portal_plan`,
+only 19 things below are real *actions* (`build_rke2_cluster_plan`, `build_storage_plan`, `build_seaweedfs_plan`,
+`build_inference_plan`, `build_accelerator_plan`, `build_gateway_plan`,
+`build_policy_plan`, `build_ingress_gateway_plan`, `build_route_plan`,
+`build_valkey_plan`, `build_cnpg_plan`, `build_queue_plan`,
+`build_observability_plan`, `build_tokenizer_plan`, `build_enricher_plan`,
+`build_billing_plan`, `build_controlplane_plan`, `build_portal_plan`,
 `build_full_stack_plan`) — the rest of what it says here is just
 talking, not something it can independently do. This agent never
 provisions anything itself.
@@ -189,34 +190,39 @@ assumes the cluster genuinely exists already.
 
 ---
 
-## 11. MinIO on an existing cluster + storage
+## 11. Object storage on an existing cluster + storage
 
 **Say:**
 ```
 Same cluster as before, and it already has a "longhorn" StorageClass.
-Set up a MinIO tenant called data-store on it with 2 servers and 2
-volumes per server.
+Add object storage for model weights on it, called data-store, with 2
+volume servers.
 ```
 
-**What happens:** Calls `build_minio_plan`. **Point out:** `root_user`/
-`root_password` are left unset in the generated script — the model
-shouldn't invent credentials, real ones get generated when the script
-actually runs.
+**What happens:** Calls `build_full_stack_plan` with the existing
+`kubeconfig_path`, `existing_storage_class="longhorn"` and `seaweedfs` —
+SeaweedFS depends on block storage, so the whole-stack tool checks that
+dependency. **Point out:** Longhorn is not installed again, and
+`access_key`/`secret_key` are left unset in the generated script — the
+model shouldn't invent credentials; real ones get generated when the
+script actually runs. Asking for MinIO by name gets an explanation that
+the platform replaced it with SeaweedFS, and a SeaweedFS plan instead.
 
 ---
 
-## 12. MinIO rejects a topology that can't do erasure coding
+## 12. SeaweedFS rejects an invalid replication code
 
 **Say:**
 ```
-Set up a MinIO tenant called too-small on that same cluster, distributed
-mode, with just 1 server and 1 volume per server.
+Add SeaweedFS object storage called too-odd on that same cluster, with
+replication set to 4.
 ```
 
-**What happens:** Rejected — distributed mode needs at least 4 drives
-total (servers × volumes_per_server) for erasure coding; 1×1 = 1.
-**Point out:** this is the real SDK's own `MinIOTenant.validate()`
-rejecting it, not a hand-rolled check in the agent.
+**What happens:** Rejected — `replication` is a three-digit code (extra
+copies in other data centers, racks and servers), such as `"001"`; `"4"`
+is not one. **Point out:** this is the real SDK's own
+`SeaweedFSCluster.validate()` rejecting it, not a hand-rolled check in
+the agent.
 
 ---
 
@@ -242,29 +248,29 @@ script itself resolves that once the cluster's actually created.
 **Say:**
 ```
 Set up an entire platform: a new cluster called platform-demo with a
-server node at 10.0.0.60, block storage with 3 replicas, and a MinIO
-tenant called models-bucket with 2 servers and 2 volumes per server.
+server node at 10.0.0.60, block storage with 3 replicas, and SeaweedFS
+object storage called models-bucket with 2 volume servers.
 ```
 
 **What happens:** One script, three layers, wired together with `Stack`
 — matching `examples/full_stack.py`'s own pattern in the SDK. **Point
 out:** ask to see the script and look for `stack.record(storage)` /
-`stack.record(tenant)` between layers — that's what makes the next
+`stack.record(objectstore)` between layers — that's what makes the next
 layer's values (StorageClass name, S3 endpoint) available without
 hardcoding them.
 
 ---
 
-## 15. Whole stack — asking for MinIO without storage gets refused
+## 15. Whole stack — asking for object storage without storage gets refused
 
 **Say:**
 ```
-Build a complete script for a cluster called minio-only-demo with a
-server node at 10.0.0.70, and a MinIO tenant called orphan-bucket with 2
-servers and 2 volumes per server -- skip the storage layer.
+Build a complete script for a cluster called objectstore-only-demo with a
+server node at 10.0.0.70, and SeaweedFS object storage called
+orphan-bucket -- skip the storage layer.
 ```
 
-**What happens:** Rejected — MinIO depends on storage existing first.
+**What happens:** Rejected — SeaweedFS depends on storage existing first.
 **Point out:** this dependency check happens before any script is even
 rendered, matching how the real SDK's `Stack` would refuse this too if
 you tried to build it by hand in the wrong order.
@@ -387,22 +393,22 @@ it directly.
 
 ---
 
-## 22. Whole platform, model weights served straight from MinIO
+## 22. Whole platform, model weights served straight from SeaweedFS
 
 **Say:**
 ```
 Set up an entire platform: a new cluster called platform-demo with a
-server node at 10.0.0.60, block storage with 3 replicas, a MinIO tenant
-called models-bucket with 2 servers and 2 volumes per server, and an
-inference deployment serving s3://models-bucket/Qwen2.5-0.5B with a
-secret called minio-creds holding the object-store credentials.
+server node at 10.0.0.60, block storage with 3 replicas, SeaweedFS object
+storage called models-bucket with 2 volume servers, and an inference
+deployment serving s3://models-bucket/Qwen2.5-0.5B with a secret called
+s3-creds holding the object-store credentials.
 ```
 
-**What happens:** Calls `build_full_stack_plan` with `storage`, `minio`,
+**What happens:** Calls `build_full_stack_plan` with `storage`, `seaweedfs`,
 and `inference` all composed together. **Point out:** ask to see the
 script and look for `inference = stack.build(Inference, ...)` — the
 object-store endpoint is never passed in by hand, it's wired in from
-the MinIO layer built earlier in the same script via `Stack`, the same
+the SeaweedFS layer built earlier in the same script via `Stack`, the same
 mechanism that already threads the cluster's kubeconfig through every
 other layer.
 
@@ -437,7 +443,7 @@ Set up an entire platform: a new cluster called platform-demo with a server node
 look at the generated `Policy(...)` call — there's no `cache_url` line
 in it at all. `Stack` fills it in for real from the Valkey layer built
 just above it, the same mechanism that already threads the cluster's
-kubeconfig through every layer, and the same pattern Inference+MinIO
+kubeconfig through every layer, and the same pattern Inference+SeaweedFS
 uses for the object-store address (scenario 22). **Also point out**:
 Gateway and Policy still don't auto-link to each other even here — this
 is a genuinely new, specific wiring the SDK added, not a blanket change.
@@ -499,11 +505,11 @@ the spec's own `validate_cluster()` catches this with the real SDK error
 optional, because the same spec also drives an operator-only install —
 so `build_cnpg_plan` calls `validate_cluster()` explicitly before ever
 rendering a script, the same defense-in-depth pattern as scenario 15's
-dependency check for MinIO.
+dependency check for SeaweedFS.
 
 ---
 
-## 28. Observability requires storage, same as MinIO
+## 28. Observability requires storage, same as SeaweedFS
 
 **Say:**
 ```
@@ -514,7 +520,7 @@ Same cluster as before. Set up monitoring on it -- it already has a
 **What happens:** Calls `build_observability_plan` -- a single-resource
 tool. **Point out:** this deploys `kube_prometheus_stack` (Prometheus,
 Alertmanager, Grafana) and needs a real StorageClass for the same
-reason MinIO does -- without one, every metric and every dashboard is
+reason SeaweedFS does -- without one, every metric and every dashboard is
 lost on a routine pod reschedule. `grafana_admin_password` is left
 unset in the script; the model must never invent one, since the driver
 generates it on first install and reads it back afterwards.
@@ -583,14 +589,16 @@ deeper into Policy's own `options` object this time.
 
 ## Talking points to have ready
 
-- 14 real actions exist: `build_rke2_cluster_plan`, `build_storage_plan`,
-  `build_minio_plan`, `build_inference_plan`, `build_gateway_plan`,
-  `build_policy_plan`, `build_ingress_gateway_plan`, `build_valkey_plan`,
-  `build_cnpg_plan`, `build_observability_plan`, `build_tokenizer_plan`,
-  `build_controlplane_plan`, `build_portal_plan`, `build_full_stack_plan`.
+- 19 real actions exist: `build_rke2_cluster_plan`, `build_storage_plan`, `build_seaweedfs_plan`,
+  `build_inference_plan`, `build_accelerator_plan`, `build_gateway_plan`,
+  `build_policy_plan`, `build_ingress_gateway_plan`, `build_route_plan`,
+  `build_valkey_plan`, `build_cnpg_plan`, `build_queue_plan`,
+  `build_observability_plan`, `build_tokenizer_plan`, `build_enricher_plan`,
+  `build_billing_plan`, `build_controlplane_plan`, `build_portal_plan`,
+  `build_full_stack_plan`.
   There is still no deploy/execute/provision tool wired into this agent
   at all — not "the model chooses not to," structurally absent, for any
-  of the fourteen.
+  of the nineteen.
 - `build_controlplane_plan`'s `existing_secret` is a Secret NAME, never
   a value — this spec never carries `DATABASE_URL`/`REDIS_URL`/
   `JWT_SECRET` themselves, only the name of a Secret that must already

@@ -34,12 +34,12 @@ def test_build_valid_plan_with_s3_weights():
     result = build_inference_plan(inference={
         "kubeconfig_path": "/tmp/kc.yaml",
         "model": "s3://models/Qwen2.5-0.5B",
-        "s3_endpoint_url": "https://minio.minio.svc.cluster.local",
-        "s3_secret_name": "minio-creds",
+        "s3_endpoint_url": "http://weights-seaweedfs-s3.seaweedfs.svc.cluster.local:8333",
+        "s3_secret_name": "seaweedfs-creds",
     })
     assert result["valid"] is True
-    assert "s3_endpoint_url='https://minio.minio.svc.cluster.local'" in result["script"]
-    assert "s3_secret_name='minio-creds'" in result["script"]
+    assert "s3_endpoint_url='http://weights-seaweedfs-s3.seaweedfs.svc.cluster.local:8333'" in result["script"]
+    assert "s3_secret_name='seaweedfs-creds'" in result["script"]
     compile(result["script"], "<rendered>", "exec")
 
 

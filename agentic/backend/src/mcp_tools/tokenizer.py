@@ -5,7 +5,7 @@ a model's encoding -- it exists so the Policy layer's `type="tpm"` driver
 can answer "how many tokens was that?" for a response the upstream did
 not report `usage` for (see `Policy`'s own TPMOptions.tokenizer_url,
 which is the consumer this capability was built to serve). Like
-Storage/MinIO/Gateway/Policy, it deploys into an EXISTING cluster -- it
+Storage/SeaweedFS/Gateway/Policy, it deploys into an EXISTING cluster -- it
 needs a real kubeconfig_path."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pydantic import validate_call
 from multistack import Tokenizer
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(tokenizer: Tokenizer) -> str:
@@ -23,7 +23,7 @@ def _render_script(tokenizer: Tokenizer) -> str:
     script that installs it -- same reasoning as
     mcp_tools.rke2._render_script: built from the validated object's own
     fields, not a hand-typed template that could silently drop one."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(tokenizer).items() if k != "options"]
+    field_lines = dumped_lines(tokenizer, dump(tokenizer), skip=("options",))
 
     imports = ["from multistack import Tokenizer, TokenizerBackend"]
     if tokenizer.options is not None:

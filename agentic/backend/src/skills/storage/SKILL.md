@@ -54,6 +54,6 @@ Rules when generating code:
 - `build_storage_plan` is for adding storage to a cluster that **already exists** — it needs a real `kubeconfig_path` and the cluster's real node list. If the cluster is also being created in this same request, use `build_full_stack_plan` instead, which wires the two together without needing to already know the new cluster's kubeconfig.
 - Storage depends on a cluster (`REQUIRES = ("cluster",)`) — don't propose installing storage before a cluster exists.
 - Leave `options` unset unless the user describes a specific need (a non-default data path, disabling RWX support, pinning a chart version) — it auto-fills from `type` with working defaults otherwise.
-- The StorageClass this produces is named after `options.release_name` (or `type` if that's unset) — this is the value a MinIO tenant or a `VolumeClaim` should reference as `storage_class`.
+- The StorageClass this produces is named after `options.release_name` (or `type` if that's unset) — this is the value a SeaweedFS cluster or a `VolumeClaim` should reference as `storage_class`.
 
 See `docs/storage.md` in this repo for the full human-facing reference — this file is the condensed version scoped to what a model needs to generate a correct tool call, not the complete picture.

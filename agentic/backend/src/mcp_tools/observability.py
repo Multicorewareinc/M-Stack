@@ -2,7 +2,7 @@
 
 Observability is cluster-wide metrics, dashboards and alerting --
 `kube_prometheus_stack` (Prometheus, Alertmanager, Grafana) today. Like
-MinIO, it persists to disk, so it depends on a StorageClass existing
+SeaweedFS, it persists to disk, so it depends on a StorageClass existing
 first -- it needs a real kubeconfig_path AND storage_class, for an
 EXISTING cluster with EXISTING storage."""
 
@@ -13,7 +13,7 @@ from pydantic import validate_call
 from multistack import Observability
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(observability: Observability) -> str:
@@ -21,7 +21,7 @@ def _render_script(observability: Observability) -> str:
     Python script that installs it -- same reasoning as
     mcp_tools.rke2._render_script: built from the validated object's own
     fields, not a hand-typed template that could silently drop one."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(observability).items() if k != "options"]
+    field_lines = dumped_lines(observability, dump(observability), skip=("options",))
 
     imports = ["from multistack import Observability, ObservabilityBackend"]
     if observability.options is not None:

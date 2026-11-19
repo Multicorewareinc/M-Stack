@@ -3,7 +3,7 @@
 Gateway is the authenticated front door to inference: it proxies to an
 OpenAI-compatible upstream (typically a multistack Inference deployment),
 optionally checks a policy chain before each request, and optionally
-publishes events. Like Storage/MinIO, it deploys into an EXISTING
+publishes events. Like Storage/SeaweedFS, it deploys into an EXISTING
 cluster -- it needs a real kubeconfig_path. See mcp_tools/full_stack.py
 for composing this with other layers via Stack."""
 
@@ -14,7 +14,7 @@ from pydantic import validate_call
 from multistack import Gateway
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(gateway: Gateway) -> str:
@@ -26,7 +26,7 @@ def _render_script(gateway: Gateway) -> str:
     `options` (a nested model -- ModelGatewayOptions today) is rendered
     as its own constructor call rather than a raw dict, so the generated
     script actually constructs it rather than just showing its values."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(gateway).items() if k != "options"]
+    field_lines = dumped_lines(gateway, dump(gateway), skip=("options",))
     if gateway.options is not None:
         opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(gateway.options).items())
         field_lines.append(f"    options={type(gateway.options).__name__}({opt_args}),")

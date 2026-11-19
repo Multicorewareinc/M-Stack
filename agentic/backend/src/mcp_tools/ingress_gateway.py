@@ -6,7 +6,7 @@ out a real LAN address to a LoadBalancer Service (there's no cloud
 provider to do that on bare metal), and the Istio ingress gateway sits
 behind that address, meant to front everything else -- the rate limiter,
 the model gateway, and so on -- so those don't each need their own
-LoadBalancer IP. Like Storage/MinIO/Gateway/Policy, it deploys into an
+LoadBalancer IP. Like Storage/SeaweedFS/Gateway/Policy, it deploys into an
 EXISTING cluster -- it needs a real kubeconfig_path. `IngressGateway` and
 `IngressGatewayBackend` are NOT re-exported at the top-level `multistack`
 package (only Gateway/Policy/Storage are) -- import from
@@ -19,7 +19,7 @@ from pydantic import validate_call
 from multistack.ingress_gateway import IngressGateway
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(gateway: IngressGateway) -> str:
@@ -31,7 +31,7 @@ def _render_script(gateway: IngressGateway) -> str:
     `options` (MetalLBIstioOptions today) is rendered as its own
     constructor call rather than a raw dict, so the generated script
     actually constructs it rather than just showing its values."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(gateway).items() if k != "options"]
+    field_lines = dumped_lines(gateway, dump(gateway), skip=("options",))
     if gateway.options is not None:
         opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(gateway.options).items())
         field_lines.append(f"    options={type(gateway.options).__name__}({opt_args}),")

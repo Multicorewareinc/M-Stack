@@ -10,7 +10,7 @@ This is the capability that makes ADR-030 true: `rate-limiter-tpm` and
 `billing` both read that derived stream instead of calling a tokenizer
 themselves. Without an Enricher deployed and consuming, neither fails --
 they go quietly uncounted, which is the worse outcome. Like
-Storage/MinIO/Gateway/Policy it deploys into an EXISTING cluster."""
+Storage/SeaweedFS/Gateway/Policy it deploys into an EXISTING cluster."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from pydantic import validate_call
 from multistack import Enricher
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(enricher: Enricher) -> str:
@@ -27,7 +27,7 @@ def _render_script(enricher: Enricher) -> str:
     script that installs it -- same reasoning as
     mcp_tools.rke2._render_script: built from the validated object's own
     fields, not a hand-typed template that could silently drop one."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(enricher).items() if k != "options"]
+    field_lines = dumped_lines(enricher, dump(enricher), skip=("options",))
 
     imports = ["from multistack import Enricher, EnricherBackend"]
     if enricher.options is not None:

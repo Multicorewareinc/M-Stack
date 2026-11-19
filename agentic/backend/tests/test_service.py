@@ -102,17 +102,31 @@ class SlowGraph(FakeGraph):
     """A turn that takes as long as a real model call, as far as the
     server can tell."""
 
-    def send_message(self, thread_id: str, message: str) -> dict:
-        import time
+    async def send_message(
+        self, thread_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> dict:
+        import asyncio
 
-        time.sleep(1.5)
-        return super().send_message(thread_id, message)
+        # asyncio.sleep, not time.sleep: this stands in for call_model's
+        # real await (see orchestration/graph.py -- it awaits the model
+        # via ainvoke), which yields the event loop instead of blocking
+        # it. A blocking sleep here would fail this test for the wrong
+        # reason -- it would prove nothing about whether the route awaits
+        # real I/O correctly, only that a synchronous call blocks, which
+        # nobody disputes.
+        await asyncio.sleep(1.5)
+        return await super().send_message(
+            thread_id, message, attachment=attachment, attachment_name=attachment_name
+        )
 
 
 def test_a_turn_in_progress_does_not_stall_other_requests(client_factory):
-    """The model call is synchronous. On an `async def` route it ran on
-    the event loop and every other request waited for it -- /health took
-    53s behind a single live turn."""
+    """start_session is `async def` and awaits the model call as real
+    async I/O (orchestration/graph.py's call_model uses `ainvoke`, not a
+    blocking `invoke` in a worker thread) -- so it must yield the event
+    loop while waiting, not hold it. Before that change, this exact
+    scenario (a sync call on an `async def` route) stalled every other
+    request -- /health took 53s behind a single live turn."""
     import threading
     import time
 

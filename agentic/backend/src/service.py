@@ -12,7 +12,7 @@ that work, so tests never touch a network or a real model.
 
 from __future__ import annotations
 
-from typing import Iterable, Protocol
+from typing import AsyncIterable, Protocol
 
 from errors import NotFoundError
 from settings import Settings
@@ -21,11 +21,20 @@ from settings import Settings
 class OrchestrationGraph(Protocol):
     """The subset of orchestration/graph.py's module-level API this
     service depends on. Exists so tests/conftest.py can inject a fake
-    with the same shape instead of the real module."""
+    with the same shape instead of the real module.
 
-    def send_message(self, thread_id: str, message: str) -> dict: ...
+    send_message is async (awaits the real LLM call via ainvoke -- see
+    graph.py's call_model); stream_events is an async generator function,
+    so calling it (no await) returns an async iterator the caller drives
+    with `async for`, the same shape a sync generator would have had."""
+
+    async def send_message(
+        self, thread_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> dict: ...
     def get_state(self, thread_id: str) -> dict: ...
-    def stream_events(self, thread_id: str, message: str) -> Iterable[dict]: ...
+    def stream_events(
+        self, thread_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> AsyncIterable[dict]: ...
 
 
 class AgenticService:
@@ -38,23 +47,38 @@ class AgenticService:
             import orchestration.graph as graph
         self._graph = graph
 
-    def start_session(self, session_id: str, message: str) -> dict:
+    async def start_session(
+        self, session_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> dict:
         """Starts a new conversation on a fresh session_id."""
-        return self._graph.send_message(session_id, message)
+        return await self._graph.send_message(
+            session_id, message, attachment=attachment, attachment_name=attachment_name
+        )
 
-    def continue_session(self, session_id: str, message: str) -> dict:
+    async def continue_session(
+        self, session_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> dict:
         """Sends another message on an existing conversation."""
-        return self._graph.send_message(session_id, message)
+        return await self._graph.send_message(
+            session_id, message, attachment=attachment, attachment_name=attachment_name
+        )
 
-    def stream_session(self, session_id: str, message: str) -> Iterable[dict]:
+    def stream_session(
+        self, session_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> AsyncIterable[dict]:
         """Streams one turn's progress events (see
         orchestration/graph.py's stream_events) instead of blocking until
         the whole turn finishes. Same work, same thread, different shape
         of result -- start_session/continue_session both map onto this
         for a caller that wants to show progress, since the graph itself
         makes no distinction between a thread's first message and a
-        later one."""
-        return self._graph.stream_events(session_id, message)
+        later one.
+
+        Not `async def`: stream_events is itself an async generator
+        function, so calling it here already returns the async iterator
+        -- awaiting this method too would await that iterator object
+        itself, which is not awaitable."""
+        return self._graph.stream_events(session_id, message, attachment=attachment, attachment_name=attachment_name)
 
     def get_session(self, session_id: str) -> dict:
         """Read-only status snapshot -- what state this session is

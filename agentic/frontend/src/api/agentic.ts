@@ -50,22 +50,35 @@ async function parse(response: Response): Promise<SessionResponse> {
   return (await response.json()) as SessionResponse;
 }
 
+/** A file attached to a message -- read client-side as text and sent as
+ * part of the same JSON body (see router.py's MessageRequest), not a
+ * multipart upload. The backend splices its content into the model's
+ * context for that one turn only (agentic/backend/src/orchestration/graph.py). */
+export interface Attachment {
+  name: string;
+  content: string;
+}
+
 /** Starts a new conversation. The returned session_id drives every later call. */
-export async function startSession(message: string): Promise<SessionResponse> {
+export async function startSession(message: string, attachment?: Attachment): Promise<SessionResponse> {
   const response = await fetch(`${BASE}/v1/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, attachment: attachment?.content, attachment_name: attachment?.name }),
   });
   return parse(response);
 }
 
 /** Sends another message on an existing conversation. */
-export async function continueSession(sessionId: string, message: string): Promise<SessionResponse> {
+export async function continueSession(
+  sessionId: string,
+  message: string,
+  attachment?: Attachment,
+): Promise<SessionResponse> {
   const response = await fetch(`${BASE}/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, attachment: attachment?.content, attachment_name: attachment?.name }),
   });
   return parse(response);
 }
@@ -81,7 +94,19 @@ export async function getSession(sessionId: string): Promise<SessionResponse> {
 /** One progress event from a streamed turn (see the backend's
  * orchestration/graph.py stream_events). `final` is always last and
  * carries the same fields the blocking endpoints return. */
+export type RetrievedSource = {
+  path: string;
+  start: number;
+  end: number;
+  context: string;
+  kind: string;
+  capability: string | null;
+  score: number;
+  rerank_score?: number | null;
+};
+
 export type StreamEvent =
+  | { type: 'sources'; sources: RetrievedSource[] }
   | { type: 'tool_call'; tool: string; args: Record<string, unknown> }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_result'; tool: string; valid: boolean | null; error: string | null }
@@ -105,6 +130,8 @@ export type TraceEvent = Exclude<StreamEvent, { type: 'final' }>;
 export async function* streamMessage(
   sessionId: string | null,
   message: string,
+  attachment?: Attachment,
+  signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   const url = sessionId
     ? `${BASE}/v1/sessions/${encodeURIComponent(sessionId)}/messages/stream`
@@ -113,7 +140,8 @@ export async function* streamMessage(
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, attachment: attachment?.content, attachment_name: attachment?.name }),
+    signal,
   });
 
   if (!response.ok || !response.body) {

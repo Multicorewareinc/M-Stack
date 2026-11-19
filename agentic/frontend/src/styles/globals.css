@@ -1,1 +1,13 @@
 @import '@multistack/ui/styles.css';
+
+/* Scrollable without a visible scrollbar -- the conversation and code
+   panels scroll on wheel/touch/keyboard as normal, just without the
+   track/thumb chrome. `overflow` on the element still does the real work;
+   this only hides the browser's rendering of it. */
+.scrollbar-hide {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge/IE */
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, modern Edge */
+}

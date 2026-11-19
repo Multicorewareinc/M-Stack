@@ -8,6 +8,7 @@ one shared template."""
 from __future__ import annotations
 
 import ast
+from collections.abc import Collection
 from typing import Any
 
 from pydantic import BaseModel, SecretStr
@@ -35,6 +36,32 @@ def _reveal(value: Any) -> Any:
     if isinstance(value, list):
         return [_reveal(v) for v in value]
     return value
+
+
+def dumped_lines(model: BaseModel, dumped: dict[str, Any], *, skip: Collection[str] = ()) -> list[str]:
+    """One rendered `"    field=value,"` line per entry in `dumped`
+    (already dump()-ed), skipping any key in `skip` -- what every render
+    function's own field_lines starts from.
+
+    Fields the caller actually passed come first, as plain lines.
+    Fields Pydantic fell back to its own class default for --
+    model_fields_set is Pydantic's own record of which fields the caller
+    really passed, not a guess -- are grouped after them, under one
+    `# system-generated defaults` marker rather than repeating that
+    comment on every such line. Lets whoever reads the generated script
+    see at a glance which values came from the request and which the
+    system chose on its own, without changing what the script does or
+    what order keyword args matter in (none; these are all kwargs)."""
+    explicit = []
+    defaulted = []
+    for k, v in dumped.items():
+        if k in skip:
+            continue
+        line = f"    {k}={v!r},"
+        (explicit if k in model.model_fields_set else defaulted).append(line)
+    if not defaulted:
+        return explicit
+    return explicit + ["    # system-generated defaults -- not specified in the request"] + defaulted
 
 
 def check_script(script: str) -> None:

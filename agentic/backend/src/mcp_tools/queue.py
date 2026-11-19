@@ -11,20 +11,23 @@ from __future__ import annotations
 
 from pydantic import validate_call
 
-from multistack import Queue
+from multistack.queue.spec import Queue
 
 from mcp_server import mcp
-from mcp_tools._script import check_script, dump
+from mcp_tools._script import check_script, dump, dumped_lines
 
 
 def _render_script(queue: Queue) -> str:
     """Renders a validated Queue plan as the single readable Python script
     that installs it, built from the validated object's own fields."""
-    field_lines = [f"    {k}={v!r}," for k, v in dump(queue).items() if k != "options"]
+    field_lines = dumped_lines(queue, dump(queue), skip=("options",))
 
-    imports = ["from multistack import Queue, QueueBackend"]
+    imports = [
+        "from multistack.queue.registry import QueueBackend",
+        "from multistack.queue.spec import Queue",
+    ]
     if queue.options is not None:
-        imports.append("from multistack import NatsQueueOptions")
+        imports[1] = "from multistack.queue.spec import NatsQueueOptions, Queue"
         opt_args = ", ".join(f"{k}={v!r}" for k, v in dump(queue.options).items())
         field_lines.append(f"    options=NatsQueueOptions({opt_args}),")
 

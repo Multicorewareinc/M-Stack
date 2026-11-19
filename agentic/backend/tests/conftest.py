@@ -30,16 +30,21 @@ class FakeGraph:
         self._events = events or []
         self.calls: list[tuple[str, tuple]] = []
 
-    def send_message(self, thread_id: str, message: str) -> dict:
-        self.calls.append(("send_message", (thread_id, message)))
+    async def send_message(
+        self, thread_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ) -> dict:
+        self.calls.append(("send_message", (thread_id, message, attachment, attachment_name)))
         return self._responses.get(thread_id, {"reply": f"echo: {message}", "script": None})
 
-    def stream_events(self, thread_id: str, message: str):
+    async def stream_events(
+        self, thread_id: str, message: str, *, attachment: str | None = None, attachment_name: str | None = None
+    ):
         """Yields the queued `events`, then the same final state
         send_message() would have returned -- the real stream_events()
         always ends that way."""
-        self.calls.append(("stream_events", (thread_id, message)))
-        yield from self._events
+        self.calls.append(("stream_events", (thread_id, message, attachment, attachment_name)))
+        for event in self._events:
+            yield event
         yield {"type": "final", **self._responses.get(thread_id, {"reply": f"echo: {message}", "script": None})}
 
     def get_state(self, thread_id: str) -> dict:
@@ -58,3 +63,20 @@ def make_client(graph=None, **settings_kwargs):
 @pytest.fixture
 def client_factory():
     return make_client
+
+
+@pytest.fixture(autouse=True)
+def retrieval_off(monkeypatch):
+    """Keeps a developer's .env (RAG_ENABLED=true, a running RAG service)
+    out of every test: retrieval stays off unless a test turns it on."""
+    import orchestration.grounding as grounding
+
+    monkeypatch.setenv("RAG_ENABLED", "false")
+    monkeypatch.setattr(grounding, "_client", None)
+
+
+@pytest.fixture(autouse=True)
+def conversations_in_memory(monkeypatch):
+    """Keeps a developer's .env (AGENTIC_STATE_DB) out of every test:
+    conversations stay in memory unless a test puts them on disk."""
+    monkeypatch.setenv("AGENTIC_STATE_DB", "")
