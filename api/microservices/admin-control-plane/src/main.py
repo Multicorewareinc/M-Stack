@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 import httpx
 from db import Base, build_engine, build_sessionmaker
 from fastapi import FastAPI
+from http_metrics import HttpMetricsMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from seed import seed_permissions, seed_plans
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -112,6 +113,8 @@ def create_app(
             await billing_client.aclose()
 
     app = FastAPI(title="Admin Control Plane", version="0.1.0", lifespan=lifespan)
+    # Request rate / errors / duration on /metrics -- see http_metrics.py.
+    app.add_middleware(HttpMetricsMiddleware)
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessionmaker = sessionmaker

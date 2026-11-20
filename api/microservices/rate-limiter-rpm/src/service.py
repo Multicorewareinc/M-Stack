@@ -20,9 +20,15 @@ from __future__ import annotations
 import logging
 import time
 
+from prometheus_client import Counter
+
 from settings import RateLimits, Settings
 
 logger = logging.getLogger(__name__)
+
+# Every Valkey error this service swallows, by where: `check` is a fail-open allow (the limiter
+# is not limiting), `dedupe`/`count` are increments at risk of double-counting or being dropped.
+VALKEY_ERRORS = Counter("rl_rpm_valkey_errors_total", "Valkey errors swallowed", ["op"])
 
 KEY_PREFIX = "rl:rpm"
 
@@ -75,6 +81,7 @@ class RateLimiterService:
         try:
             values = await self._redis.mget(keys)  # read-only; counting happens async (count())
         except Exception:
+            VALKEY_ERRORS.labels("check").inc()
             logger.warning("redis_error_fail_open", exc_info=True)
             return {"decision": "allow"}
 
@@ -120,6 +127,7 @@ class RateLimiterService:
                 # SETNX + TTL: first sighting returns True; a replay returns None/False -> skip.
                 first = await self._redis.set(f"{KEY_PREFIX}:seen:{request_id}", 1, nx=True, ex=self._dedupe_ttl)
             except Exception:
+                VALKEY_ERRORS.labels("dedupe").inc()
                 logger.warning("dedupe_error_counting_anyway", exc_info=True)
                 first = True
             if not first:
@@ -134,4 +142,5 @@ class RateLimiterService:
                 pipe.expire(key, 60)
             await pipe.execute()
         except Exception:
+            VALKEY_ERRORS.labels("count").inc()
             logger.warning("count_redis_error_dropped", exc_info=True)

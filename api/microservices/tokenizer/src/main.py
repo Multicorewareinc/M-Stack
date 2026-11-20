@@ -11,6 +11,7 @@ import sys
 from datetime import UTC, datetime
 
 from fastapi import FastAPI
+from http_metrics import HttpMetricsMiddleware
 from router import router
 from service import TOKENIZERS, TokenizerService
 
@@ -56,6 +57,8 @@ def create_app(settings: Settings | None = None, *, tokenizers: dict | None = No
     service = TokenizerService(tokenizers=registry, default=settings.tokenizer_default)
 
     app = FastAPI(title="Tokenizer", version="0.1.0")
+    # Request rate / errors / duration on /metrics -- see http_metrics.py.
+    app.add_middleware(HttpMetricsMiddleware)
     app.state.settings = settings
     app.state.service = service
 

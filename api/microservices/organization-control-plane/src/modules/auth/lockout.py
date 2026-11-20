@@ -24,9 +24,12 @@ import hashlib
 import logging
 
 import redis.asyncio as aioredis
+from prometheus_client import Counter
 from redis.exceptions import RedisError
 
 from errors import TooManyAttemptsError
+
+LOCKOUTS = Counter("cp_auth_lockouts_total", "Login lockouts tripped (each backoff cycle)")
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +106,7 @@ async def record_failure(email: str, ip: str, settings) -> None:
                 settings.login_backoff_ceiling_seconds,
             )
             await r.set(_key(email, ip, _LOCK), b"1", ex=backoff)
+            LOCKOUTS.inc()
     except RedisError:
         _emit_degraded()
 

@@ -22,8 +22,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Histogram
 from service import resolve_usage
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,12 @@ REPUBLISH_FAIL = Counter(
     "enricher_republish_failures_total", "Republish failures (terminal=true on max_deliver exhaustion)", ["terminal"]
 )
 TOKENIZER_FALLBACK = Counter("enricher_tokenizer_fallback_total", "Tokenizer fallback outcomes", ["outcome"])
+# A build fault is acked (redelivery cannot fix it), so the event is dropped -- only this shows it.
+BUILD_ERRORS = Counter("enricher_build_errors_total", "Response events dropped on a build error")
+PROCESS_SECONDS = Histogram(
+    "enricher_process_seconds", "Time to enrich and republish one response event",
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
 
 # Fields carried through from the source `response` event onto the enriched event.
 # `body` is deliberately dropped; `usage` is replaced with the normalized object.
@@ -214,9 +221,17 @@ class EnricherConsumer:
             await self._safe_ack(msg)  # request/chunk/other: skip + ack, nothing to republish
             return
 
+        start = time.perf_counter()
+        try:
+            await self._enrich_and_republish(msg, event)
+        finally:
+            PROCESS_SECONDS.observe(time.perf_counter() - start)
+
+    async def _enrich_and_republish(self, msg, event: dict) -> None:
         try:
             enriched = await self._build_enriched(event)
         except Exception:
+            BUILD_ERRORS.inc()
             logger.warning("enricher_build_error_acked", exc_info=True)
             await self._safe_ack(msg)
             return

@@ -33,3 +33,14 @@ def test_metrics(client_factory):
 def test_unknown_default_fails_startup():
     with pytest.raises(RuntimeError):
         create_app(Settings(tokenizer_default="does-not-exist"), tokenizers={"cl100k_base": lambda t: 0})
+
+
+def test_tokens_counted_per_tokenizer(client_factory):
+    from prometheus_client import REGISTRY
+
+    client = client_factory()
+    resp = client.post("/tokenize", json={"text": "hello world"})
+    assert resp.status_code == 200
+    body = resp.json()
+    value = REGISTRY.get_sample_value("tokenizer_tokens_total", {"tokenizer": body["tokenizer"]})
+    assert value is not None and value >= body["tokens"]
