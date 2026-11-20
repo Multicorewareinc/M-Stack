@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 from ..base import ControlPlaneError, ControlPlanePrerequisiteError
 from ..spec import ControlPlane
 
@@ -68,6 +69,7 @@ class FastAPIControlPlaneDriver:
             values["nodeSelector"] = control_plane.node_selector
         if control_plane.tolerations is not None:
             values["tolerations"] = control_plane.tolerations
+        values.update(service_monitor_values(control_plane.service_monitor_labels))
         return values
 
     def check_prerequisites(self, control_plane: ControlPlane) -> List[str]:

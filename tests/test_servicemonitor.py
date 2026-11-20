@@ -113,3 +113,39 @@ def test_vllm_service_monitor_does_not_disturb_other_manifests():
     )
     kinds = [o["kind"] for o in driver.manifests(inf)]
     assert kinds == ["Namespace", "Deployment", "Service", "NetworkPolicy", "ServiceMonitor"]
+
+
+# -- first-party charts (metrics.serviceMonitor) ------------------------------
+def test_chart_values_are_empty_without_labels():
+    from multistack.servicemonitor import chart_values
+
+    assert chart_values({}) == {}
+    assert chart_values(None) == {}
+
+
+def test_chart_values_enable_the_charts_service_monitor():
+    from multistack.servicemonitor import chart_values
+
+    labels = {"release": "kube-prometheus-stack"}
+    values = chart_values(labels)
+    assert values == {"metrics": {"serviceMonitor": {"enabled": True, "labels": labels}}}
+    assert values["metrics"]["serviceMonitor"]["labels"] is not labels
+
+
+def test_a_stack_wires_published_labels_into_every_chart_capability():
+    """Published once by the observability stage, read by each service."""
+    from multistack import Billing, ControlPlane, Enricher, Gateway, Policy, Tokenizer
+    from multistack.stack import Stack
+
+    labels = {"release": "kube-prometheus-stack"}
+    stack = Stack(kubeconfig_path=KUBECONFIG).provide(
+        service_monitor_labels=labels,
+        cache_url="redis://valkey:6379/0",
+        event_backbone_url="nats://nats:4222",
+        api_key_secret="gw-keys",
+    )
+    for cls in (Billing, ControlPlane, Enricher, Gateway, Policy, Tokenizer):
+        assert "service_monitor_labels" in cls.FROM_STACK, cls.__name__
+        assert cls.model_fields["service_monitor_labels"].default_factory() == {}
+    assert stack.build(Tokenizer).service_monitor_labels == labels
+    assert stack.build(Enricher, event_backbone_url="nats://nats:4222").service_monitor_labels == labels

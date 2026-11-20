@@ -1,0 +1,39 @@
+{{- /*
+Opt-in Prometheus Operator ServiceMonitor for this service's /metrics.
+
+Rendered only when metrics.serviceMonitor.enabled is set AND the cluster
+serves monitoring.coreos.com/v1. Without the CRD it renders nothing rather
+than failing: the SDK turns this on for every service up front, including
+ones installed before the observability stack, and re-running the install
+once the operator is up adds it. The prometheus.io/* annotations
+(metrics.scrapeAnnotations) remain the CRD-free path.
+
+metrics.serviceMonitor.labels must match the installed Prometheus's
+serviceMonitorSelector -- for kube-prometheus-stack that is
+`release: <its release name>`. See multistack/servicemonitor/README.md.
+*/ -}}
+{{- $sm := ((.Values.metrics | default dict).serviceMonitor | default dict) }}
+{{- if and $sm.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "tokenizer.fullname" . }}
+  labels:
+    {{- include "tokenizer.labels" . | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "tokenizer.selectorLabels" . | nindent 6 }}
+  endpoints:
+    # service.yaml names its port "http"; Prometheus Operator resolves by name.
+    - port: http
+      path: /metrics
+      interval: {{ $sm.interval | default "30s" }}
+      scrapeTimeout: {{ $sm.scrapeTimeout | default "10s" }}
+{{- end }}

@@ -83,3 +83,21 @@ def apply_service_monitor(
         port=port, path=path, interval=interval, extra_labels=extra_labels,
     )
     kube_apply(kubeconfig_path, manifest, error_cls=error_cls)
+
+
+def chart_values(labels: dict[str, str] | None) -> dict[str, Any]:
+    """Helm values turning on a first-party chart's own ServiceMonitor.
+
+    For the capabilities installed from a chart under `api/microservices/`
+    (Gateway, Policy, Billing, ControlPlane, Enricher, Tokenizer): each
+    chart ships `templates/servicemonitor.yaml` behind
+    `metrics.serviceMonitor.enabled`, so the driver only has to pass the
+    selector labels through rather than apply a second object itself.
+
+    Empty `labels` returns `{}` -- the chart default (no ServiceMonitor) is
+    left alone, for the same reason `service_monitor_manifest` never
+    guesses a label.
+    """
+    if not labels:
+        return {}
+    return {"metrics": {"serviceMonitor": {"enabled": True, "labels": dict(labels)}}}

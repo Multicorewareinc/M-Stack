@@ -700,3 +700,82 @@ def test_the_notes_list_what_an_existing_secret_must_hold(
             f"secret.yaml renders {key} but NOTES.txt does not tell an "
             f"operator their existingSecret needs it"
         )
+
+
+# -- ServiceMonitor (metrics.serviceMonitor) --------------------------------
+# kube-prometheus-stack ignores prometheus.io/* annotations, so each chart
+# ships an opt-in ServiceMonitor. Every first-party chart, incl. the two
+# not in CHARTS above.
+ENRICHER = ROOT / "api/microservices/enricher/chart"
+BILLING = ROOT / "api/microservices/billing/chart"
+BACKBONE = ["--set", "config.events.backboneUrl=nats://nats:4222"]
+
+SCRAPED_CHARTS = [
+    *CHARTS,
+    pytest.param(ENRICHER, BACKBONE, 8000, id="enricher"),
+    pytest.param(BILLING, ["--set", "secret.existingSecret=billing", *BACKBONE],
+                 8000, id="billing"),
+]
+# The charts that have a NetworkPolicy template at all.
+NETPOL_CHARTS = [p for p in SCRAPED_CHARTS
+                 if p.id in ("model-gateway", "rate-limiter-rpm", "rate-limiter-tpm")]
+
+CRD = ["--api-versions", "monitoring.coreos.com/v1"]
+MONITOR_ON = [
+    "--set", "metrics.serviceMonitor.enabled=true",
+    "--set", "metrics.serviceMonitor.labels.release=kube-prometheus-stack",
+]
+
+
+def kinds(docs: List[Dict[str, Any]], kind: str) -> List[Dict[str, Any]]:
+    return [d for d in docs if d.get("kind") == kind]
+
+
+@pytest.mark.parametrize("chart,minimum,port", SCRAPED_CHARTS)
+def test_no_service_monitor_by_default(chart: Path, minimum, port):
+    """Opt-in: an existing release is untouched until a caller asks."""
+    assert not kinds(render(chart, *minimum, *CRD), "ServiceMonitor")
+
+
+@pytest.mark.parametrize("chart,minimum,port", SCRAPED_CHARTS)
+def test_no_service_monitor_on_a_cluster_without_the_crd(chart: Path, minimum, port):
+    """Installing before the observability stage must still succeed --
+    a ServiceMonitor there fails the whole release with "no matches for
+    kind ServiceMonitor"."""
+    assert not kinds(render(chart, *minimum, *MONITOR_ON), "ServiceMonitor")
+
+
+@pytest.mark.parametrize("chart,minimum,port", SCRAPED_CHARTS)
+def test_the_service_monitor_scrapes_the_services_named_port(chart: Path, minimum, port):
+    docs = render(chart, "--namespace", "svc-ns", *minimum, *MONITOR_ON, *CRD)
+    [monitor] = kinds(docs, "ServiceMonitor")
+    service = one(docs, "Service")
+
+    assert monitor["metadata"]["labels"]["release"] == "kube-prometheus-stack"
+    spec = monitor["spec"]
+    # Prometheus Operator resolves the endpoint by Service port *name*.
+    port_names = {p["name"] for p in service["spec"]["ports"]}
+    [endpoint] = spec["endpoints"]
+    assert endpoint["port"] in port_names
+    assert endpoint["path"] == "/metrics"
+    # Selects this chart's Service, and only in its own namespace.
+    selector = spec["selector"]["matchLabels"]
+    assert selector.items() <= service["metadata"]["labels"].items()
+    assert spec["namespaceSelector"] == {"matchNames": ["svc-ns"]}
+
+
+@pytest.mark.parametrize("chart,minimum,port", NETPOL_CHARTS)
+def test_the_network_policy_lets_prometheus_scrape(chart: Path, minimum, port):
+    """allowedIngress is same-namespace pods only; Prometheus is not."""
+    netpol = ["--set", "networkPolicy.enabled=true",
+              "--set", "networkPolicy.allowedIngress[0].app=caller"]
+
+    def from_monitoring(docs):
+        rules = one(docs, "NetworkPolicy")["spec"]["ingress"]
+        return [r for r in rules for peer in r["from"]
+                if peer.get("namespaceSelector", {}).get("matchLabels", {})
+                .get("kubernetes.io/metadata.name") == "monitoring"]
+
+    assert not from_monitoring(render(chart, *minimum, *netpol))
+    [rule] = from_monitoring(render(chart, *minimum, *netpol, *MONITOR_ON, *CRD))
+    assert rule["ports"] == [{"protocol": "TCP", "port": port}]

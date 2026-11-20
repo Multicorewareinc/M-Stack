@@ -121,6 +121,7 @@ class Billing(CapabilitySpec):
     REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster", "database")
     FROM_STACK: ClassVar[Dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
     }
     PROVIDES: ClassVar[Dict[str, str]] = {"billing_endpoint": "endpoint"}
 
@@ -152,6 +153,13 @@ class Billing(CapabilitySpec):
     # control plane; this is how a caller says *which* worker.
     node_selector: Optional[Dict[str, str]] = None
     tolerations: Optional[List[Dict[str, Any]]] = None
+    # Labels for the chart's own ServiceMonitor (metrics.serviceMonitor in
+    # its values.yaml). Must match the installed Prometheus's
+    # serviceMonitorSelector -- `{"release": <Observability release_name>}`
+    # for kube-prometheus-stack. Empty => no ServiceMonitor. Wired from the
+    # Stack when something published `service_monitor_labels`; see
+    # multistack/servicemonitor/README.md.
+    service_monitor_labels: Dict[str, str] = Field(default_factory=dict)
 
     @field_validator("kubeconfig_path")
     @classmethod
