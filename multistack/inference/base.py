@@ -1,5 +1,6 @@
 """What an inference implementation must provide, and what it can raise."""
-from typing import List, Optional, Protocol, runtime_checkable
+
+from typing import Protocol, runtime_checkable
 
 from ..backends.transport import NodeCommandError, NodePrerequisiteError
 from .spec import Inference
@@ -15,12 +16,15 @@ class InferencePrerequisiteError(NodePrerequisiteError):
 
 @runtime_checkable
 class InferenceDriver(Protocol):
-    def check_prerequisites(self, inference: Inference, nodes: Optional[List] = None) -> List[str]: ...
+    def check_prerequisites(self, inference: Inference, nodes: list | None = None) -> list[str]: ...
 
-    def create(self, inference: Inference, nodes: Optional[List] = None) -> str:
+    def create(self, inference: Inference, nodes: list | None = None) -> str:
         """Deploys it and returns the endpoint."""
 
-    def delete(self, inference: Inference) -> None: ...
+    def delete(self, inference: Inference, remove_cache: bool = False) -> None:
+        """Removes the deployment. A model cache outlives it unless
+        `remove_cache` -- other deployments may share it, and it holds
+        gigabytes that are slow to fetch again."""
 
     def endpoint(self, inference: Inference) -> str:
         """Where it actually serves — may differ from `inference.endpoint`

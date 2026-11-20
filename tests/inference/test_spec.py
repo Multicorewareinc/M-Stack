@@ -1,15 +1,16 @@
 """Inference spec validation, manifest rendering, and state tracking.
 Nothing shells out — kubectl/ssh calls are stubbed or never reached."""
+
 import pytest
 
 import multistack.state.tracking as tracking
 from multistack import Inference, InferenceBackend
-from multistack.inference.spec import DEFAULT_MIRROR_IMAGE, DEFAULT_MODEL
 from multistack.inference.drivers.vllm import VLLMDriver
+from multistack.inference.spec import DEFAULT_MIRROR_IMAGE, DEFAULT_MODEL
 from multistack.stack import Stack
 
 KC = "/tmp/kc.yaml"
-KUBECONFIG = KC          # the ported tests below use this name
+KUBECONFIG = KC  # the ported tests below use this name
 
 
 def inference(**kwargs) -> Inference:
@@ -92,13 +93,17 @@ def test_requests_equal_limits_for_guaranteed_qos(driver):
 
 
 def test_s3_model_gets_a_mirror_init_container(driver):
-    deployment = driver.manifests(inference(
-        model="s3://models/qwen", s3_endpoint_url="http://minio:9000",
-        s3_secret_name="minio-creds",
-    ))[1]
+    deployment = driver.manifests(
+        inference(
+            model="s3://models/qwen",
+            s3_endpoint_url="http://minio:9000",
+            s3_secret_name="minio-creds",
+        )
+    )[1]
     init = deployment["spec"]["template"]["spec"]["initContainers"][0]
     assert init["name"] == "fetch-weights"
-    assert "mc mirror" in " ".join(init["command"])
+    shell = " ".join(init["command"])
+    assert "aws" in shell and "s3 sync" in shell
 
 
 # -- state tracking (multistack/state/tracking.py) -------------------------
@@ -119,8 +124,11 @@ def test_create_is_tracked_as_the_inference_component(isolated_state, monkeypatc
     backend = InferenceBackend()
     _seed_healthy_cluster(tracking.default_state_manager())
     monkeypatch.setattr(
-        backend, "driver_for",
-        lambda spec: type("D", (), {"create": staticmethod(lambda s, nodes=None: "http://vllm:8000")})(),
+        backend,
+        "driver_for",
+        lambda spec: type(
+            "D", (), {"create": staticmethod(lambda s, nodes=None: "http://vllm:8000")}
+        )(),
     )
 
     service = inference(name="vllm-qwen")
@@ -140,9 +148,9 @@ def test_failed_create_is_marked_failed(isolated_state, monkeypatch):
         raise RuntimeError("no ready replicas")
 
     monkeypatch.setattr(
-        backend, "driver_for",
-        lambda spec: type("D", (), {"create": staticmethod(
-            lambda s, nodes=None: boom(s))})(),
+        backend,
+        "driver_for",
+        lambda spec: type("D", (), {"create": staticmethod(lambda s, nodes=None: boom(s))})(),
     )
 
     with pytest.raises(RuntimeError, match="no ready replicas"):
@@ -183,6 +191,7 @@ def s3_svc(**kwargs) -> Inference:
     )
     base.update(kwargs)
     return Inference(kubeconfig_path=KUBECONFIG, **base)
+
 
 def test_valid_spec_passes():
     inf().validate()
@@ -250,17 +259,19 @@ def test_non_s3_model_is_passed_through_unchanged():
 
 
 def test_mirror_command_carries_no_credentials():
-    # They come from a Secret as env vars; the manifest must stay clean.
+    # They come from a Secret as env vars (the AWS CLI reads them
+    # implicitly); the manifest itself must stay clean of both the
+    # secret's name and any literal key material.
     shell = " ".join(s3_svc().mirror_command())
-    assert "$AWS_ACCESS_KEY_ID" in shell and "$AWS_SECRET_ACCESS_KEY" in shell
     assert "minio-creds" not in shell
-    assert "src/models/qwen" in shell and "/models/qwen" in shell
+    assert "s3://models/qwen" in shell
+    assert "/models/qwen" in shell
 
 
 def test_insecure_tls_is_opt_in():
-    # Self-signed MinIO autocert needs it; a real endpoint must not get it.
-    assert "--insecure" not in " ".join(s3_svc().mirror_command())
-    assert "--insecure" in " ".join(s3_svc(s3_insecure_tls=True).mirror_command())
+    # Self-signed autocert needs it; a real endpoint must not get it.
+    assert "--no-verify-ssl" not in " ".join(s3_svc().mirror_command())
+    assert "--no-verify-ssl" in " ".join(s3_svc(s3_insecure_tls=True).mirror_command())
 
 
 def test_image_defaults_per_device():
@@ -315,25 +326,35 @@ def test_default_mirror_image_is_pinned_and_pullable_anonymously():
     in tests or docs. When MinIO stopped serving anonymous pulls from
     Docker Hub, every s3:// vLLM deployment started failing on the init
     container with `insufficient_scope: authorization failed` — a registry
-    change with no commit in this repo to point at.
+    change with no commit in this repo to point at. Then, on 2026-09-25,
+    MinIO stopped distributing `mc` entirely — quay.io (the first fix)
+    started returning 401 too, and so did dl.min.io's direct binary
+    download. Not a registry to route around a second time; a tool this
+    SDK could no longer depend on at all, so the mirror step moved off
+    `mc` onto boto3 (see mirror_command()'s own docstring).
 
-    Two properties, both of which would have caught it:
+    Two properties, both of which would have caught the first breakage,
+    plus a third the second one adds:
 
-    - a registry that serves anonymous pulls. docker.io/minio/* no longer
-      does, for any tag.
-    - an explicit tag. `:latest` means the image a deployment gets is
-      whatever the registry last pushed, so a working build and a broken
-      one are the same source tree.
+    - a registry/image that serves anonymous pulls.
+    - an explicit tag or digest. `:latest` means the image a deployment
+      gets is whatever the registry last pushed, so a working build and a
+      broken one are the same source tree.
+    - not a MinIO Inc.-distributed image at all, so there is no single
+      vendor's registry policy this can break on again.
     """
     image = DEFAULT_MIRROR_IMAGE
-    registry, _, tagged = image.partition("/")
-    assert registry == "quay.io", (
-        f"{image} is not on quay.io — docker.io/minio/mc returns 401 to "
-        f"anonymous pulls, which is unpullable from a cluster with no "
-        f"registry credentials"
+    assert "minio" not in image.lower(), (
+        f"{image} is a MinIO Inc.-distributed image — that vendor has "
+        f"already cut off anonymous pulls once and stopped distributing "
+        f"the client entirely a second time"
     )
-    _, _, tag = tagged.rpartition(":")
-    assert tag and tag != "latest", f"{image} must pin a tag, not 'latest'"
+    _name, sep, digest = image.partition("@sha256:")
+    assert sep and len(digest) == 64, (
+        f"{image} must pin an exact digest, not a tag -- a tag can move "
+        f"out from under a deployment with no commit in this repo to "
+        f"point at, which is exactly how the first breakage happened"
+    )
     # On options now, not the spec: deploy mechanics moved to VLLMOptions
     # in the inference migration, which is also where the old literal
     # survived in the driver as an unreachable `if options else` fallback.
@@ -343,7 +364,6 @@ def test_default_mirror_image_is_pinned_and_pullable_anonymously():
     # copy -- that duplicate is exactly what kept minio/mc:latest alive
     # after the default moved.
     init = next(
-        c for c in VLLMDriver().manifests(s3_svc())[1]["spec"]["template"]
-        ["spec"]["initContainers"]
+        c for c in VLLMDriver().manifests(s3_svc())[1]["spec"]["template"]["spec"]["initContainers"]
     )
     assert init["image"] == image

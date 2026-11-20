@@ -10,12 +10,14 @@ Two halves, as with the Longhorn/RKE2 backends:
   * **Node-side** (optional) — probes the target node's CPU flags over SSH
     so the dtype can be chosen from what the hardware actually supports.
 """
+
 from __future__ import annotations
+
 import json
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ...backends.transport import NodeCommandMixin
 from ...kube import apply as kube_apply
@@ -55,16 +57,30 @@ class VLLMDriver(NodeCommandMixin):
                 return dtype
         return "float32"
 
-    def check_prerequisites(self, inference: Inference, nodes: Optional[List] = None) -> List[str]:
+    def check_prerequisites(self, inference: Inference, nodes: list | None = None) -> list[str]:
         """Checks the target nodes can host this service. Pass the nodes
         it's pinned to (matching node_selector), not the whole cluster."""
-        warnings: List[str] = []
+        warnings: list[str] = []
+        if inference.model_cache == "node" and not inference.node_selector:
+            warnings.append(
+                "model_cache='node' without a node_selector: the copy is kept "
+                "on whichever machine the pod lands on, so a pod rescheduled "
+                "elsewhere downloads the model again there. Pin it to the GPU "
+                "machines with node_selector."
+            )
+        if inference.model_cache == "stream" and inference.image is None:
+            warnings.append(
+                "model_cache='stream' with the default vLLM image: the Run:ai "
+                "streamer is not in the official images (it needs "
+                "`vllm[runai]`), so the server fails to load the model. Set "
+                "`image` to a build that includes it."
+            )
         for node in nodes or []:
             warnings.extend(self._check_node(node, inference))
         return warnings
 
-    def _check_node(self, node, inference: Inference) -> List[str]:
-        warnings: List[str] = []
+    def _check_node(self, node, inference: Inference) -> list[str]:
+        warnings: list[str] = []
 
         cores = self._parse_int(self._probe(node, "nproc", "CPU core count"))
         if cores is not None and inference.cpu_cores > cores:
@@ -92,15 +108,17 @@ class VLLMDriver(NodeCommandMixin):
         if inference.device == "cpu" and inference.dtype is None:
             if self.recommended_dtype(node) == "float32":
                 warnings.append(
-                    f"{node.address}: no native bf16/fp16 support, so dtype "
-                    "float32 will be used."
+                    f"{node.address}: no native bf16/fp16 support, so dtype float32 will be used."
                 )
 
-        if self._probe(
-            node,
-            "test -e /var/lib/rancher/rke2/server/db && echo server || echo agent",
-            "node role",
-        ) == "server":
+        if (
+            self._probe(
+                node,
+                "test -e /var/lib/rancher/rke2/server/db && echo server || echo agent",
+                "node role",
+            )
+            == "server"
+        ):
             warnings.append(
                 f"{node.address}: this is a control-plane/etcd node. Inference "
                 "here contends with etcd and the API server — pin the service "
@@ -110,7 +128,7 @@ class VLLMDriver(NodeCommandMixin):
         return warnings
 
     # -- cluster-side -------------------------------------------------------
-    def create(self, inference: Inference, nodes: Optional[List] = None) -> str:
+    def create(self, inference: Inference, nodes: list | None = None) -> str:
         """Deploys (or updates) the service and returns its base URL once
         it is serving. With `nodes`, prerequisites are checked and an
         unset dtype is chosen from their CPU flags."""
@@ -127,8 +145,10 @@ class VLLMDriver(NodeCommandMixin):
                 dtype = self.recommended_dtype(nodes[0])
                 print(f"[inference/vllm] selected dtype={dtype} from node CPU flags")
 
-        print(f"[inference/vllm] applying {inference.name} to "
-              f"namespace {inference.resolved_namespace}")
+        print(
+            f"[inference/vllm] applying {inference.name} to "
+            f"namespace {inference.resolved_namespace}"
+        )
         self._kubectl_apply(inference, self.manifests(inference, dtype=dtype))
 
         self._wait_until_ready(inference)
@@ -141,15 +161,52 @@ class VLLMDriver(NodeCommandMixin):
         print(f"[inference/vllm] serving at {endpoint}")
         return endpoint
 
-    def delete(self, inference: Inference) -> None:
+    def delete(self, inference: Inference, remove_cache: bool = False) -> None:
         inference.validate()
         self._require_cli("kubectl")
         for kind in ("deployment", "service"):
             self._kubectl(
-                inference, "delete", kind, inference.name,
-                "-n", inference.resolved_namespace, "--ignore-not-found",
+                inference,
+                "delete",
+                kind,
+                inference.name,
+                "-n",
+                inference.resolved_namespace,
+                "--ignore-not-found",
             )
+        # The ServiceMonitor this driver creates was not among them, so
+        # every teardown left one behind and Prometheus kept scraping a
+        # target that no longer existed. Observed on 2026-10-09:
+        # `vllm-qwen-metrics` outlived the Deployment and Service by the
+        # whole rest of the session.
+        #
+        # Unconditional, unlike the create side. A caller tearing down
+        # names the workload; it has no reason to restate the labels the
+        # monitor was created with, and gating on them means the one
+        # resource whose name is fully derived from the spec is the one
+        # resource that leaks. check=False because a cluster with no
+        # Prometheus Operator has no such resource type at all, and
+        # --ignore-not-found does not cover a missing CRD.
+        self._kubectl(
+            inference,
+            "delete",
+            "servicemonitor",
+            f"{inference.name}-metrics",
+            "-n",
+            inference.resolved_namespace,
+            "--ignore-not-found",
+            check=False,
+        )
         print(f"[inference/vllm] removed {inference.name} from {inference.resolved_namespace}")
+        # A node cache is a folder on each machine, out of reach of a
+        # Kubernetes delete, and is left for the next deployment to find.
+        if remove_cache and inference.model_cache == "node":
+            print(
+                "[inference/vllm] the node cache is a host folder and was "
+                f"left in place; remove {inference.node_cache_path}/"
+                f"{inference.model_cache_key if inference.model_is_s3 else ''} "
+                "on each machine to reclaim the space."
+            )
 
     def endpoint(self, inference: Inference) -> str:
         """With `host_network`, the pod answers on its node's address, so
@@ -157,35 +214,51 @@ class VLLMDriver(NodeCommandMixin):
         endpoint on the spec is already correct."""
         if inference.host_network:
             host = self._kubectl(
-                inference, "get", "pods",
-                "-n", inference.resolved_namespace,
-                "-l", f"app={inference.name}",
-                "-o", "jsonpath={.items[0].status.hostIP}",
+                inference,
+                "get",
+                "pods",
+                "-n",
+                inference.resolved_namespace,
+                "-l",
+                f"app={inference.name}",
+                "-o",
+                "jsonpath={.items[0].status.hostIP}",
             ).strip()
             return f"http://{host}:{inference.port}"
         return inference.endpoint
 
     # -- manifest rendering -------------------------------------------------
-    def manifests(self, inference: Inference, dtype: Optional[str] = None) -> List[Dict[str, Any]]:
+    def manifests(self, inference: Inference, dtype: str | None = None) -> list[dict[str, Any]]:
         """Renders the Namespace, Deployment and Service. Public so callers
         can inspect/diff what would be applied without touching a cluster."""
         namespace = inference.resolved_namespace
         env = [{"name": k, "value": v} for k, v in sorted(inference.env().items())]
 
-        # Credentials for mirror_command()'s `mc` (MinIO Client CLI)
-        # `alias set` — read from the existing s3_secret_name Secret, never
-        # generated or written here.
-        mirror_env = [
-            {
-                "name": key,
-                "valueFrom": {
-                    "secretKeyRef": {"name": inference.s3_secret_name, "key": key}
-                },
-            }
-            for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
-        ] if inference.s3_secret_name else []
+        # Credentials for mirror_command()'s AWS CLI — read from the
+        # existing s3_secret_name Secret, never generated or written here.
+        mirror_env = (
+            [
+                {
+                    "name": key,
+                    "valueFrom": {"secretKeyRef": {"name": inference.s3_secret_name, "key": key}},
+                }
+                for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+            ]
+            if inference.s3_secret_name
+            else []
+        )
 
-        resources: Dict[str, Dict[str, str]] = {
+        streaming = inference.model_cache == "stream"
+        if streaming:
+            # The serving container reads the bucket itself, so it gets the
+            # credentials (by reference, as the mirror does) and the
+            # streamer's endpoint settings. In every other mode it gets
+            # neither -- only the init container talks to the bucket.
+            env += [
+                {"name": k, "value": v} for k, v in sorted(inference.stream_env().items())
+            ] + mirror_env
+
+        resources: dict[str, dict[str, str]] = {
             "requests": {
                 "cpu": str(inference.cpu_cores),
                 "memory": f"{inference.memory_gb}Gi",
@@ -199,14 +272,33 @@ class VLLMDriver(NodeCommandMixin):
             resources["requests"]["nvidia.com/gpu"] = str(inference.gpu_count)
             resources["limits"]["nvidia.com/gpu"] = str(inference.gpu_count)
 
-        if inference.model_is_s3:
+        if streaming:
+            # Nothing lands on disk, so there is nothing to mount.
+            model_mounts: list[dict[str, Any]] = []
+        elif inference.model_is_s3:
             model_mounts = [{"name": "model-store", "mountPath": LOCAL_MODEL_DIR}]
         else:
-            model_mounts = [
-                {"name": "model-store", "mountPath": "/root/.cache/huggingface"}
-            ]
+            # A HuggingFace id: vLLM's own HF cache. Under model_cache="node"
+            # this is the node folder, and the HF cache layout already knows
+            # what it has downloaded.
+            model_mounts = [{"name": "model-store", "mountPath": "/root/.cache/huggingface"}]
 
-        pod_spec: Dict[str, Any] = {
+        if inference.model_cache == "node":
+            model_volumes = [
+                {
+                    "name": "model-store",
+                    "hostPath": {
+                        "path": inference.node_cache_path,
+                        "type": "DirectoryOrCreate",
+                    },
+                }
+            ]
+        elif streaming:
+            model_volumes = []
+        else:
+            model_volumes = [{"name": "model-store", "emptyDir": {"sizeLimit": "20Gi"}}]
+
+        pod_spec: dict[str, Any] = {
             # Kubernetes otherwise injects a `VLLM_PORT=tcp://<clusterIP>:...`
             # env var into every pod in this namespace once the `vllm`
             # Service exists (Docker-links-style discovery vars, named
@@ -215,32 +307,35 @@ class VLLMDriver(NodeCommandMixin):
             # collision that crash-loops the pod. Confirmed live: the
             # default name ("vllm") hits this on every deploy.
             "enableServiceLinks": False,
-            "containers": [{
-                "name": "vllm",
-                "image": inference.container_image,
-                "args": inference.container_args(dtype=dtype),
-                "env": env,
-                "ports": [{"containerPort": inference.port, "name": "http"}],
-                "resources": resources,
-                "readinessProbe": {
-                    "httpGet": {"path": "/health", "port": inference.port},
-                    "initialDelaySeconds": 60,
-                    "periodSeconds": 15,
-                    "failureThreshold": 60,
-                },
-                "volumeMounts": model_mounts + [
-                    {"name": "dshm", "mountPath": "/dev/shm"},
-                ],
-            }],
+            "containers": [
+                {
+                    "name": "vllm",
+                    "image": inference.container_image,
+                    "args": inference.container_args(dtype=dtype),
+                    "env": env,
+                    "ports": [{"containerPort": inference.port, "name": "http"}],
+                    "resources": resources,
+                    "readinessProbe": {
+                        "httpGet": {"path": "/health", "port": inference.port},
+                        "initialDelaySeconds": 60,
+                        "periodSeconds": 15,
+                        "failureThreshold": 60,
+                    },
+                    "volumeMounts": [
+                        *model_mounts,
+                        {"name": "dshm", "mountPath": "/dev/shm"},
+                    ],
+                }
+            ],
             "volumes": [
-                {"name": "model-store", "emptyDir": {"sizeLimit": "20Gi"}},
+                *model_volumes,
                 {
                     "name": "dshm",
                     "emptyDir": {"medium": "Memory", "sizeLimit": f"{inference.shm_gb}Gi"},
                 },
             ],
         }
-        if inference.model_is_s3:
+        if inference.model_is_s3 and not streaming:
             # Init container mirrors weights from the existing bucket to
             # local disk before the vLLM container starts — see
             # Inference.mirror_command().
@@ -249,13 +344,15 @@ class VLLMDriver(NodeCommandMixin):
             # the branch was unreachable -- and the literal it carried was
             # a second copy of the default, which is how it kept
             # `minio/mc:latest` after the real default had moved.
-            pod_spec["initContainers"] = [{
-                "name": "fetch-weights",
-                "image": inference.options.s3_mirror_image,
-                "command": inference.mirror_command(),
-                "env": mirror_env,
-                "volumeMounts": model_mounts,
-            }]
+            pod_spec["initContainers"] = [
+                {
+                    "name": "fetch-weights",
+                    "image": inference.options.s3_mirror_image,
+                    "command": inference.mirror_command(),
+                    "env": mirror_env,
+                    "volumeMounts": model_mounts,
+                }
+            ]
 
         if inference.runtime_class:
             pod_spec["runtimeClassName"] = inference.runtime_class
@@ -267,7 +364,7 @@ class VLLMDriver(NodeCommandMixin):
             pod_spec["hostNetwork"] = True
             pod_spec["dnsPolicy"] = "ClusterFirstWithHostNet"
 
-        deployment: Dict[str, Any] = {
+        deployment: dict[str, Any] = {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {"name": inference.name, "namespace": namespace},
@@ -283,7 +380,7 @@ class VLLMDriver(NodeCommandMixin):
         if inference.host_network:
             deployment["spec"]["strategy"] = {"type": "Recreate"}
 
-        objects: List[Dict[str, Any]] = [
+        objects: list[dict[str, Any]] = [
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
             deployment,
             {
@@ -306,32 +403,38 @@ class VLLMDriver(NodeCommandMixin):
                 },
                 "spec": {
                     "selector": {"app": inference.name},
-                    "ports": [{
-                        "port": inference.port,
-                        "targetPort": inference.port,
-                        "name": "http",
-                    }],
+                    "ports": [
+                        {
+                            "port": inference.port,
+                            "targetPort": inference.port,
+                            "name": "http",
+                        }
+                    ],
                 },
             },
         ]
         if inference.allowed_client_labels:
-            objects.append(network_policy_manifest(
-                f"{inference.name}-allow-clients",
-                namespace,
-                {"app": inference.name},
-                allowed_ingress=inference.allowed_client_labels,
-                ports=[inference.port],
-            ))
+            objects.append(
+                network_policy_manifest(
+                    f"{inference.name}-allow-clients",
+                    namespace,
+                    {"app": inference.name},
+                    allowed_ingress=inference.allowed_client_labels,
+                    ports=[inference.port],
+                )
+            )
         if inference.service_monitor_labels:
             # The Service above names its port "http" — ServiceMonitor
             # endpoints resolve by Service port *name*, not number.
-            objects.append(service_monitor_manifest(
-                f"{inference.name}-metrics",
-                namespace,
-                {"app": inference.name},
-                port="http",
-                extra_labels=dict(inference.service_monitor_labels),
-            ))
+            objects.append(
+                service_monitor_manifest(
+                    f"{inference.name}-metrics",
+                    namespace,
+                    {"app": inference.name},
+                    port="http",
+                    extra_labels=dict(inference.service_monitor_labels),
+                )
+            )
         return objects
 
     # -- waiting and warmup -------------------------------------------------
@@ -342,21 +445,32 @@ class VLLMDriver(NodeCommandMixin):
         while time.time() < deadline:
             ready = self._parse_int(
                 self._kubectl(
-                    inference, "get", "deployment", inference.name,
-                    "-n", inference.resolved_namespace,
-                    "-o", "jsonpath={.status.readyReplicas}",
+                    inference,
+                    "get",
+                    "deployment",
+                    inference.name,
+                    "-n",
+                    inference.resolved_namespace,
+                    "-o",
+                    "jsonpath={.status.readyReplicas}",
                     check=False,
-                ) or "0"
+                )
+                or "0"
             )
             if ready and ready >= 1:
                 return
 
             status = self._kubectl(
-                inference, "get", "pods",
-                "-n", inference.resolved_namespace,
-                "-l", f"app={inference.name}",
-                "-o", "jsonpath={range .items[*]}{.metadata.name} "
-                      "{.status.phase} restarts={.status.containerStatuses[0].restartCount}{'\\n'}{end}",
+                inference,
+                "get",
+                "pods",
+                "-n",
+                inference.resolved_namespace,
+                "-l",
+                f"app={inference.name}",
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name} "
+                "{.status.phase} restarts={.status.containerStatuses[0].restartCount}{'\\n'}{end}",
                 check=False,
             ).strip()
             if status and status != last:
@@ -374,11 +488,13 @@ class VLLMDriver(NodeCommandMixin):
         """Best-effort: a failure here doesn't mean the service is broken."""
         timeout = inference.options.warmup_timeout if inference.options else 600
         url = f"{self.endpoint(inference)}/v1/chat/completions"
-        body = json.dumps({
-            "model": inference.served_name,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }).encode()
+        body = json.dumps(
+            {
+                "model": inference.served_name,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }
+        ).encode()
         request = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"}
         )
@@ -396,14 +512,19 @@ class VLLMDriver(NodeCommandMixin):
     def _require_cli(self, name: str) -> None:
         require_cli(name, error_cls=InferenceError, purpose="this driver drives it directly")
 
-    def _kubectl_apply(self, inference: Inference, objects: List[Dict[str, Any]]) -> None:
+    def _kubectl_apply(self, inference: Inference, objects: list[dict[str, Any]]) -> None:
         kube_apply(
-            inference.kubeconfig_path, objects,
-            timeout=self.command_timeout, error_cls=InferenceError,
+            inference.kubeconfig_path,
+            objects,
+            timeout=self.command_timeout,
+            error_cls=InferenceError,
         )
 
     def _kubectl(self, inference: Inference, *args: str, check: bool = True) -> str:
         return kube_kubectl(
-            inference.kubeconfig_path, *args,
-            check=check, timeout=self.command_timeout, error_cls=InferenceError,
+            inference.kubeconfig_path,
+            *args,
+            check=check,
+            timeout=self.command_timeout,
+            error_cls=InferenceError,
         )

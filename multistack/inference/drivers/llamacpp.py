@@ -15,10 +15,11 @@ dtype to choose from the host's CPU flags, and no S3 mirror -- llama.cpp
 fetches the GGUF itself from a `-hf` reference. What it does need is a
 node-local cache, because that fetch is several GB per model.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ...kube import apply as kube_apply
 from ...kube import kubectl as kube_kubectl
@@ -44,10 +45,8 @@ class LlamaCppDriver:
         self.command_timeout = command_timeout
 
     # -- checks ------------------------------------------------------------
-    def check_prerequisites(
-        self, inference: Inference, nodes: Optional[List] = None
-    ) -> List[str]:
-        warnings: List[str] = []
+    def check_prerequisites(self, inference: Inference, nodes: list | None = None) -> list[str]:
+        warnings: list[str] = []
         require_cli("kubectl", error_cls=InferencePrerequisiteError)
         require_cluster(inference.kubeconfig_path, capability="inference")
 
@@ -58,10 +57,13 @@ class LlamaCppDriver:
             # the event says only "Insufficient nvidia.com/gpu", which
             # does not hint at what to install.
             allocatable = kube_kubectl(
-                inference.kubeconfig_path, "get", "nodes",
-                "-o", "jsonpath={range .items[*]}"
-                      "{.status.allocatable.nvidia\\.com/gpu} {end}",
-                check=False, error_cls=InferenceError,
+                inference.kubeconfig_path,
+                "get",
+                "nodes",
+                "-o",
+                "jsonpath={range .items[*]}{.status.allocatable.nvidia\\.com/gpu} {end}",
+                check=False,
+                error_cls=InferenceError,
             )
             if not any(part.strip() for part in (allocatable or "").split()):
                 raise InferencePrerequisiteError(
@@ -88,7 +90,7 @@ class LlamaCppDriver:
         return warnings
 
     # -- manifests ---------------------------------------------------------
-    def container_args(self, inference: Inference) -> List[str]:
+    def container_args(self, inference: Inference) -> list[str]:
         """llama.cpp's own flags, from the spec's model-request fields.
 
         Built here rather than on the spec -- unlike vLLM's, these are not
@@ -101,34 +103,48 @@ class LlamaCppDriver:
             # -hf, not --model: llama.cpp resolves a HuggingFace
             # repo:quant reference and downloads the GGUF itself, which is
             # why this driver needs no S3 mirror step.
-            "-hf", inference.model,
-            "-ngl", str(options.n_gpu_layers if inference.device == "gpu" else 0),
-            "--host", "0.0.0.0",
-            "--port", str(inference.port),
+            "-hf",
+            inference.model,
+            "-ngl",
+            str(options.n_gpu_layers if inference.device == "gpu" else 0),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(inference.port),
             # The spec's own field: llama.cpp calls the context window -c,
             # vLLM calls it --max-model-len, and they mean the same thing.
-            "-c", str(inference.max_model_len),
+            "-c",
+            str(inference.max_model_len),
         ]
         if options.cache_type_k:
             args += ["--cache-type-k", options.cache_type_k]
         args += ["-ub", str(options.ubatch_size), "-b", str(options.batch_size)]
         return args
 
-    def manifests(self, inference: Inference) -> List[Dict[str, Any]]:
+    @staticmethod
+    def cache_path(inference: Inference) -> str:
+        """The host folder for the GGUF cache.
+
+        `Inference.cache_path` when set -- the spelling every
+        implementation shares -- else this driver's own
+        `model_cache_path` option, which is where it has always been, so
+        an existing deployment keeps finding the gigabytes it fetched.
+        """
+        return inference.cache_path or inference.options.model_cache_path
+
+    def manifests(self, inference: Inference) -> list[dict[str, Any]]:
         """Namespace, Deployment and Service. Public so a caller can
         render without applying, the same way the vllm driver allows."""
         options = inference.options
         namespace = inference.resolved_namespace
         labels = {"app": inference.name}
 
-        container: Dict[str, Any] = {
+        container: dict[str, Any] = {
             "name": "server",
             "image": options.image,
             "args": self.container_args(inference),
             "ports": [{"containerPort": inference.port}],
-            "volumeMounts": [
-                {"name": "model-cache", "mountPath": CACHE_MOUNT_PATH}
-            ],
+            "volumeMounts": [{"name": "model-cache", "mountPath": CACHE_MOUNT_PATH}],
             # No liveness probe on purpose: a cold start loads several GB
             # onto the card, and a liveness probe that fires during it
             # restarts the pod forever. Readiness gates traffic, which is
@@ -142,19 +158,19 @@ class LlamaCppDriver:
             },
         }
         if inference.device == "gpu" and inference.gpu_count:
-            container["resources"] = {
-                "limits": {NVIDIA_GPU_RESOURCE: str(inference.gpu_count)}
-            }
+            container["resources"] = {"limits": {NVIDIA_GPU_RESOURCE: str(inference.gpu_count)}}
 
-        pod_spec: Dict[str, Any] = {
+        pod_spec: dict[str, Any] = {
             "containers": [container],
-            "volumes": [{
-                "name": "model-cache",
-                "hostPath": {
-                    "path": options.model_cache_path,
-                    "type": "DirectoryOrCreate",
-                },
-            }],
+            "volumes": [
+                {
+                    "name": "model-cache",
+                    "hostPath": {
+                        "path": self.cache_path(inference),
+                        "type": "DirectoryOrCreate",
+                    },
+                }
+            ],
         }
         if options.runtime_class_name:
             pod_spec["runtimeClassName"] = options.runtime_class_name
@@ -165,11 +181,13 @@ class LlamaCppDriver:
 
         return [
             {
-                "apiVersion": "v1", "kind": "Namespace",
+                "apiVersion": "v1",
+                "kind": "Namespace",
                 "metadata": {"name": namespace},
             },
             {
-                "apiVersion": "apps/v1", "kind": "Deployment",
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
                 "metadata": {"name": inference.name, "namespace": namespace},
                 "spec": {
                     "replicas": inference.replicas,
@@ -186,50 +204,66 @@ class LlamaCppDriver:
                 },
             },
             {
-                "apiVersion": "v1", "kind": "Service",
+                "apiVersion": "v1",
+                "kind": "Service",
                 "metadata": {"name": inference.name, "namespace": namespace},
                 "spec": {
                     "type": options.service_type,
                     "selector": labels,
-                    "ports": [dict(
-                        # Named because a ServiceMonitor resolves a port
-                        # by name, not number -- the one addition here
-                        # that the live object does not have.
-                        name="http",
-                        port=inference.port,
-                        targetPort=inference.port,
-                        **({"nodePort": options.node_port}
-                           if options.node_port else {}),
-                    )],
+                    "ports": [
+                        dict(
+                            # Named because a ServiceMonitor resolves a port
+                            # by name, not number -- the one addition here
+                            # that the live object does not have.
+                            name="http",
+                            port=inference.port,
+                            targetPort=inference.port,
+                            **({"nodePort": options.node_port} if options.node_port else {}),
+                        )
+                    ],
                 },
             },
         ]
 
     # -- lifecycle ---------------------------------------------------------
-    def create(self, inference: Inference, nodes: Optional[List] = None) -> str:
+    def create(self, inference: Inference, nodes: list | None = None) -> str:
         inference.validate()
         for warning in self.check_prerequisites(inference, nodes):
             print(f"[{self.log_prefix}] warning: {warning}")
 
         kube_apply(
-            inference.kubeconfig_path, self.manifests(inference),
-            timeout=self.command_timeout, error_cls=InferenceError,
+            inference.kubeconfig_path,
+            self.manifests(inference),
+            timeout=self.command_timeout,
+            error_cls=InferenceError,
         )
         self._wait_until_ready(inference)
         return inference.endpoint
 
-    def delete(self, inference: Inference) -> None:
+    def delete(self, inference: Inference, remove_cache: bool = False) -> None:
         namespace = inference.resolved_namespace
         for kind in ("service", "deployment"):
             kube_kubectl(
-                inference.kubeconfig_path, "delete", kind, inference.name,
-                "-n", namespace, "--ignore-not-found",
-                timeout=self.command_timeout, error_cls=InferenceError,
+                inference.kubeconfig_path,
+                "delete",
+                kind,
+                inference.name,
+                "-n",
+                namespace,
+                "--ignore-not-found",
+                timeout=self.command_timeout,
+                error_cls=InferenceError,
             )
         # The hostPath cache is left alone. It holds gigabytes that cost
         # an hour to fetch, it is not this deployment's to own, and the
         # next install finds it -- which is the whole reason it is a
         # hostPath rather than an emptyDir.
+        if remove_cache:
+            print(
+                f"[{self.log_prefix}] the GGUF cache is a host folder and was "
+                f"left in place; remove {self.cache_path(inference)} on the "
+                "machine to reclaim the space."
+            )
 
     def endpoint(self, inference: Inference) -> str:
         return inference.endpoint
@@ -240,10 +274,16 @@ class LlamaCppDriver:
         deadline = time.time() + (options.ready_timeout if options else 1800)
         while time.time() < deadline:
             ready = kube_kubectl(
-                inference.kubeconfig_path, "get", "deployment", inference.name,
-                "-n", inference.resolved_namespace,
-                "-o", "jsonpath={.status.readyReplicas}",
-                check=False, timeout=self.command_timeout,
+                inference.kubeconfig_path,
+                "get",
+                "deployment",
+                inference.name,
+                "-n",
+                inference.resolved_namespace,
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+                check=False,
+                timeout=self.command_timeout,
                 error_cls=InferenceError,
             )
             if (ready or "").strip() not in ("", "0"):
