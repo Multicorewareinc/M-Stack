@@ -123,17 +123,19 @@ stage. Not covered yet: GPU metrics (DCGM / ROCm exporters) and llama.cpp
 
 ## Grafana
 
-vLLM ships an official dashboard (`grafana.json`) alongside the same
-upstream example this feature is based on
-(https://docs.vllm.ai/en/v0.7.2/getting_started/examples/prometheus_grafana.html).
-This package doesn't vendor that JSON or provision it automatically —
-Grafana's dashboard sidecar (as kube-prometheus-stack configures it)
-watches its **own** namespace, not `Inference`'s, so provisioning it here
-would mean this driver reaching into `Observability`'s namespace, which
-no other capability in this repo does. Import it by hand once
-`ServiceMonitor` scraping is live: Grafana UI → Dashboards → Import →
-paste the JSON, datasource = the Prometheus this stack installed
-(`observability.prometheus_endpoint()`).
+`Observability` (kube-prometheus-stack) provisions the SDK's own dashboards
+from `multistack/observability/dashboards/` -- one ConfigMap each in its own
+namespace, picked up by Grafana's dashboard sidecar into a **Multistack**
+folder (`KubePrometheusStackOptions.dashboards=False` turns this off). They
+cover these monitors: Services (request rate / errors / latency for every
+first-party service), Model gateway, Event pipeline, Control planes,
+Billing, vLLM and Data plane. Each queries a `${datasource}` variable, so
+none is tied to one Grafana's datasource uid.
+
+Provisioning stays with `Observability`: no capability here reaches into
+its namespace. The dashboards are generated JSON; edit them in Grafana and
+export, or change the JSON directly -- `tests/observability/` checks each
+one parses, has a unique uid, and uses the datasource variable.
 
 ## Not covered, and why
 

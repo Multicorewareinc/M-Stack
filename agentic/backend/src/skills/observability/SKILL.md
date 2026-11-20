@@ -16,6 +16,7 @@ class KubePrometheusStackOptions(BaseModel):
     release_name: str = "kube-prometheus-stack"
     chart: str = "kube-prometheus-stack"
     grafana_service_type: str = "ClusterIP"
+    dashboards: bool = True             # ship the SDK's Grafana dashboards (a "Multistack" folder); leave on unless the user says otherwise
 
 class Observability(CapabilitySpec):
     type: str = "kube_prometheus_stack"

@@ -24,7 +24,14 @@ import string
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...helm import HelmRunner, PROMETHEUS_COMMUNITY_REPOSITORY
-from ...kube import kubectl, require_cli, require_cluster
+from ...kube import apply, kubectl, require_cli, require_cluster
+from ..assets import (
+    DASHBOARD_FOLDER,
+    DASHBOARD_FOLDER_ANNOTATION,
+    DASHBOARD_LABEL,
+    MANAGED_BY_LABEL,
+    dashboards,
+)
 from ..base import ObservabilityError, ObservabilityPrerequisiteError
 from ..spec import Observability
 
@@ -110,6 +117,8 @@ class KubePrometheusStackDriver:
             # for the general case this is an instance of.
             strict_values=False,
         )
+        if observability.options.dashboards:
+            self._apply_dashboards(observability)
 
         endpoint = observability.grafana_endpoint()
         print(
@@ -142,6 +151,13 @@ class KubePrometheusStackDriver:
             observability.options.release_name,
             namespace=observability.resolved_namespace,
             missing_ok=True,
+        )
+        # Not part of the release, so `helm uninstall` leaves them behind.
+        kubectl(
+            observability.kubeconfig_path, "delete", "configmap",
+            "-n", observability.resolved_namespace,
+            "-l", _selector({**MANAGED_BY_LABEL, DASHBOARD_LABEL: "1"}),
+            "--ignore-not-found", check=False, error_cls=ObservabilityError,
         )
         print(
             "[observability] release removed. Persisted metrics/dashboards "
@@ -181,6 +197,12 @@ class KubePrometheusStackDriver:
                     "size": observability.grafana_volume_size,
                     **({"storageClassName": storage_class} if storage_class else {}),
                 },
+                # Lets a dashboard ConfigMap pick its Grafana folder (see
+                # _apply_dashboards); the sidecar itself is on by default.
+                "sidecar": {"dashboards": {
+                    "folderAnnotation": DASHBOARD_FOLDER_ANNOTATION,
+                    "provider": {"foldersFromFilesStructure": True},
+                }},
             },
             "prometheus": {
                 "prometheusSpec": {
@@ -204,6 +226,34 @@ class KubePrometheusStackDriver:
         }
         values.update(observability.extra_values)
         return values
+
+    # -- dashboards -------------------------------------------------------
+    def _dashboard_manifests(self, observability: Observability) -> list[dict[str, Any]]:
+        """One ConfigMap per shipped dashboard, labelled for the Grafana
+        dashboard sidecar kube-prometheus-stack runs (its default label
+        `grafana_dashboard: "1"`), in this release's own namespace."""
+        return [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": f"multistack-dashboard-{name}",
+                    "namespace": observability.resolved_namespace,
+                    "labels": {**MANAGED_BY_LABEL, DASHBOARD_LABEL: "1"},
+                    "annotations": {DASHBOARD_FOLDER_ANNOTATION: DASHBOARD_FOLDER},
+                },
+                "data": {f"{name}.json": body},
+            }
+            for name, body in dashboards().items()
+        ]
+
+    def _apply_dashboards(self, observability: Observability) -> None:
+        manifests = self._dashboard_manifests(observability)
+        apply(observability.kubeconfig_path, manifests, error_cls=ObservabilityError)
+        print(
+            f"[observability] {len(manifests)} dashboards provisioned into "
+            f"Grafana's '{DASHBOARD_FOLDER}' folder"
+        )
 
     # -- Grafana credentials ---------------------------------------------
     def _resolve_grafana_credentials(self, observability: Observability) -> None:
@@ -260,3 +310,7 @@ class KubePrometheusStackDriver:
 
         user, password = decode("admin-user"), decode("admin-password")
         return (user, password) if user and password else None
+
+
+def _selector(labels: dict[str, str]) -> str:
+    return ",".join(f"{key}={value}" for key, value in labels.items())
