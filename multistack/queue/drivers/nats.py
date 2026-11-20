@@ -15,6 +15,7 @@ stage used to do by hand before this capability existed.
 from typing import List
 
 from ...kube import require_cli, require_cluster
+from ...servicemonitor import POD_MONITOR_CRD, merge_values, monitors_wanted
 from ...nats.deployment import (
     ConsumerInfo,
     NatsDeployment,
@@ -28,8 +29,16 @@ class JetStreamQueueDriver:
     def __init__(self) -> None:
         self._manager = NatsDeploymentManager()
 
-    def _deployment(self, queue: Queue) -> NatsDeployment:
+    def _deployment(self, queue: Queue, *, pod_monitor: bool = False) -> NatsDeployment:
         options = queue.options
+        extra_values = options.extra_values
+        if pod_monitor:
+            # The chart's own PodMonitor for prometheus-nats-exporter (port 7777, on by
+            # default via NatsDeployment.exporter_enabled), under the caller's extra_values.
+            extra_values = merge_values({"promExporter": {"podMonitor": {
+                "enabled": True,
+                "merge": {"metadata": {"labels": dict(queue.service_monitor_labels)}},
+            }}}, extra_values)
         return NatsDeployment(
             kubeconfig_path=queue.kubeconfig_path,
             release_name=options.release_name,
@@ -42,7 +51,7 @@ class JetStreamQueueDriver:
             file_store_max_size=options.file_store_max_size,
             memory_store_max_size=options.memory_store_max_size,
             image_tag=options.image_tag,
-            extra_values=options.extra_values,
+            extra_values=extra_values,
         )
 
     def check_prerequisites(self, queue: Queue) -> List[str]:
@@ -62,7 +71,11 @@ class JetStreamQueueDriver:
         return []
 
     def create(self, queue: Queue) -> str:
-        deployment = self._deployment(queue)
+        pod_monitor = monitors_wanted(
+            queue.kubeconfig_path, queue.service_monitor_labels,
+            crd=POD_MONITOR_CRD, log_prefix="queue", error_cls=QueueError,
+        )
+        deployment = self._deployment(queue, pod_monitor=pod_monitor)
         try:
             info = self._manager.create(deployment)
             self._manager.ensure_streams(deployment)

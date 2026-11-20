@@ -21,3 +21,7 @@ class IngressGatewayDriver(Protocol):
         """Installs it and returns the externally reachable endpoint."""
 
     def delete(self, gateway: IngressGateway) -> None: ...
+
+    def apply_monitors(self, gateway: IngressGateway) -> bool:
+        """Applies its Prometheus monitors if wanted and the CRDs exist."""
+        ...

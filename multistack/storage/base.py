@@ -57,6 +57,10 @@ class StorageDriver(Protocol):
         """Removes the installation. Leaves data behind."""
         ...
 
+    def apply_monitors(self, storage: Storage) -> bool:
+        """Applies its Prometheus monitors if wanted and the CRDs exist."""
+        ...
+
 
 __all__ = [
     "StorageDriver",

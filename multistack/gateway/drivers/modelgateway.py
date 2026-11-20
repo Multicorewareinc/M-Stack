@@ -6,6 +6,7 @@ from ..base import GatewayError, GatewayPrerequisiteError
 from ..spec import REQUIRED_SECRET_KEYS, Gateway
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 
 
 class ModelGatewayDriver:
@@ -57,6 +58,7 @@ class ModelGatewayDriver:
             values["nodeSelector"] = gateway.node_selector
         if gateway.tolerations is not None:
             values["tolerations"] = gateway.tolerations
+        values.update(service_monitor_values(gateway.service_monitor_labels))
         return values
 
     def check_prerequisites(self, gateway: Gateway) -> List[str]:

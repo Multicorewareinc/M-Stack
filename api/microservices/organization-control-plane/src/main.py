@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 import httpx
 from db import Base, build_engine, build_sessionmaker
 from fastapi import FastAPI
+from http_metrics import HttpMetricsMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import Response
@@ -119,6 +120,8 @@ def create_app(
             await billing_client.aclose()
 
     app = FastAPI(title="Organization Control Plane", version="0.1.0", lifespan=lifespan)
+    # Request rate / errors / duration on /metrics -- see http_metrics.py.
+    app.add_middleware(HttpMetricsMiddleware)
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessionmaker = sessionmaker

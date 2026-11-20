@@ -45,6 +45,7 @@ class CNPGOptions(BaseModel):
 class Database(CapabilitySpec):
     type: str = "cnpg"                  # the only implementation today
     kubeconfig_path: str                # required -- the EXISTING cluster this installs onto
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     options: Optional[CNPGOptions] = None   # filled in automatically to match `type`
 
     # Cluster fields -- all optional so this type also works for an

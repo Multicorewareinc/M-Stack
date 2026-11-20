@@ -35,6 +35,7 @@ from ...kube import (
     wait_for,
     wait_for_absent,
 )
+from ...servicemonitor import POD_MONITOR_CRD, apply_monitors, pod_monitor_manifest
 from ..base import (
     DatabaseClusterNotFoundError,
     DatabaseError,
@@ -204,6 +205,7 @@ class CNPGDriver:
                 f"[{self.log_prefix}] cluster {cnpg.name} already exists "
                 f"in {cnpg.resolved_namespace}"
             )
+            self._apply_monitor(cnpg)
             return cnpg
 
         self._ensure_namespace(cnpg)
@@ -218,6 +220,7 @@ class CNPGDriver:
             f"{cnpg.resolved_namespace} at {cnpg.endpoint}"
         )
 
+        self._apply_monitor(cnpg)
         return cnpg
 
     def update_cluster(
@@ -246,6 +249,7 @@ class CNPGDriver:
         if wait_for_ready:
             self.wait_for_cluster_ready(cnpg)
 
+        self._apply_monitor(cnpg)
         print(f"[{self.log_prefix}] cluster {cnpg.name} updated")
 
         return cnpg
@@ -289,6 +293,13 @@ class CNPGDriver:
 
             if wait:
                 self.wait_for_cluster_deleted(cnpg)
+
+        # check=False: on a cluster without the Prometheus Operator CRDs the
+        # resource type itself is unknown, which is "nothing to delete".
+        self._kubectl(
+            cnpg, "delete", "podmonitor", self._monitor_name(cnpg),
+            "-n", cnpg.resolved_namespace, "--ignore-not-found=true", check=False,
+        )
 
         if remove_secret:
             self._delete_secret(cnpg)
@@ -663,6 +674,30 @@ class CNPGDriver:
     # ------------------------------------------------------------------
     # Command helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _monitor_name(cnpg: Database) -> str:
+        return f"{cnpg.name}-metrics"
+
+    def _apply_monitor(self, cnpg: Database) -> None:
+        """A PodMonitor for every instance's exporter (port `metrics`, 9187).
+
+        Not the Cluster's own `spec.monitoring.enablePodMonitor`: the PodMonitor
+        CloudNativePG generates carries no caller labels, so a Prometheus
+        selecting on `release: <name>` (kube-prometheus-stack's default)
+        would never pick it up -- and upstream now deprecates that field in
+        favour of managing the PodMonitor directly, which is what this does.
+        """
+        apply_monitors(
+            cnpg.kubeconfig_path,
+            [pod_monitor_manifest(
+                self._monitor_name(cnpg), cnpg.resolved_namespace,
+                {"cnpg.io/cluster": cnpg.name}, port="metrics",
+                extra_labels=cnpg.service_monitor_labels,
+            )],
+            cnpg.service_monitor_labels,
+            crd=POD_MONITOR_CRD, log_prefix=self.log_prefix, error_cls=DatabaseError,
+        )
 
     def _kubectl(
         self,

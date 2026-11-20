@@ -15,6 +15,7 @@ import httpx
 import redis.asyncio as aioredis
 from events import EventPublisher
 from fastapi import FastAPI
+from http_metrics import HttpMetricsMiddleware
 from middleware import RateLimitHeaderMiddleware
 from router import router
 from service import GatewayService
@@ -106,6 +107,8 @@ def create_app(
             await org_cp_client.aclose()
 
     app = FastAPI(title="Model Gateway", version="0.1.0", lifespan=lifespan)
+    # Request rate / errors / duration on /metrics -- see http_metrics.py.
+    app.add_middleware(HttpMetricsMiddleware)
     app.state.settings = settings
     app.state.service = service
     app.state.policy_endpoints = endpoints

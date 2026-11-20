@@ -11,6 +11,7 @@ from ..base import PolicyError, PolicyPrerequisiteError
 from ..spec import Policy
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 
 # What the service logs when its consumer is not counting. Previously this
 # checked for "rpm_consumer_start_failed_inactive", which the service has
@@ -85,6 +86,7 @@ class RPMDriver:
             values["nodeSelector"] = policy.node_selector
         if policy.tolerations is not None:
             values["tolerations"] = policy.tolerations
+        values.update(service_monitor_values(policy.service_monitor_labels))
         return values
 
     def check_prerequisites(self, policy: Policy) -> List[str]:

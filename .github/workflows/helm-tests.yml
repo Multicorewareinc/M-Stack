@@ -36,6 +36,11 @@ jobs:
       - name: Install test dependencies
         run: make install-tests
 
+      - name: Set up promtool
+        run: |
+          make install-promtool PROMTOOL_DIR="$RUNNER_TEMP/promtool"
+          echo "$RUNNER_TEMP/promtool" >> "$GITHUB_PATH"
+
       - name: Run Helm tests
         run: make test-helm TEST_ALL_ARGS="--junitxml=test-results/helm-junit.xml"
 

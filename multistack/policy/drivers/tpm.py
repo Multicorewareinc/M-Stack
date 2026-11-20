@@ -22,6 +22,7 @@ from ..base import PolicyError, PolicyPrerequisiteError
 from ..spec import Policy
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 
 # Below this, a token ceiling is almost certainly a request ceiling that
 # was copied from an RPM limits document. A 0.5B model's single reply is
@@ -101,6 +102,7 @@ class TPMDriver:
             values["nodeSelector"] = policy.node_selector
         if policy.tolerations is not None:
             values["tolerations"] = policy.tolerations
+        values.update(service_monitor_values(policy.service_monitor_labels))
         return values
 
     def check_prerequisites(self, policy: Policy) -> List[str]:

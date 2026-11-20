@@ -42,6 +42,12 @@ class KubePrometheusStackOptions(BaseModel):
     # `kubectl port-forward` or an ingress_gateway route, not directly
     # from outside the cluster.
     grafana_service_type: str = "ClusterIP"
+    # Ship the SDK's dashboards (multistack/observability/dashboards/) as
+    # ConfigMaps Grafana's dashboard sidecar loads into a "Multistack" folder.
+    dashboards: bool = True
+    # Install the SDK's alert rules (multistack/observability/rules/) as a
+    # PrometheusRule this release's Prometheus selects.
+    alert_rules: bool = True
 
     @field_validator("release_name", "chart")
     @classmethod
@@ -103,6 +109,15 @@ class Observability(CapabilitySpec):
     # whoever already has it (see the driver for why that matters).
     grafana_admin_user: str = "admin"
     grafana_admin_password: Optional[str] = None
+
+    # -- alerting -----------------------------------------------------------
+    # Name of a Secret, in this release's namespace, whose `alertmanager.yaml`
+    # key is the full Alertmanager config (receivers, routes, inhibit rules).
+    # By name only, like every other credential here: receiver configs carry
+    # webhook URLs and API keys, which do not belong in Helm values. None
+    # keeps the chart's own config, which routes everything to a null
+    # receiver -- alerts fire and are visible in Alertmanager, but go nowhere.
+    alertmanager_config_secret: str | None = None
 
     # Merged into the rendered Helm values, for anything unmodelled.
     extra_values: Dict[str, Any] = Field(default_factory=dict)

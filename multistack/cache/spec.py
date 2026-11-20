@@ -60,6 +60,7 @@ class Cache(CapabilitySpec):
 
     FROM_STACK: ClassVar[Dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
     }
     # `cache_url` is the key Policy already reads from a Stack. Recording
     # a Cache is what fills it in.
@@ -67,6 +68,11 @@ class Cache(CapabilitySpec):
 
     type: str = "valkey"
     kubeconfig_path: str
+    # Labels for this capability's Prometheus monitor(s); must match the
+    # installed Prometheus's selector (`{"release": <Observability
+    # release_name>}` for kube-prometheus-stack). Empty => no monitor.
+    # Wired from the Stack; see multistack/servicemonitor/README.md.
+    service_monitor_labels: Dict[str, str] = Field(default_factory=dict)
     namespace: Optional[str] = None
     options: Optional[ValkeyOptions] = None
 

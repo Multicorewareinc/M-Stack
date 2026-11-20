@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from ...helm import HelmRelease, HelmRunner
 from ...kube import require_cli, require_cluster, run_local
+from ...servicemonitor import merge_values, monitors_wanted
 from ..base import CacheError, CachePrerequisiteError, CacheReleaseNotFoundError
 from ..spec import Cache
 
@@ -163,6 +164,24 @@ class ValkeyDriver:
 
     # -- internals ----------------------------------------------------------
 
+    def _values(self, cache: Cache) -> dict[str, Any]:
+        """The spec's values, plus the chart's redis-exporter sidecar and its
+        ServiceMonitor when monitoring is wanted -- layered under the
+        caller's own values, so an explicit `metrics:` block still wins."""
+        values = cache.helm_values()
+        if not monitors_wanted(
+            cache.kubeconfig_path, cache.service_monitor_labels,
+            log_prefix=self.log_prefix, error_cls=CacheError,
+        ):
+            return values
+        return merge_values({"metrics": {
+            "enabled": True,
+            "serviceMonitor": {
+                "enabled": True,
+                "additionalLabels": dict(cache.service_monitor_labels),
+            },
+        }}, values)
+
     def _deploy(self, cache: Cache) -> None:
         """Install or upgrade the release.
 
@@ -192,7 +211,7 @@ class ValkeyDriver:
             cache.name,
             chart=cache.chart,
             namespace=namespace,
-            values=cache.helm_values(),
+            values=self._values(cache),
             chart_version=cache.chart_version,
         )
 

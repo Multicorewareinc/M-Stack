@@ -24,6 +24,7 @@ import logging
 from typing import Literal
 
 from models import StripeCustomer, WebhookEvent
+from prometheus_client import Counter
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,15 @@ HANDLED_EVENT_TYPES = {
 }
 
 WebhookOutcome = Literal["updated", "ignored", "untracked_subscription", "duplicate"]
+
+# `event_type` is one of HANDLED_EVENT_TYPES or "other" -- Stripe's type list is long and open.
+WEBHOOKS = Counter(
+    "billing_stripe_webhooks_total", "Stripe webhook deliveries by outcome", ["event_type", "outcome"],
+)
+
+
+def _type_label(event: dict) -> str:
+    return event["type"] if event["type"] in HANDLED_EVENT_TYPES else "other"
 
 
 def _resolve_subscription_id(event: dict) -> str | None:
@@ -59,6 +69,7 @@ async def process_webhook(
         # partially processed; stripe.SignatureVerificationError is the expected case but a
         # malformed payload can raise other errors from the same call.
         logger.warning("stripe_webhook_verification_failed", exc_info=True)
+        WEBHOOKS.labels("unknown", "invalid_signature").inc()
         return 400, {"error": "invalid signature"}
 
     # Every helper below treats `event` (and nested objects like event["data"]["object"]) as a
@@ -75,6 +86,7 @@ async def process_webhook(
         await session.flush()
     except IntegrityError:
         await session.rollback()
+        WEBHOOKS.labels(_type_label(event), "duplicate").inc()
         return 200, {"outcome": "duplicate"}
 
     outcome: WebhookOutcome
@@ -101,4 +113,5 @@ async def process_webhook(
             outcome = "updated"
 
     await session.commit()
+    WEBHOOKS.labels(_type_label(event), outcome).inc()
     return 200, {"outcome": outcome}

@@ -141,7 +141,10 @@ def test_a_misspelled_field_is_refused():
 
 def test_it_declares_the_cluster_dependency():
     assert Database.REQUIRES == ("cluster",)
-    assert Database.FROM_STACK == {"kubeconfig_path": "kubeconfig_path"}
+    assert Database.FROM_STACK == {
+        "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
+    }
 
 
 # -- the shape the migration put it in ------------------------------------

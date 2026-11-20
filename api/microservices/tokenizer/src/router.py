@@ -15,6 +15,8 @@ from pydantic import BaseModel
 router = APIRouter()
 
 REQUESTS = Counter("tokenizer_requests_total", "Tokenize requests")
+# `tokenizer` is the resolved backend name (from the service's fixed registry), so bounded.
+TOKENS = Counter("tokenizer_tokens_total", "Tokens counted", ["tokenizer"])
 
 
 class TokenizeRequest(BaseModel):
@@ -26,6 +28,7 @@ class TokenizeRequest(BaseModel):
 async def tokenize(body: TokenizeRequest, request: Request) -> dict:
     tokens, name = request.app.state.service.count(body.text, body.tokenizer)
     REQUESTS.inc()
+    TOKENS.labels(name).inc(tokens)
     return {"tokens": tokens, "tokenizer": name}
 
 

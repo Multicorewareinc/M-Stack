@@ -281,9 +281,9 @@ EVENT_BACKBONE = os.environ.get("MULTISTACK_EVENT_BACKBONE", "")
 #   MULTISTACK_STAGES=weights,inference python3 examples/full_stack.py
 STAGES = os.environ.get(
     "MULTISTACK_STAGES",
-    "cluster,accelerator,ingress,storage,objectstore,weights,inference,"
-    "cache,database,registry,tokenizer,queue,enricher,policy,gateway,"
-    "billing,controlplane,portal,route,observability"
+    "cluster,accelerator,ingress,storage,observability,objectstore,weights,"
+    "inference,cache,database,registry,tokenizer,queue,enricher,policy,gateway,"
+    "billing,controlplane,portal,route,platform_metrics"
 ).split(",")
 
 # The order stages run in, and what to call them. One list rather than a
@@ -295,6 +295,7 @@ STAGE_LABELS = [
     ("accelerator",  "GPU scheduling"),
     ("ingress",      "Front door (MetalLB + Istio)"),
     ("storage",      "Longhorn block storage"),
+    ("observability", "Observability"),
     ("objectstore",  "MinIO object storage"),
     ("inference",    "vLLM inference"),
     ("cache",        "Valkey cache"),
@@ -309,7 +310,7 @@ STAGE_LABELS = [
     ("controlplane", "Control planes"),
     ("portal",       "Web portals"),
     ("route",        "Routes through the front door (API + both portals)"),
-    ("observability", "Observability"),
+    ("platform_metrics", "Platform metrics (storage + front door monitors)"),
 ]
 
 
@@ -352,6 +353,20 @@ def _banner(stage: str) -> None:
 # shows exactly what will be filled in. A spec built directly still works
 # — every other example does that.
 stack = Stack(kubeconfig_path=KUBECONFIG)
+
+# Every first-party chart (gateway, limiters, tokenizer, enricher, billing,
+# both control planes) renders a ServiceMonitor carrying these labels, which
+# is what the observability stage's Prometheus selects on (kube-prometheus-
+# stack: `release: <its release name>`). Published here rather than by
+# stage_observability, so a stage re-run alone keeps the ServiceMonitor an
+# earlier full run created instead of `helm upgrade` dropping it. Harmless
+# on a cluster with no observability stack: each chart renders a
+# ServiceMonitor only when the cluster serves its CRD.
+# MULTISTACK_SERVICE_MONITORS=0 opts out.
+if os.environ.get("MULTISTACK_SERVICE_MONITORS", "1") != "0":
+    stack.provide(service_monitor_labels={
+        "release": KubePrometheusStackOptions().release_name,
+    })
 
 
 # ------------------------------------------------------------------ glue --
@@ -615,7 +630,24 @@ def stage_ingress() -> str | None:
               "MULTISTACK_ADDRESS_POOL=192.0.2.240-192.0.2.250)")
         return None
 
-    ingress = stack.build(
+    ingress = _ingress_spec()
+    backend = IngressGatewayBackend()
+    for warning in backend.check_prerequisites(ingress):
+        print(f"[ingress] warning: {warning}")
+    endpoint = backend.create(ingress)
+    # publishes ingress_gateway_endpoint -- which works because the
+    # driver writes the assigned address back onto the spec
+    # (drivers/metallb_istio.py). record() skips a None, so the route
+    # stage's own guard depends on that write having happened.
+    stack.record(ingress)
+    print(f"[stack] front door at {endpoint}")
+    return endpoint
+
+
+def _ingress_spec() -> IngressGateway:
+    """-- glue -- the one IngressGateway spec, shared by stage_ingress and
+    stage_platform_metrics so the two cannot describe different gateways."""
+    return stack.build(
         IngressGateway,
         address_pool=ADDRESS_POOL,
         # Which nodes may announce the pool. Empty would mean every node,
@@ -635,22 +667,29 @@ def stage_ingress() -> str | None:
             ingress_chart=os.environ.get("MULTISTACK_ISTIO_GATEWAY_CHART", "gateway"),
         ),
     )
-    backend = IngressGatewayBackend()
-    for warning in backend.check_prerequisites(ingress):
-        print(f"[ingress] warning: {warning}")
-    endpoint = backend.create(ingress)
-    # publishes ingress_gateway_endpoint -- which works because the
-    # driver writes the assigned address back onto the spec
-    # (drivers/metallb_istio.py). record() skips a None, so the route
-    # stage's own guard depends on that write having happened.
-    stack.record(ingress)
-    print(f"[stack] front door at {endpoint}")
-    return endpoint
 
 
 def stage_storage() -> str:
     """Block storage — the StorageClass RKE2 doesn't ship."""
-    storage = stack.build(
+    storage = _storage_spec()
+    backend = StorageBackend()
+    # Mutates the nodes: open-iscsi + nfs-common. Safe to re-run. Takes the
+    # spec as well as the nodes — the spec is what says whose packages.
+    backend.install_prerequisites(storage, NODES)
+    # EVERY node, not a subset: Longhorn's node components are a
+    # DaemonSet and land on nodes whether or not they're listed here.
+    storage_class = backend.create(storage, nodes=NODES)
+    # After create(), not before: the StorageClass name is knowable from
+    # the spec, but publishing it early would let the next layer bind
+    # against a class that isn't installed yet.
+    stack.record(storage)
+    return storage_class
+
+
+def _storage_spec() -> Storage:
+    """-- glue -- the one Storage spec, shared by stage_storage and
+    stage_platform_metrics so the two cannot describe different installs."""
+    return stack.build(
         Storage,
         # The implementation. Everything below `type` is the same question
         # asked of any of them; `options` is Longhorn's own.
@@ -672,18 +711,6 @@ def stage_storage() -> str:
             chart=os.environ.get("MULTISTACK_LONGHORN_CHART", "longhorn"),
         ),
     )
-    backend = StorageBackend()
-    # Mutates the nodes: open-iscsi + nfs-common. Safe to re-run. Takes the
-    # spec as well as the nodes — the spec is what says whose packages.
-    backend.install_prerequisites(storage, NODES)
-    # EVERY node, not a subset: Longhorn's node components are a
-    # DaemonSet and land on nodes whether or not they're listed here.
-    storage_class = backend.create(storage, nodes=NODES)
-    # After create(), not before: the StorageClass name is knowable from
-    # the spec, but publishing it early would let the next layer bind
-    # against a class that isn't installed yet.
-    stack.record(storage)
-    return storage_class
 
 
 def stage_objectstore() -> MinIOTenant:
@@ -1558,11 +1585,17 @@ def stage_route() -> str | None:
 def stage_observability() -> str:
     """Prometheus, Alertmanager and Grafana.
 
-    Last because it needs the StorageClass, and because everything above
-    is worth watching.
+    Straight after storage: it needs the StorageClass and -- the reason it is
+    not last -- installs the ServiceMonitor CRD. Every first-party chart after
+    it only renders its ServiceMonitor when that CRD exists, so a stack built
+    in one run is scraped from the start rather than after a second run.
     """
     observability = stack.build(
         Observability,
+        # A Secret in the observability namespace with an `alertmanager.yaml`
+        # key (receivers/routes). Unset, alerts fire but go to no receiver.
+        alertmanager_config_secret=os.environ.get(
+            "MULTISTACK_ALERTMANAGER_CONFIG_SECRET") or None,
         # Same local-chart escape hatch as storage's LonghornOptions.chart
         # -- prometheus-community's index.yaml is on GitHub Pages, but the
         # tarball comes from release-assets.githubusercontent.com, the
@@ -1576,6 +1609,25 @@ def stage_observability() -> str:
     stack.record(observability)
     print(f"[stack] grafana at {endpoint}")
     return endpoint
+
+
+def stage_platform_metrics() -> None:
+    """Prometheus monitors for the capabilities installed before observability.
+
+    Storage and the front door come before the observability stage (its
+    PVCs need the StorageClass), so when they installed there was no
+    ServiceMonitor CRD and their drivers skipped the monitors with a
+    warning. This applies them now -- plain kubectl applies, no reinstall,
+    nothing else about either release changes. Everything installed after
+    observability (cache, database, queue, every first-party chart) got
+    its monitor at install time.
+    """
+    if "service_monitor_labels" not in stack.outputs:
+        print("[stack] skipped: MULTISTACK_SERVICE_MONITORS=0")
+        return
+    StorageBackend().apply_monitors(_storage_spec())
+    if ADDRESS_POOL:
+        IngressGatewayBackend().apply_monitors(_ingress_spec())
 
 
 def main() -> int:
@@ -1595,6 +1647,11 @@ def main() -> int:
     if "storage" in STAGES:
         _banner("storage")
         stage_storage()
+
+    grafana = None
+    if "observability" in STAGES:
+        _banner("observability")
+        grafana = stage_observability()
 
     tenant = None
     if "objectstore" in STAGES:
@@ -1732,10 +1789,9 @@ def main() -> int:
         _banner("route")
         route_url = stage_route()
 
-    grafana = None
-    if "observability" in STAGES:
-        _banner("observability")
-        grafana = stage_observability()
+    if "platform_metrics" in STAGES:
+        _banner("platform_metrics")
+        stage_platform_metrics()
 
     print("\n" + "=" * 60)
     print("Stack ready.")

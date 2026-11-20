@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 from ...helm import HelmRunner
 from ...kube import kubectl, require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 from ..base import BillingError, BillingPrerequisiteError
 from ..spec import REQUIRED_SECRET_KEYS, Billing
 
@@ -65,6 +66,7 @@ class StripeBillingDriver:
             values["nodeSelector"] = billing.node_selector
         if billing.tolerations is not None:
             values["tolerations"] = billing.tolerations
+        values.update(service_monitor_values(billing.service_monitor_labels))
         return values
 
     def check_prerequisites(self, billing: Billing) -> List[str]:

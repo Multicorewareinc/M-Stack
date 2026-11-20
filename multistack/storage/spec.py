@@ -182,6 +182,11 @@ class Storage(CapabilitySpec):
     # defaulting it would hide the choice this class exists to expose.
     type: str
     kubeconfig_path: str
+    # Labels for this capability's Prometheus monitor(s); must match the
+    # installed Prometheus's selector (`{"release": <Observability
+    # release_name>}` for kube-prometheus-stack). Empty => no monitor.
+    # Wired from the Stack; see multistack/servicemonitor/README.md.
+    service_monitor_labels: dict[str, str] = Field(default_factory=dict)
 
     # -- meaningful for every implementation --------------------------
     # Copies of each volume. Needs at least this many schedulable nodes,
@@ -210,7 +215,10 @@ class Storage(CapabilitySpec):
     # Fields a Stack can fill, and what this publishes for later layers.
     # storage_class_name is only meaningful once create() has run, which is
     # why Stack.record() is called after the backend, not before.
-    FROM_STACK: ClassVar[dict] = {"kubeconfig_path": "kubeconfig_path"}
+    FROM_STACK: ClassVar[dict] = {
+        "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
+    }
     PROVIDES: ClassVar[dict] = {"storage_class": "storage_class_name"}
     SUPPORTED_TYPES: ClassVar[tuple] = SUPPORTED_TYPES
     OPTIONS_FOR_TYPE: ClassVar[dict] = OPTIONS_FOR_TYPE

@@ -62,6 +62,8 @@ exclude = ["examples*", "tests*"]
 # surface is typed specs is most of the value lost.
 [tool.setuptools.package-data]
 multistack = ["py.typed"]
+# Grafana dashboards and Prometheus alert rules the observability driver installs.
+"multistack.observability" = ["dashboards/*.json", "rules/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "agentic/backend/tests"]

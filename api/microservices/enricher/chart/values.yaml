@@ -114,7 +114,23 @@ probes:
     failureThreshold: 3
 
 metrics:
+  # prometheus.io/* pod annotations, for an annotation-driven Prometheus.
+  # kube-prometheus-stack ignores these -- use serviceMonitor below for it.
   scrapeAnnotations: true
+  # A ServiceMonitor for the Prometheus Operator. Off by default. Rendered
+  # only when the cluster serves the operator's CRDs, so an install before
+  # the operator still succeeds (with no ServiceMonitor) rather than being
+  # rejected; re-running the install afterwards adds it.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels, e.g. the `release: kube-prometheus-stack` many operator
+    # installs select ServiceMonitors on.
+    labels: {}
+    # Namespace Prometheus scrapes from; allowed through the NetworkPolicy
+    # when both networkPolicy.enabled and serviceMonitor.enabled are set.
+    prometheusNamespace: monitoring
 
 podSecurityContext: {}
 
