@@ -9,9 +9,11 @@ per-capability packages described in docs/structure.md.
 """
 from .minio import MinIOTenant
 from .rke2 import RKE2Cluster, RKE2Node
+from .seaweedfs import SeaweedFSCluster
 
 __all__ = [
     "MinIOTenant",
     "RKE2Cluster",
     "RKE2Node",
+    "SeaweedFSCluster",
 ]
