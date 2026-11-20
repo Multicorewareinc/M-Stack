@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from ...helm import HelmRunner
 from ...kube import require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 from ..base import EnricherError, EnricherPrerequisiteError
 from ..spec import Enricher
 
@@ -55,6 +56,7 @@ class JetStreamEnricherDriver:
             values["nodeSelector"] = enricher.node_selector
         if enricher.tolerations is not None:
             values["tolerations"] = enricher.tolerations
+        values.update(service_monitor_values(enricher.service_monitor_labels))
         return values
 
     def check_prerequisites(self, enricher: Enricher) -> List[str]:

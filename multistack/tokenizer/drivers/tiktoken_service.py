@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 from ...helm import HelmRunner
 from ...kube import require_cli, require_cluster
+from ...servicemonitor import chart_values as service_monitor_values
 from ..base import TokenizerError, TokenizerPrerequisiteError
 from ..spec import Tokenizer
 
@@ -30,6 +31,7 @@ class TiktokenDriver:
             values["nodeSelector"] = tokenizer.node_selector
         if tokenizer.tolerations is not None:
             values["tolerations"] = tokenizer.tolerations
+        values.update(service_monitor_values(tokenizer.service_monitor_labels))
         return values
 
     def check_prerequisites(self, tokenizer: Tokenizer) -> List[str]:

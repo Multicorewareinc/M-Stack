@@ -18,4 +18,16 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.containerPort }}
+    {{- $sm := ((.Values.metrics | default dict).serviceMonitor | default dict) }}
+    {{- if $sm.enabled }}
+    # Prometheus scrapes from its own namespace, which the podSelector rule
+    # above (same-namespace only) would otherwise block.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $sm.prometheusNamespace | default "monitoring" }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.containerPort }}
+    {{- end }}
 {{- end }}

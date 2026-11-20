@@ -281,9 +281,9 @@ EVENT_BACKBONE = os.environ.get("MULTISTACK_EVENT_BACKBONE", "")
 #   MULTISTACK_STAGES=weights,inference python3 examples/full_stack.py
 STAGES = os.environ.get(
     "MULTISTACK_STAGES",
-    "cluster,accelerator,ingress,storage,objectstore,weights,inference,"
-    "cache,database,registry,tokenizer,queue,enricher,policy,gateway,"
-    "billing,controlplane,portal,route,observability"
+    "cluster,accelerator,ingress,storage,observability,objectstore,weights,"
+    "inference,cache,database,registry,tokenizer,queue,enricher,policy,gateway,"
+    "billing,controlplane,portal,route"
 ).split(",")
 
 # The order stages run in, and what to call them. One list rather than a
@@ -295,6 +295,7 @@ STAGE_LABELS = [
     ("accelerator",  "GPU scheduling"),
     ("ingress",      "Front door (MetalLB + Istio)"),
     ("storage",      "Longhorn block storage"),
+    ("observability", "Observability"),
     ("objectstore",  "MinIO object storage"),
     ("inference",    "vLLM inference"),
     ("cache",        "Valkey cache"),
@@ -309,7 +310,6 @@ STAGE_LABELS = [
     ("controlplane", "Control planes"),
     ("portal",       "Web portals"),
     ("route",        "Routes through the front door (API + both portals)"),
-    ("observability", "Observability"),
 ]
 
 
@@ -352,6 +352,20 @@ def _banner(stage: str) -> None:
 # shows exactly what will be filled in. A spec built directly still works
 # — every other example does that.
 stack = Stack(kubeconfig_path=KUBECONFIG)
+
+# Every first-party chart (gateway, limiters, tokenizer, enricher, billing,
+# both control planes) renders a ServiceMonitor carrying these labels, which
+# is what the observability stage's Prometheus selects on (kube-prometheus-
+# stack: `release: <its release name>`). Published here rather than by
+# stage_observability, so a stage re-run alone keeps the ServiceMonitor an
+# earlier full run created instead of `helm upgrade` dropping it. Harmless
+# on a cluster with no observability stack: each chart renders a
+# ServiceMonitor only when the cluster serves its CRD.
+# MULTISTACK_SERVICE_MONITORS=0 opts out.
+if os.environ.get("MULTISTACK_SERVICE_MONITORS", "1") != "0":
+    stack.provide(service_monitor_labels={
+        "release": KubePrometheusStackOptions().release_name,
+    })
 
 
 # ------------------------------------------------------------------ glue --
@@ -1558,8 +1572,10 @@ def stage_route() -> str | None:
 def stage_observability() -> str:
     """Prometheus, Alertmanager and Grafana.
 
-    Last because it needs the StorageClass, and because everything above
-    is worth watching.
+    Straight after storage: it needs the StorageClass and -- the reason it is
+    not last -- installs the ServiceMonitor CRD. Every first-party chart after
+    it only renders its ServiceMonitor when that CRD exists, so a stack built
+    in one run is scraped from the start rather than after a second run.
     """
     observability = stack.build(
         Observability,
@@ -1595,6 +1611,11 @@ def main() -> int:
     if "storage" in STAGES:
         _banner("storage")
         stage_storage()
+
+    grafana = None
+    if "observability" in STAGES:
+        _banner("observability")
+        grafana = stage_observability()
 
     tenant = None
     if "objectstore" in STAGES:
@@ -1731,11 +1752,6 @@ def main() -> int:
     if "route" in STAGES:
         _banner("route")
         route_url = stage_route()
-
-    grafana = None
-    if "observability" in STAGES:
-        _banner("observability")
-        grafana = stage_observability()
 
     print("\n" + "=" * 60)
     print("Stack ready.")

@@ -23,6 +23,33 @@ on the capability itself, described below.
 | Capability | Spec field | Selects | Port/path | Applied via |
 |---|---|---|---|---|
 | `Inference` (vLLM) | `service_monitor_labels` | `{"app": <name>}` | `inference.port` / `/metrics` | Python dict in `manifests()`, applied with the rest of the Deployment/Service |
+| `Gateway`, `Policy` (rpm/tpm), `Tokenizer`, `Enricher`, `Billing`, `ControlPlane` (both) | `service_monitor_labels` | the chart's own selector labels | Service port `http` / `/metrics` | Helm values (`chart_values()` → `metrics.serviceMonitor`), rendered by each chart's `templates/servicemonitor.yaml` |
+
+### The first-party charts
+
+Every chart under `api/microservices/` (except `rag`) ships
+`templates/servicemonitor.yaml` behind `metrics.serviceMonitor.enabled`.
+The `prometheus.io/*` pod annotations those charts also set are **ignored
+by kube-prometheus-stack** — they only help an annotation-driven
+Prometheus — so without a ServiceMonitor none of these services is
+scraped.
+
+- **Install order.** The template renders only when the cluster serves
+  `monitoring.coreos.com/v1`, so a service installed before
+  `Observability` still installs (with no ServiceMonitor) instead of
+  failing on "no matches for kind ServiceMonitor". Re-running its
+  `create()` after the observability stack is up adds it.
+- **NetworkPolicy.** With `networkPolicy.enabled`, the charts' ingress
+  rule only admits same-namespace pods. When the ServiceMonitor is on they
+  also admit `metrics.serviceMonitor.prometheusNamespace` (default
+  `monitoring`) on the container port. The control-plane charts have no
+  NetworkPolicy.
+- **Stack wiring.** These specs read `service_monitor_labels` from the
+  Stack (`FROM_STACK`), so publishing it once wires every service:
+  `stack.provide(service_monitor_labels={"release": observability.options.release_name})`.
+  `examples/full_stack.py` does this up front and runs the observability
+  stage straight after storage and vault, so the CRD exists before the
+  services install.
 
 vLLM's OpenAI-compatible server exposes Prometheus metrics on `/metrics`
 on the same port as the API **by default** — nothing needs to be passed
@@ -84,9 +111,9 @@ paste the JSON, datasource = the Prometheus this stack installed
 
 ## Not covered, and why
 
-Every other capability in this repo (`Gateway`, `Policy`, `MinIOTenant`,
-…) either isn't a Prometheus metrics source today, or already has its own
-`/metrics` story out of scope for this change. Wiring one in later is the
+Every other capability in this repo (`MinIOTenant`, `Portal`, …) either
+isn't a Prometheus metrics source today, or exposes metrics through its
+upstream chart's own monitor settings. `rag` is deliberately left out. Wiring one in later is the
 same shape as `Inference`'s: append a `ServiceMonitor` object built with
 `service_monitor_manifest()` when a new opt-in field is set — no change
 needed here.
