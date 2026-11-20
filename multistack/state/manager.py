@@ -23,9 +23,10 @@ Typical call shape around a backend's create():
         raise
     state.mark_healthy("ai-cluster", kubeconfig_path=cluster.kubeconfig_path)
 """
+
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+from collections.abc import Iterable
 
 from .config import StateConfig
 from .db import SQLiteStore
@@ -48,7 +49,7 @@ class StateManager:
     reading, never an operation on real infrastructure. See the module
     docstring for the call shape other services use around it."""
 
-    def __init__(self, config: Optional[StateConfig] = None) -> None:
+    def __init__(self, config: StateConfig | None = None) -> None:
         self._config = config or StateConfig()
         self._store = SQLiteStore(self._config)
         self._repo = DeploymentRepository(self._store)
@@ -83,7 +84,7 @@ class StateManager:
         self,
         name: str,
         *,
-        kubeconfig_path: Optional[str] = None,
+        kubeconfig_path: str | None = None,
         detail: str = "deployment succeeded",
     ) -> Deployment:
         """Records that the deployment finished and is healthy."""
@@ -101,6 +102,19 @@ class StateManager:
         """Records that the deployment (or an operation on it) failed."""
         self._repo.record_health_check(name, HealthStatus.UNHEALTHY, error)
         return self._repo.set_status(name, DeploymentStatus.FAILED, error=error)
+
+    def mark_secret_stored(self, name: str, vault_path: str) -> None:
+        """Records where `name`'s generated secret landed in Vault.
+
+        Not folded into mark_healthy()/mark_failed(): a secret can be
+        minted and pushed into Vault at any point during or after
+        provisioning -- sometimes before either of those ever runs
+        (store_secret() is called the moment a value is generated, not
+        at the end of create()) -- so this is its own call rather than
+        an extra kwarg tied to a status transition that may not have
+        happened yet.
+        """
+        self._repo.set_vault_path(name, vault_path)
 
     def remove(self, name: str) -> None:
         """Drops the record for `name`. Call this after the real teardown
@@ -135,13 +149,13 @@ class StateManager:
                 )
 
     # -- reading ------------------------------------------------------
-    def get(self, name: str) -> Optional[Deployment]:
+    def get(self, name: str) -> Deployment | None:
         return self._repo.get(name)
 
-    def list_deployments(self) -> List[Deployment]:
+    def list_deployments(self) -> list[Deployment]:
         return self._repo.list()
 
-    def latest_health_check(self, name: str) -> Optional[HealthCheckResult]:
+    def latest_health_check(self, name: str) -> HealthCheckResult | None:
         return self._repo.latest_health_check(name)
 
     def close(self) -> None:

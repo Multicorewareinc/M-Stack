@@ -15,6 +15,7 @@ one pays for that index on every miss. Measured on this lab: resolving
 charts.bitnami.com first, because Bitnami's index.yaml is 27 MB against
 Longhorn's 64 KB. Small and specific repositories go first.
 """
+
 from .models import HelmRepository
 
 LONGHORN_REPOSITORY = HelmRepository(
@@ -30,6 +31,16 @@ NATS_REPOSITORY = HelmRepository(
 MINIO_OPERATOR_REPOSITORY = HelmRepository(
     name="minio-operator",
     url="https://operator.min.io",
+)
+
+SEAWEEDFS_REPOSITORY = HelmRepository(
+    name="seaweedfs",
+    url="https://seaweedfs.github.io/seaweedfs/helm",
+)
+
+HASHICORP_REPOSITORY = HelmRepository(
+    name="hashicorp",
+    url="https://helm.releases.hashicorp.com",
 )
 
 CNPG_REPOSITORY = HelmRepository(
@@ -49,6 +60,22 @@ NVIDIA_DEVICE_PLUGIN_REPOSITORY = HelmRepository(
     url="https://nvidia.github.io/k8s-device-plugin",
 )
 
+# KServe's own charts are OCI references and need no repository, but the
+# two things it depends on are published as ordinary repositories.
+CERT_MANAGER_REPOSITORY = HelmRepository(
+    name="jetstack",
+    url="https://charts.jetstack.io",
+)
+
+# The Knative *operator*, which is the part Knative publishes as a chart.
+# Serving itself is then a KnativeServing custom resource the operator
+# reconciles -- which is also where the ingress layer is selected, so
+# nothing here installs Kourier or Istio directly.
+KNATIVE_OPERATOR_REPOSITORY = HelmRepository(
+    name="knative-operator",
+    url="https://knative.github.io/operator",
+)
+
 BITNAMI_REPOSITORY = HelmRepository(
     name="bitnami",
     url="https://charts.bitnami.com/bitnami",
@@ -64,8 +91,12 @@ DEFAULT_REPOSITORIES = (
     LONGHORN_REPOSITORY,
     NATS_REPOSITORY,
     MINIO_OPERATOR_REPOSITORY,
+    SEAWEEDFS_REPOSITORY,
+    HASHICORP_REPOSITORY,
     CNPG_REPOSITORY,
     PROMETHEUS_COMMUNITY_REPOSITORY,
+    CERT_MANAGER_REPOSITORY,
+    KNATIVE_OPERATOR_REPOSITORY,
     # Ahead of Bitnami: its index is small, and a miss here would
     # otherwise pay for Bitnami's 27 MB one first.
     NVIDIA_DEVICE_PLUGIN_REPOSITORY,

@@ -11,8 +11,10 @@ So these assert the shape of the forwarding -- that each method exists,
 reaches the matching pyhelm3 method, and passes its arguments through --
 rather than any behaviour of Helm itself.
 """
+
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +31,7 @@ class _FakePyhelm3Client:
         async def call(*args, **kwargs):
             self.calls.append((name, args, kwargs))
             return f"{name}-result"
+
         return call
 
     def __getattr__(self, name):
@@ -60,6 +63,7 @@ def client(fake):
 
 def _await(coro):
     import asyncio
+
     return asyncio.run(coro)
 
 
@@ -68,7 +72,7 @@ def test_the_config_reaches_the_underlying_client(client, fake):
     # a check that matters, if it silently fails to be passed on.
     kwargs = fake["client"].init_kwargs
     # HelmConfig coerces it to a Path; what matters is which file.
-    assert str(kwargs["kubeconfig"]) == "/tmp/kc.yaml"
+    assert Path(kwargs["kubeconfig"]).as_posix() == "/tmp/kc.yaml"
     assert kwargs["executable"] == "helm"
     assert kwargs["insecure_skip_tls_verify"] is False
 
@@ -77,8 +81,12 @@ def test_every_adapter_method_reaches_a_pyhelm3_method(client, fake):
     """The regression this file exists for: a method HelmManager calls but
     the adapter never defined."""
     for name in (
-        "get_current_revision", "get_chart_ref", "get_chart",
-        "get_oci_chart", "install_or_upgrade_release", "uninstall_release",
+        "get_current_revision",
+        "get_chart_ref",
+        "get_chart",
+        "get_oci_chart",
+        "install_or_upgrade_release",
+        "uninstall_release",
         "list_releases",
     ):
         assert hasattr(client, name), f"adapter is missing {name}"
@@ -87,9 +95,7 @@ def test_every_adapter_method_reaches_a_pyhelm3_method(client, fake):
 def test_get_current_revision_is_defined_exactly_once():
     """A second definition silently overrides the first, so an edit to the
     earlier one does nothing. A merge introduced exactly that."""
-    source = (
-        __import__("inspect").getsource(PyHelm3Client)
-    )
+    source = __import__("inspect").getsource(PyHelm3Client)
     assert source.count("async def get_current_revision") == 1
 
 

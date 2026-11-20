@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NoReturn, Optional, Sequence
+from typing import Any, NoReturn
 
+from .accelerator import (
+    AcceleratorConfig,
+    AcceleratorManager,
+    AcceleratorType,
+)
+from .client import PyHelm3Client
 from .config import HelmConfig
 from .errors import (
-    HelmConfigurationError,
     HelmDeploymentError,
     HelmOperationCancelledError,
     HelmReleaseNotFoundError,
@@ -16,22 +22,14 @@ from .errors import (
 )
 from .models import (
     ChartRef,
-    HelmRepository,
     HelmOperationResult,
     HelmRelease,
+    HelmRepository,
     ReleaseStatus,
 )
-from .client import PyHelm3Client
 from .repositories import DEFAULT_REPOSITORIES
 from .resolver import ChartResolver
 from .values import HelmValuesValidator
-
-from .accelerator import (
-    AcceleratorManager,
-    AcceleratorType,
-    AcceleratorConfig,
-)
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +45,7 @@ class HelmManager:
     def __init__(
         self,
         config: HelmConfig,
-        repositories: Optional[Sequence[HelmRepository]] = None,
+        repositories: Sequence[HelmRepository] | None = None,
     ) -> None:
         # No default config: HelmConfig requires a kubeconfig, so there is
         # no such thing as a usable default one.
@@ -79,14 +77,10 @@ class HelmManager:
     ) -> None:
 
         if not release_name:
-            raise HelmValidationError(
-                "release_name cannot be empty."
-            )
+            raise HelmValidationError("release_name cannot be empty.")
 
         if len(release_name) > 53:
-            raise HelmValidationError(
-                "release_name cannot exceed 53 characters."
-            )
+            raise HelmValidationError("release_name cannot exceed 53 characters.")
 
     @staticmethod
     def _validate_chart_name(
@@ -94,9 +88,7 @@ class HelmManager:
     ) -> None:
 
         if not chart_name:
-            raise HelmValidationError(
-                "chart_name cannot be empty."
-            )
+            raise HelmValidationError("chart_name cannot be empty.")
 
     # ------------------------------------------------------------------
     # Chart resolution
@@ -113,7 +105,7 @@ class HelmManager:
         return chart_name.startswith(cls.EXPLICIT_REF_SCHEMES)
 
     @staticmethod
-    def _local_chart(chart_name: str) -> Optional[Path]:
+    def _local_chart(chart_name: str) -> Path | None:
         """`chart_name` as a local chart, or None if it names a repository chart.
 
         Only an existing directory holding a Chart.yaml, or an existing
@@ -132,7 +124,7 @@ class HelmManager:
     async def _chart_source(
         self,
         chart_name: str,
-        chart_version: Optional[str],
+        chart_version: str | None,
     ) -> Any:
         """A local path, or a ResolvedChart from the repositories.
 
@@ -147,8 +139,7 @@ class HelmManager:
             # uses the credentials `helm registry login` stored. This
             # layer holds none, so a 401 here means nobody has logged in
             # on this machine.
-            LOGGER.debug("Using explicit chart ref: ref=%s version=%s",
-                         chart_name, chart_version)
+            LOGGER.debug("Using explicit chart ref: ref=%s version=%s", chart_name, chart_version)
             return ChartRef(ref=chart_name, version=chart_version)
 
         local = self._local_chart(chart_name)
@@ -173,14 +164,77 @@ class HelmManager:
         )
         return resolved
 
+    # Retries for a chart fetch specifically -- confirmed in practice (not
+    # theoretical) against this exact repo: `helm show chart`'s HTTP GET
+    # for a chart tarball resolves through GitHub's release-assets CDN
+    # (release-assets.githubusercontent.com) behind charts.longhorn.io,
+    # which times out intermittently under no fault of this SDK or the
+    # target cluster -- the same fetch reliably succeeds on a second or
+    # third attempt seconds later. 3 attempts, not unlimited: a fetch
+    # that keeps failing this many times in a row is more likely a real
+    # outage or misconfiguration than a blip, and should surface as an
+    # error rather than hang the caller indefinitely.
+    _CHART_FETCH_ATTEMPTS = 3
+    _CHART_FETCH_BACKOFF_SECONDS = 5
+
+    async def _retry_chart_network_call(self, label: str, call) -> Any:
+        """Runs `call` (a zero-arg async callable), retrying on a
+        transient pyhelm3 error with backoff (see _CHART_FETCH_ATTEMPTS
+        above). Shared by every call that can independently re-fetch a
+        chart over the network -- confirmed in practice that
+        install_or_upgrade_release's own internal `helm upgrade --install
+        --repo ... --version ...` re-fetches the chart itself, a
+        different request from whatever _fetch_chart already resolved,
+        and can time out on its own even when the earlier fetch already
+        succeeded (on retry or otherwise)."""
+        # Imported here, not at module scope, for the same reason
+        # client.py imports pyhelm3 lazily: `helm` is an optional extra,
+        # and importing it shouldn't be required just to import this
+        # module.
+        from pyhelm3.errors import Error as PyHelm3Error
+
+        last_error: Exception | None = None
+        for attempt in range(1, self._CHART_FETCH_ATTEMPTS + 1):
+            try:
+                return await call()
+            except PyHelm3Error as exc:
+                last_error = exc
+                if attempt == self._CHART_FETCH_ATTEMPTS:
+                    break
+                delay = self._CHART_FETCH_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                LOGGER.warning(
+                    "%s failed (attempt %d/%d), retrying in %ds: %s",
+                    label,
+                    attempt,
+                    self._CHART_FETCH_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+        raise last_error
+
     async def _fetch_chart(self, chart_source: Any) -> Any:
-        """Loads whatever `_chart_source` produced."""
+        """Loads whatever `_chart_source` produced, retrying a transient
+        fetch failure with backoff (see _CHART_FETCH_ATTEMPTS above)."""
+        return await self._retry_chart_network_call(
+            "Chart fetch", lambda: self._fetch_chart_once(chart_source)
+        )
+
+    async def _install_or_upgrade_release_with_retry(self, *args, **kwargs) -> Any:
+        """install_or_upgrade_release(), retrying a transient fetch
+        failure with backoff -- see _retry_chart_network_call's
+        docstring for why this needs its own retry separate from
+        _fetch_chart's."""
+        return await self._retry_chart_network_call(
+            "Chart install/upgrade",
+            lambda: self._client.install_or_upgrade_release(*args, **kwargs),
+        )
+
+    async def _fetch_chart_once(self, chart_source: Any) -> Any:
         if isinstance(chart_source, Path):
             return await self._client.get_chart_ref(chart_source)
         if isinstance(chart_source, ChartRef):
-            return await self._client.get_chart_ref(
-                chart_source.ref, version=chart_source.version
-            )
+            return await self._client.get_chart_ref(chart_source.ref, version=chart_source.version)
         return await self._client.get_chart(chart_source)
 
     async def _get_accelerator_chart(
@@ -196,41 +250,27 @@ class HelmManager:
         NVIDIA uses the configured Helm repository through ChartResolver.
         """
 
-        if (
-            accelerator_config.accelerator_type
-            == AcceleratorType.TENSTORRENT
-        ):
+        if accelerator_config.accelerator_type == AcceleratorType.TENSTORRENT:
             if not accelerator_config.chart_reference:
-                raise HelmValidationError(
-                    "Tenstorrent OCI chart reference "
-                    "is not configured."
-                )
+                raise HelmValidationError("Tenstorrent OCI chart reference is not configured.")
 
             LOGGER.debug(
-                "Using Tenstorrent OCI chart: "
-                "reference=%s version=%s",
+                "Using Tenstorrent OCI chart: reference=%s version=%s",
                 accelerator_config.chart_reference,
                 chart_version,
             )
 
             chart_name = accelerator_config.chart_reference
 
-        elif (
-            accelerator_config.accelerator_type
-            == AcceleratorType.NVIDIA
-        ):
+        elif accelerator_config.accelerator_type == AcceleratorType.NVIDIA:
             if not accelerator_config.chart_name:
-                raise HelmValidationError(
-                    "NVIDIA GPU Operator chart "
-                    "is not configured."
-                )
+                raise HelmValidationError("NVIDIA GPU Operator chart is not configured.")
 
             chart_name = accelerator_config.chart_name
 
         else:
             raise HelmValidationError(
-                "Unsupported accelerator type: "
-                f"{accelerator_config.accelerator_type.value}"
+                f"Unsupported accelerator type: {accelerator_config.accelerator_type.value}"
             )
 
         chart_source = await self._chart_source(
@@ -272,9 +312,7 @@ class HelmManager:
         values = dict(values or {})
 
         LOGGER.info(
-            "Starting Helm install: "
-            "release=%s chart=%s accelerator=%s "
-            "version=%s namespace=%s",
+            "Starting Helm install: release=%s chart=%s accelerator=%s version=%s namespace=%s",
             release_name,
             chart_name,
             accelerator_type,
@@ -293,8 +331,7 @@ class HelmManager:
         if accelerator_type is not None:
             if chart_name is not None:
                 raise HelmValidationError(
-                    "chart_name must not be provided when "
-                    "accelerator_type is specified."
+                    "chart_name must not be provided when accelerator_type is specified."
                 )
 
             accelerator_config = await self._accelerator_manager.prepare(
@@ -310,8 +347,7 @@ class HelmManager:
         else:
             if chart_name is None:
                 raise HelmValidationError(
-                    "chart_name is required when "
-                    "accelerator_type is not specified."
+                    "chart_name is required when accelerator_type is not specified."
                 )
 
             self._validate_chart_name(chart_name)
@@ -327,7 +363,8 @@ class HelmManager:
         # --------------------------------------------------------------
         try:
             LOGGER.debug(
-                "Chart fetched successfully: release=%s", release_name,
+                "Chart fetched successfully: release=%s",
+                release_name,
             )
 
             # Retrieve the chart's actual values.yaml through
@@ -335,8 +372,7 @@ class HelmManager:
             default_values = await chart.values()
 
             LOGGER.debug(
-                "Validating Helm values: "
-                "release=%s chart=%s",
+                "Validating Helm values: release=%s chart=%s",
                 release_name,
                 chart.metadata.name,
             )
@@ -351,12 +387,20 @@ class HelmManager:
                 LOGGER.warning("%s", warning)
 
             LOGGER.debug(
-                "Helm values validation completed: "
-                "release=%s",
+                "Helm values validation completed: release=%s",
                 release_name,
             )
 
-            revision = await self._client.install_or_upgrade_release(
+            # install_or_upgrade_release does its own chart fetch inside
+            # the `helm upgrade --install --repo ... --version ...`
+            # subprocess it runs -- a SEPARATE download from the one
+            # _fetch_chart() already retried above, and one that hit the
+            # exact same release-assets.githubusercontent.com timeout
+            # independently in practice (confirmed: _fetch_chart's own
+            # retry succeeded, then this call failed on its own fetch a
+            # few requests later). Wrapped with the same retry for the
+            # same reason.
+            revision = await self._install_or_upgrade_release_with_retry(
                 release_name,
                 chart,
                 values,
@@ -373,8 +417,7 @@ class HelmManager:
             )
 
             LOGGER.info(
-                "Helm install completed: "
-                "release=%s revision=%s status=%s",
+                "Helm install completed: release=%s revision=%s status=%s",
                 result.release.name,
                 result.release.revision,
                 result.release.status.value,
@@ -383,9 +426,7 @@ class HelmManager:
             return result
 
         except Exception as exc:
-            self._handle_exception(
-                operation="install", release_name=release_name, exc=exc
-            )
+            self._handle_exception(operation="install", release_name=release_name, exc=exc)
 
     # ------------------------------------------------------------------
     # Upgrade
@@ -419,9 +460,7 @@ class HelmManager:
         values = dict(values or {})
 
         LOGGER.info(
-            "Starting Helm upgrade: "
-            "release=%s chart=%s accelerator=%s "
-            "version=%s namespace=%s",
+            "Starting Helm upgrade: release=%s chart=%s accelerator=%s version=%s namespace=%s",
             release_name,
             chart_name,
             accelerator_type,
@@ -440,8 +479,7 @@ class HelmManager:
         if accelerator_type is not None:
             if chart_name is not None:
                 raise HelmValidationError(
-                    "chart_name must not be provided when "
-                    "accelerator_type is specified."
+                    "chart_name must not be provided when accelerator_type is specified."
                 )
 
             accelerator_config = await self._accelerator_manager.prepare(
@@ -457,8 +495,7 @@ class HelmManager:
         else:
             if chart_name is None:
                 raise HelmValidationError(
-                    "chart_name is required when "
-                    "accelerator_type is not specified."
+                    "chart_name is required when accelerator_type is not specified."
                 )
 
             self._validate_chart_name(chart_name)
@@ -483,8 +520,7 @@ class HelmManager:
             default_values = await chart.values()
 
             LOGGER.debug(
-                "Validating Helm values: "
-                "release=%s chart=%s",
+                "Validating Helm values: release=%s chart=%s",
                 release_name,
                 chart.metadata.name,
             )
@@ -499,12 +535,11 @@ class HelmManager:
                 LOGGER.warning("%s", warning)
 
             LOGGER.debug(
-                "Helm values validation completed: "
-                "release=%s",
+                "Helm values validation completed: release=%s",
                 release_name,
             )
 
-            revision = await self._client.install_or_upgrade_release(
+            revision = await self._install_or_upgrade_release_with_retry(
                 release_name,
                 chart,
                 values,
@@ -521,8 +556,7 @@ class HelmManager:
             )
 
             LOGGER.info(
-                "Helm upgrade completed: "
-                "release=%s revision=%s status=%s",
+                "Helm upgrade completed: release=%s revision=%s status=%s",
                 result.release.name,
                 result.release.revision,
                 result.release.status.value,
@@ -531,9 +565,7 @@ class HelmManager:
             return result
 
         except Exception as exc:
-            self._handle_exception(
-                operation="upgrade", release_name=release_name, exc=exc
-            )
+            self._handle_exception(operation="upgrade", release_name=release_name, exc=exc)
 
     # ------------------------------------------------------------------
     # Uninstall
@@ -559,8 +591,7 @@ class HelmManager:
         self._validate_release_name(release_name)
 
         LOGGER.info(
-            "Starting Helm uninstall: "
-            "release=%s namespace=%s",
+            "Starting Helm uninstall: release=%s namespace=%s",
             release_name,
             namespace,
         )
@@ -569,13 +600,9 @@ class HelmManager:
         # first rather than reporting a removal that never happened.
         if not missing_ok:
             try:
-                await self._client.get_current_revision(
-                    release_name, namespace=namespace
-                )
+                await self._client.get_current_revision(release_name, namespace=namespace)
             except Exception as exc:
-                self._handle_exception(
-                    operation="uninstall", release_name=release_name, exc=exc
-                )
+                self._handle_exception(operation="uninstall", release_name=release_name, exc=exc)
 
         try:
             await self._client.uninstall_release(
@@ -592,9 +619,7 @@ class HelmManager:
             )
 
         except Exception as exc:
-            self._handle_exception(
-                operation="uninstall", release_name=release_name, exc=exc
-            )
+            self._handle_exception(operation="uninstall", release_name=release_name, exc=exc)
 
         status = ReleaseStatus.UNINSTALLED
 
@@ -623,8 +648,7 @@ class HelmManager:
         self._validate_release_name(release_name)
 
         LOGGER.debug(
-            "Getting Helm release status: "
-            "release=%s namespace=%s",
+            "Getting Helm release status: release=%s namespace=%s",
             release_name,
             namespace,
         )
@@ -635,14 +659,10 @@ class HelmManager:
                 namespace=namespace,
             )
 
-            return await self._build_release(
-                revision
-            )
+            return await self._build_release(revision)
 
         except Exception as exc:
-            self._handle_exception(
-                operation="status", release_name=release_name, exc=exc
-            )
+            self._handle_exception(operation="status", release_name=release_name, exc=exc)
 
     # ------------------------------------------------------------------
     # Get Release
@@ -652,7 +672,7 @@ class HelmManager:
         release_name: str,
         *,
         namespace: str | None = None,
-    ) -> Optional[HelmRelease]:
+    ) -> HelmRelease | None:
         """The release as it currently stands, or None when there is none.
 
         Two questions, two methods. `status()` raises for a missing
@@ -683,9 +703,7 @@ class HelmManager:
 
         return HelmOperationResult(
             operation=operation,
-            release=await cls._build_release(
-                revision
-            ),
+            release=await cls._build_release(revision),
         )
 
     @staticmethod
@@ -693,9 +711,7 @@ class HelmManager:
         revision: Any,
     ) -> HelmRelease:
 
-        status_value = str(
-            revision.status.value
-        ).lower()
+        status_value = str(revision.status.value).lower()
 
         try:
             status = ReleaseStatus(status_value)
@@ -716,14 +732,16 @@ class HelmManager:
         chart_version = None
         try:
             metadata = await revision.chart_metadata()
-        except Exception as exc:      # noqa: BLE001 - supplementary only
+        except Exception as exc:
             # Deliberately not fatal, and deliberately not silent. The
             # release's name, revision and status are the answer the
             # caller asked for; failing all of it because a follow-up
             # lookup failed would be the wrong trade.
             LOGGER.debug(
                 "chart metadata unavailable for release=%s revision=%s: %s",
-                revision.release.name, revision.revision, exc,
+                revision.release.name,
+                revision.revision,
+                exc,
             )
         else:
             chart_name = metadata.name
@@ -761,7 +779,7 @@ class HelmManager:
         """
         try:
             from pyhelm3 import CommandCancelledError, ReleaseNotFoundError
-        except ImportError:      # pragma: no cover - the extra is missing
+        except ImportError:  # pragma: no cover - the extra is missing
             # isinstance(exc, ()) is always False, so each check below
             # falls through to the generic error when the extra is absent.
             CommandCancelledError = ReleaseNotFoundError = ()
@@ -778,9 +796,7 @@ class HelmManager:
                 operation,
                 release_name,
             )
-            raise HelmReleaseNotFoundError(
-                f"Helm release '{release_name}' was not found."
-            ) from exc
+            raise HelmReleaseNotFoundError(f"Helm release '{release_name}' was not found.") from exc
 
         LOGGER.exception(
             "Helm operation failed: operation=%s release=%s",
@@ -789,14 +805,10 @@ class HelmManager:
         )
 
         if isinstance(exc, CommandCancelledError):
-            raise HelmOperationCancelledError(
-                f"Helm {operation} operation was cancelled."
-            ) from exc
+            raise HelmOperationCancelledError(f"Helm {operation} operation was cancelled.") from exc
 
         if isinstance(exc, asyncio.TimeoutError):
-            raise HelmTimeoutError(
-                f"Helm {operation} operation timed out."
-            ) from exc
+            raise HelmTimeoutError(f"Helm {operation} operation timed out.") from exc
 
         raise HelmDeploymentError(
             f"Helm {operation} failed for release '{release_name}': {exc}"

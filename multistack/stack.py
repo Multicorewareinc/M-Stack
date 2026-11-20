@@ -42,10 +42,11 @@ Two class-level declarations, both optional:
 an explicit argument always wins. `record()` reads a spec's `PROVIDES`
 and publishes them for whatever comes next.
 """
+
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional
-
+from collections.abc import Mapping
+from typing import Any
 
 # What each capability publishes once it has been created and recorded.
 # This is what lets a spec's REQUIRES be checked at wiring time rather
@@ -75,6 +76,7 @@ CAPABILITY_OUTPUT = {
     "portal": "portal_endpoint",
     "billing": "billing_endpoint",
     "queue": "event_backbone_url",
+    "vault": "vault_addr",
 }
 
 
@@ -96,7 +98,7 @@ class Stack:
                 "kubeconfig_path is required — a Stack exists to state which "
                 "cluster once, explicitly. There is no ambient fallback."
             )
-        self._values: Dict[str, Any] = {"kubeconfig_path": kubeconfig_path}
+        self._values: dict[str, Any] = {"kubeconfig_path": kubeconfig_path}
         self._values.update({k: v for k, v in values.items() if v is not None})
 
     # -- reading -----------------------------------------------------------
@@ -116,7 +118,7 @@ class Stack:
         return key in self._values
 
     # -- writing -----------------------------------------------------------
-    def provide(self, **values: Any) -> "Stack":
+    def provide(self, **values: Any) -> Stack:
         """Publishes values for later layers. Returns self, so it chains.
 
         For anything a spec cannot derive on its own — a generated
@@ -133,7 +135,7 @@ class Stack:
             self._values[key] = value
         return self
 
-    def record(self, spec: Any) -> "Stack":
+    def record(self, spec: Any) -> Stack:
         """Publishes what `spec` declares in `PROVIDES`.
 
         Call it *after* the backend has created the thing. A StorageClass
@@ -166,7 +168,7 @@ class Stack:
 
         for field, key in from_stack.items():
             if field in resolved:
-                continue                      # explicit beats wired
+                continue  # explicit beats wired
             if key in self._values:
                 resolved[field] = self._values[key]
             elif self._is_required(spec_cls, field):
@@ -194,8 +196,7 @@ class Stack:
         missing = [
             (capability, CAPABILITY_OUTPUT[capability])
             for capability in getattr(spec_cls, "REQUIRES", ())
-            if capability in CAPABILITY_OUTPUT
-            and CAPABILITY_OUTPUT[capability] not in self._values
+            if capability in CAPABILITY_OUTPUT and CAPABILITY_OUTPUT[capability] not in self._values
         ]
         if not missing:
             return
@@ -209,7 +210,7 @@ class Stack:
             + "\n\nCreate that layer first, then stack.record(its_spec). "
             + f"Published so far: {sorted(self._values)}."
             + "\n(Or build the spec directly if the dependency was satisfied "
-              "outside the SDK — the backend still verifies it for real.)"
+            "outside the SDK — the backend still verifies it for real.)"
         )
 
     # -- helpers -----------------------------------------------------------
@@ -228,49 +229,43 @@ class Stack:
         """
         owed_by = {
             "kubeconfig_path": "the cluster capability (see examples/rke2/)",
-            "storage_class": "the storage capability — create Storage, then "
-                             "stack.record(storage)",
-            "s3_endpoint_url": "the object store — create a tenant, then "
-                               "stack.record(tenant)",
+            "storage_class": "the storage capability — create Storage, then stack.record(storage)",
+            "s3_endpoint_url": "the object store — create a tenant, then stack.record(tenant)",
             "s3_secret_name": "whoever wrote the credentials Secret; publish "
-                              "it with stack.provide(s3_secret_name=...)",
+            "it with stack.provide(s3_secret_name=...)",
             "inference_endpoint": "the inference capability — create "
-                                  "Inference, then stack.record(inference)",
-            "policy_endpoint": "the policy capability — create Policy, then "
-                               "stack.record(policy)",
+            "Inference, then stack.record(inference)",
+            "policy_endpoint": "the policy capability — create Policy, then stack.record(policy)",
             "database_url": "the database capability — create a CNPG "
-                            "cluster with create_cluster(), then "
-                            "stack.record(cnpg)",
+            "cluster with create_cluster(), then "
+            "stack.record(cnpg)",
             "database_secret_name": "CloudNativePG, which writes it as "
-                                    "<cluster>-app-secret; publish it with "
-                                    "stack.provide(database_secret_name=...)",
+            "<cluster>-app-secret; publish it with "
+            "stack.provide(database_secret_name=...)",
             "cache_url": "the cache capability — create Valkey, then "
-                         "stack.record(valkey). Or publish it with "
-                         "stack.provide(cache_url=...) for a cache that "
-                         "was not deployed through the SDK",
+            "stack.record(valkey). Or publish it with "
+            "stack.provide(cache_url=...) for a cache that "
+            "was not deployed through the SDK",
             "event_backbone_url": "the event backbone; publish it with "
-                                  "stack.provide(event_backbone_url=...)",
+            "stack.provide(event_backbone_url=...)",
             "api_key_secret": "whoever created the gateway's API key Secret; "
-                              "publish it with "
-                              "stack.provide(api_key_secret=...)",
+            "publish it with "
+            "stack.provide(api_key_secret=...)",
             "tokenizer_url": "the tokenizer capability — create Tokenizer, "
-                             "then stack.record(tokenizer)",
-            "controlplane_endpoint": "a control plane — create ControlPlane, "
-                                     "then stack.record(it)",
-            "portal_endpoint": "a portal — create Portal, then "
-                               "stack.record(it)",
+            "then stack.record(tokenizer)",
+            "controlplane_endpoint": "a control plane — create ControlPlane, then stack.record(it)",
+            "portal_endpoint": "a portal — create Portal, then stack.record(it)",
             "observability_endpoint": "the observability capability — create "
-                                      "Observability, then "
-                                      "stack.record(observability)",
+            "Observability, then "
+            "stack.record(observability)",
+            "vault_addr": "the vault capability — create Vault, then stack.record(vault)",
         }
         lines = [
             f"{spec_cls.__name__} needs {field}, which nothing has published "
             f"as '{key}'. It comes from {owed_by.get(key, 'an earlier layer')}."
             for field, key in unmet
         ]
-        return "\n".join(lines) + (
-            f"\n\nPublished so far: {sorted(self._values)}"
-        )
+        return "\n".join(lines) + (f"\n\nPublished so far: {sorted(self._values)}")
 
 
-__all__ = ["Stack", "MissingDependencyError"]
+__all__ = ["MissingDependencyError", "Stack"]

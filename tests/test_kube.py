@@ -7,10 +7,12 @@ timeout and two let `subprocess.TimeoutExpired` escape. Now there is one
 implementation, so it is worth testing properly rather than four times
 partially.
 """
+
 from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -79,7 +81,7 @@ def test_a_missing_binary_is_named():
 
 
 def test_label_replaces_the_argv_prefix_in_messages():
-    with pytest.raises(Boom, match="^helm install failed"):
+    with pytest.raises(Boom, match=r"^helm install failed"):
         run_local(["sh", "-c", "exit 1"], error_cls=Boom, label="helm install")
 
 
@@ -100,10 +102,9 @@ def test_kubectl_errors_name_the_operation_not_the_kubeconfig_flag(monkeypatch):
     # "kubectl --kubeconfig /tmp/kc.yaml failed" names the flag; the point
     # of `label` is that it names what was attempted.
     monkeypatch.setattr(
-        kube, "_completed",
-        lambda argv, *, timeout, stdin_text=None: subprocess.CompletedProcess(
-            argv, 1, "", "nope"
-        ),
+        kube,
+        "_completed",
+        lambda argv, *, timeout, stdin_text=None: subprocess.CompletedProcess(argv, 1, "", "nope"),
     )
     with pytest.raises(Boom) as exc:
         kubectl(KUBECONFIG, "get", "pods", "-n", "x", error_cls=Boom)
@@ -147,15 +148,13 @@ def test_apply_wraps_several_objects_in_a_list(piped):
 # -- wait_for -------------------------------------------------------------
 def test_wait_for_returns_as_soon_as_the_check_passes():
     calls = []
-    wait_for(lambda: calls.append(1) or len(calls) >= 2,
-             timeout=5, interval=0, description="thing")
+    wait_for(lambda: calls.append(1) or len(calls) >= 2, timeout=5, interval=0, description="thing")
     assert len(calls) == 2
 
 
 def test_wait_for_raises_on_timeout():
     with pytest.raises(Boom, match="thing did not complete within"):
-        wait_for(lambda: False, timeout=0, interval=0,
-                 description="thing", error_cls=Boom)
+        wait_for(lambda: False, timeout=0, interval=0, description="thing", error_cls=Boom)
 
 
 def test_wait_for_lets_the_check_fail_fast():
@@ -225,10 +224,9 @@ def test_a_parallel_job_needs_every_completion(monkeypatch):
 # -- node_name_for --------------------------------------------------------
 def node_listing(monkeypatch, text):
     monkeypatch.setattr(
-        kube, "_completed",
-        lambda argv, *, timeout, stdin_text=None: subprocess.CompletedProcess(
-            argv, 0, text, ""
-        ),
+        kube,
+        "_completed",
+        lambda argv, *, timeout, stdin_text=None: subprocess.CompletedProcess(argv, 0, text, ""),
     )
 
 
@@ -255,13 +253,14 @@ def test_no_nodes_at_all_does_not_produce_an_empty_message(monkeypatch):
 
 # -- require_cli ----------------------------------------------------------
 def test_a_present_binary_returns_its_path():
-    assert require_cli("sh").endswith("sh")
+    assert Path(require_cli("sh")).stem.lower() == "sh"
 
 
 def test_a_missing_binary_raises_with_the_purpose():
     with pytest.raises(Boom, match="drives it directly"):
-        require_cli("multistack-does-not-exist", error_cls=Boom,
-                    purpose="this backend drives it directly")
+        require_cli(
+            "multistack-does-not-exist", error_cls=Boom, purpose="this backend drives it directly"
+        )
 
 
 def test_require_cli_runs_nothing():
@@ -269,6 +268,7 @@ def test_require_cli_runs_nothing():
     # (one via `bash -c` with the name interpolated unquoted), and a
     # presence check that executes can contact a cluster and hang.
     import shutil
+
     assert require_cli("sh") == shutil.which("sh")
 
 

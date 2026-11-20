@@ -25,11 +25,13 @@ This mirrors the module-local `isolated_state` fixture in
 without clearing it a later test keeps writing to an earlier test's
 file and the env var has no effect.
 """
+
 from __future__ import annotations
 
 import pytest
 
 from multistack.state import tracking
+from multistack.vault import client as vault_client
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +40,36 @@ def isolated_state_db(tmp_path, monkeypatch):
     tracking._default = None
     yield
     tracking._default = None
+
+
+@pytest.fixture(autouse=True)
+def isolated_vault_client(tmp_path, monkeypatch):
+    """The same isolation `isolated_state_db` gives the state layer,
+    applied to `default_vault_client()` (multistack/vault/client.py).
+
+    Several backends now call into Vault from inside their own
+    create()/create_cluster() (SeaweedFS, CNPG) with no test-side opt-in
+    at all -- that is the entire point of the no-op-safe design. Left
+    pointed at this machine's real defaults, a developer who has
+    actually deployed Vault (a real `~/.multistack/vault/vault-init.json`
+    and `~/.multistack/kubeconfig`) would have every such test silently
+    pick up the real root token and start shelling out `kubectl exec`
+    against whatever cluster that kubeconfig names -- slow at best, and
+    a test suite that behaves differently on every machine at worst,
+    exactly the failure mode `isolated_state_db` already documents for
+    the state DB.
+
+    `MULTISTACK_VAULT_STATE_DIR` pointed at an empty directory is what
+    actually matters: it guarantees `_require_root_token` finds no init
+    file and fails fast, before this driver ever shells out to `kubectl`
+    at all. `MULTISTACK_VAULT_KUBECONFIG` is set alongside it only as a
+    second line of defense.
+    """
+    monkeypatch.setenv("MULTISTACK_VAULT_KUBECONFIG", str(tmp_path / "unused-kc.yaml"))
+    monkeypatch.setenv("MULTISTACK_VAULT_STATE_DIR", str(tmp_path / "vault-state"))
+    vault_client._default = None
+    yield
+    vault_client._default = None
 
 
 # ---------------------------------------------------------------- helm --
@@ -74,24 +106,40 @@ class RecordingHelmRunner:
 
     # -- what the backends call --------------------------------------
     def install_or_upgrade(
-        self, release, *, chart=None, namespace, values=None,
-        chart_version=None, create_namespace=True, strict_values=True,
+        self,
+        release,
+        *,
+        chart=None,
+        namespace,
+        values=None,
+        chart_version=None,
+        create_namespace=True,
+        strict_values=True,
         **extra,
     ):
-        self.installs.append({
-            "release": release, "chart": chart, "namespace": namespace,
-            "values": values or {}, "chart_version": chart_version,
-            "create_namespace": create_namespace,
-            "strict_values": strict_values, **extra,
-        })
-        return self.releases.setdefault(
-            release, self._release(release, namespace))
+        self.installs.append(
+            {
+                "release": release,
+                "chart": chart,
+                "namespace": namespace,
+                "values": values or {},
+                "chart_version": chart_version,
+                "create_namespace": create_namespace,
+                "strict_values": strict_values,
+                **extra,
+            }
+        )
+        return self.releases.setdefault(release, self._release(release, namespace))
 
     def uninstall(self, release, *, namespace, missing_ok=False, **extra):
-        self.uninstalls.append({
-            "release": release, "namespace": namespace,
-            "missing_ok": missing_ok, **extra,
-        })
+        self.uninstalls.append(
+            {
+                "release": release,
+                "namespace": namespace,
+                "missing_ok": missing_ok,
+                **extra,
+            }
+        )
         self.releases.pop(release, None)
 
     def get_release(self, release, *, namespace):
@@ -120,7 +168,9 @@ class RecordingHelmRunner:
     @staticmethod
     def _release(name, namespace, revision=1):
         return HelmRelease(
-            name=name, namespace=namespace, revision=revision,
+            name=name,
+            namespace=namespace,
+            revision=revision,
             status=ReleaseStatus.DEPLOYED,
         )
 
@@ -147,12 +197,12 @@ def stub_helm(monkeypatch, helm_runner):
 
             runner = stub_helm(ValkeyDriver)
     """
+
     def install(target):
         if isinstance(target, type):
-            monkeypatch.setattr(
-                target, "_helm_runner", lambda self, *a, **k: helm_runner)
+            monkeypatch.setattr(target, "_helm_runner", lambda self, *a, **k: helm_runner)
         else:
-            monkeypatch.setattr(
-                target, "_helm_runner", lambda *a, **k: helm_runner)
+            monkeypatch.setattr(target, "_helm_runner", lambda *a, **k: helm_runner)
         return helm_runner
+
     return install

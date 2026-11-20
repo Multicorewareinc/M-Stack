@@ -12,6 +12,7 @@ each one against the package as it exists now. It catches the whole class
 of breakage a rename causes: a moved module, a renamed class, a symbol
 dropped from a package's surface.
 """
+
 from __future__ import annotations
 
 import ast
@@ -20,13 +21,13 @@ import importlib
 import re
 import textwrap
 from pathlib import Path
-from typing import List, Tuple
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
 EXAMPLE_FILES = sorted(EXAMPLES.rglob("*.py"))
+NATS_DRIVER_EXAMPLES = EXAMPLES / "nats"
 # docs/ plus every markdown file at the repo root — README, CHANGELOG,
 # CONTRIBUTING, SECURITY, CODE_OF_CONDUCT. README's composition snippet
 # went stale in the same refactor that broke full_stack.py, and it is the
@@ -62,35 +63,34 @@ def rel(path: Path) -> str:
     filename (examples/storage/install.py, examples/helm/install.py)."""
     return str(path.relative_to(ROOT))
 
+
 # ```python fences only. A fence tagged anything else is prose or shell.
 # The optional leading indent matches a fence nested in a list item, which
 # is valid markdown — dedented below so it parses as Python.
 PYTHON_FENCE = re.compile(r"^([ \t]*)```python\n(.*?)^[ \t]*```", re.S | re.M)
 
 
-def python_snippets(path: Path) -> List[str]:
+def python_snippets(path: Path) -> list[str]:
     return [
         textwrap.dedent(body)
-        for _indent, body in PYTHON_FENCE.findall(path.read_text())
+        for _indent, body in PYTHON_FENCE.findall(path.read_text(encoding="utf-8"))
     ]
 
 
-def sdk_imports(path: Path) -> List[Tuple[str, str]]:
+def sdk_imports(path: Path) -> list[tuple[str, str]]:
     """Every `multistack` symbol the file imports, as (module, name).
 
     `name` is empty for a plain `import multistack.x`.
     """
-    found: List[Tuple[str, str]] = []
-    for node in ast.walk(ast.parse(path.read_text())):
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.ImportFrom):
             # Relative imports have no module of ours to resolve.
             if node.module and node.module.split(".")[0] in SDK_ROOTS:
                 found.extend((node.module, alias.name) for alias in node.names)
         elif isinstance(node, ast.Import):
             found.extend(
-                (alias.name, "")
-                for alias in node.names
-                if alias.name.split(".")[0] in SDK_ROOTS
+                (alias.name, "") for alias in node.names if alias.name.split(".")[0] in SDK_ROOTS
             )
     return found
 
@@ -103,7 +103,7 @@ def test_examples_are_present():
 
 @pytest.mark.parametrize("path", EXAMPLE_FILES, ids=rel)
 def test_example_parses(path: Path):
-    ast.parse(path.read_text())
+    ast.parse(path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("path", EXAMPLE_FILES, ids=rel)
@@ -119,8 +119,7 @@ def test_example_imports_resolve(path: Path):
             pytest.fail(f"{path.name}: `{module_name}` does not import — {exc}")
         if symbol and not hasattr(module, symbol):
             pytest.fail(
-                f"{path.name}: `from {module_name} import {symbol}` — "
-                f"{module_name} has no {symbol}"
+                f"{path.name}: `from {module_name} import {symbol}` — {module_name} has no {symbol}"
             )
 
 
@@ -150,12 +149,13 @@ def test_example_defines_every_name_it_uses(path: Path):
     scope-accurate version would need a symbol table this does not
     justify.
     """
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
 
     def names_in(target) -> set:
         """Name ids bound by an assignment target, unpacking included."""
         return {
-            n.id for n in ast.walk(target)
+            n.id
+            for n in ast.walk(target)
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
         }
 
@@ -167,12 +167,10 @@ def test_example_defines_every_name_it_uses(path: Path):
             bound.add(node.id)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             bound |= {a.asname or a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                               ast.ClassDef)):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound.add(node.name)
         elif isinstance(node, (ast.arguments,)):
-            bound |= {a.arg for a in (node.posonlyargs + node.args
-                                      + node.kwonlyargs)}
+            bound |= {a.arg for a in (node.posonlyargs + node.args + node.kwonlyargs)}
             bound |= {a.arg for a in (node.vararg, node.kwarg) if a}
         elif isinstance(node, ast.ExceptHandler) and node.name:
             bound.add(node.name)
@@ -198,7 +196,12 @@ def test_examples_do_not_reach_into_driver_modules(path: Path):
     # An example is what the team copies. One that names a driver teaches
     # callers to defeat the interchangeability the spec exists to give,
     # and to import eagerly what the registry loads on demand.
-    for module_name, symbol in sdk_imports(path):
+    if NATS_DRIVER_EXAMPLES in path.parents:
+        # These examples demonstrate the NATS driver itself (stream admin,
+        # NACK resources, the Helm deployment), which the generic queue SDK
+        # deliberately does not expose.
+        return
+    for module_name, _symbol in sdk_imports(path):
         assert ".drivers." not in module_name, (
             f"{path.name} imports {module_name} directly — go through the "
             "capability's backend instead"
@@ -229,23 +232,17 @@ def test_doc_snippet_imports_resolve(path: Path):
     that is also the part a rename breaks."""
     for i, snippet in enumerate(python_snippets(path), 1):
         for node in ast.walk(ast.parse(snippet)):
-            names: List[Tuple[str, str]] = []
+            names: list[tuple[str, str]] = []
             if isinstance(node, ast.ImportFrom):
                 if node.module and node.module.split(".")[0] in SDK_ROOTS:
                     names = [(node.module, a.name) for a in node.names]
             elif isinstance(node, ast.Import):
-                names = [
-                    (a.name, "") for a in node.names
-                    if a.name.split(".")[0] in SDK_ROOTS
-                ]
+                names = [(a.name, "") for a in node.names if a.name.split(".")[0] in SDK_ROOTS]
             for module_name, symbol in names:
                 try:
                     module = importlib.import_module(module_name)
                 except ImportError as exc:
-                    pytest.fail(
-                        f"{path.name} snippet {i}: `{module_name}` does not "
-                        f"import — {exc}"
-                    )
+                    pytest.fail(f"{path.name} snippet {i}: `{module_name}` does not import — {exc}")
                 if symbol and not hasattr(module, symbol):
                     pytest.fail(
                         f"{path.name} snippet {i}: `from {module_name} import "
@@ -267,7 +264,7 @@ PY_PATH = re.compile(r"\b(?:examples|docs|tests|multistack)/[A-Za-z0-9_/.-]+\.(?
 
 @pytest.mark.parametrize("path", DOCS, ids=rel)
 def test_markdown_links_resolve(path: Path):
-    for target in MD_LINK.findall(path.read_text()):
+    for target in MD_LINK.findall(path.read_text(encoding="utf-8")):
         resolved = (path.parent / target).resolve()
         assert resolved.exists(), f"{rel(path)} links to missing {target}"
 
@@ -277,5 +274,5 @@ def test_paths_named_in_examples_exist(path: Path):
     """An example that tells you to run `python3 examples/longhorn/install.py`
     after that directory was renamed sends the reader nowhere. Caught
     exactly that."""
-    for target in PY_PATH.findall(path.read_text()):
+    for target in PY_PATH.findall(path.read_text(encoding="utf-8")):
         assert (ROOT / target).exists(), f"{rel(path)} names missing {target}"

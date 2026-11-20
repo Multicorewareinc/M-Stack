@@ -1,4 +1,4 @@
-from typing import Any, List
+from typing import Any
 
 from .errors import HelmValidationError
 
@@ -29,10 +29,10 @@ class HelmValuesValidator:
         cls,
         user_values: dict[str, Any],
         default_values: dict[str, Any],
-    ) -> List[str]:
+    ) -> list[str]:
         """Unknown value paths, as human-readable strings. Never raises for
         an unknown path — that is `validate(strict=True)`."""
-        unknown: List[str] = []
+        unknown: list[str] = []
         try:
             cls.validate(user_values, default_values, strict=True)
         except HelmValidationError as exc:
@@ -45,7 +45,7 @@ class HelmValuesValidator:
         user_values: dict[str, Any],
         default_values: dict[str, Any],
         strict: bool = False,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Validate user-provided values against chart default values.
 
@@ -76,16 +76,22 @@ class HelmValuesValidator:
         """
 
         if not isinstance(user_values, dict):
-            raise HelmValidationError(
-                "Helm values must be provided as a dictionary."
-            )
+            raise HelmValidationError("Helm values must be provided as a dictionary.")
+
+        # A chart with no values.yaml has no defaults, which is not the
+        # same as a malformed one: pyhelm3 parses an absent (or empty)
+        # file to None. CRD-only charts are the normal case -- KServe
+        # publishes `kserve-crd` that way, and rejecting it meant the
+        # SDK could not install a chart whose whole purpose is to carry
+        # no configuration. Treated as empty, so a value passed to such
+        # a chart is still correctly reported as unknown.
+        if default_values is None:
+            default_values = {}
 
         if not isinstance(default_values, dict):
-            raise HelmValidationError(
-                "Chart default values must be a dictionary."
-            )
+            raise HelmValidationError("Chart default values must be a dictionary.")
 
-        unknown: List[str] = []
+        unknown: list[str] = []
         cls._validate_mapping(
             user_values=user_values,
             default_values=default_values,
@@ -102,16 +108,11 @@ class HelmValuesValidator:
         user_values: dict[str, Any],
         default_values: dict[str, Any],
         path: str,
-        unknown: List[str],
+        unknown: list[str],
         strict: bool,
     ) -> None:
         for key, user_value in user_values.items():
-
-            current_path = (
-                f"{path}.{key}"
-                if path
-                else key
-            )
+            current_path = f"{path}.{key}" if path else key
 
             if key not in default_values:
                 message = (
@@ -126,10 +127,7 @@ class HelmValuesValidator:
 
             default_value = default_values[key]
 
-            if (
-                isinstance(user_value, dict)
-                and isinstance(default_value, dict)
-            ):
+            if isinstance(user_value, dict) and isinstance(default_value, dict):
                 # Some Helm values intentionally use an empty mapping
                 # so users can supply arbitrary child keys.
                 #

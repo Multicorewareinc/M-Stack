@@ -7,8 +7,8 @@ other spec in this SDK does. `component_type` is a free string rather than
 an enum on purpose -- `StateManager` never validates it against a fixed
 list, so any component can register under its own name with no migration.
 """
+
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -38,8 +38,9 @@ class Deployment(BaseModel):
     name: str
     component_type: str
     status: DeploymentStatus
-    kubeconfig_path: Optional[str] = None
-    error: Optional[str] = None
+    kubeconfig_path: str | None = None
+    error: str | None = None
+    vault_path: str | None = None
     created_at: str
     updated_at: str
 

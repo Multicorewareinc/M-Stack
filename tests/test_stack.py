@@ -6,11 +6,13 @@ missing, not which capability was supposed to produce it — and that
 building the layers in the wrong order should cost a line, not a chart
 install and a readiness timeout that blames the wrong component.
 """
+
 from __future__ import annotations
 
 import pytest
 
 from multistack import (
+    Cache,
     Inference,
     MinIOTenant,
     MissingDependencyError,
@@ -18,7 +20,6 @@ from multistack import (
     RKE2Node,
     Stack,
     Storage,
-    Cache,
 )
 
 KUBECONFIG = "/tmp/kc.yaml"
@@ -165,8 +166,7 @@ def test_inference_wires_the_object_store_through(stack):
     stack.record(tenant)
     stack.provide(s3_secret_name="minio-creds")
 
-    service = stack.build(Inference, model="s3://models/qwen",
-                          served_model_name="qwen")
+    service = stack.build(Inference, model="s3://models/qwen", served_model_name="qwen")
     assert service.s3_endpoint_url == tenant.endpoint()
     assert service.s3_secret_name == "minio-creds"
     assert service.kubeconfig_path == KUBECONFIG
@@ -209,26 +209,42 @@ def test_the_cluster_spec_takes_the_kubeconfig_path_from_the_stack():
 # docs/dependency-validation-checklist.md carries the same list for a
 # human reviewing a new capability.
 def every_spec():
-    from multistack.ingress_gateway import IngressGateway
-    from multistack.policy.spec import Policy
-
     from multistack import Gateway, Inference
-
     from multistack.accelerator.spec import Accelerator
     from multistack.billing.spec import Billing
     from multistack.controlplane.spec import ControlPlane
     from multistack.database.spec import Database
     from multistack.enricher.spec import Enricher
+    from multistack.ingress_gateway import IngressGateway
     from multistack.observability.spec import Observability
+    from multistack.policy.spec import Policy
     from multistack.portal.spec import Portal
     from multistack.queue.spec import Queue
     from multistack.route.spec import Route
     from multistack.tokenizer.spec import Tokenizer
+    from multistack.vault.spec import Vault
 
-    return [RKE2Cluster, Storage, MinIOTenant, Cache, Database, Inference,
-            Policy, Gateway, IngressGateway, Observability, Tokenizer,
-            ControlPlane, Portal, Accelerator, Enricher, Billing, Route,
-            Queue]
+    return [
+        RKE2Cluster,
+        Storage,
+        MinIOTenant,
+        Cache,
+        Database,
+        Inference,
+        Policy,
+        Gateway,
+        IngressGateway,
+        Observability,
+        Tokenizer,
+        ControlPlane,
+        Portal,
+        Accelerator,
+        Enricher,
+        Billing,
+        Route,
+        Queue,
+        Vault,
+    ]
 
 
 @pytest.mark.parametrize("spec_cls", every_spec(), ids=lambda c: c.__name__)
@@ -282,14 +298,58 @@ def test_every_published_key_is_a_capability_output(spec_cls):
         )
 
 
+# -- every_spec() itself ---------------------------------------------------
+# every_spec() is a hand-maintained list, and the four tests above only
+# ever look at what's in it. `queue` and `vault` both landed as real,
+# working capabilities before anyone added them here -- `vault`'s own
+# wiring tests above passed on the first try once it was, meaning
+# nothing was ever actually broken, it just went unchecked (the exact
+# failure mode docs/conformance.md's "Gap 8" describes, and the same one
+# `route` hit before it). This walks every `multistack/*/spec.py` module
+# and asserts every `CapabilitySpec` subclass it defines is in the list,
+# so the next one fails CI instead of going quietly unchecked.
+#
+# RKE2Cluster and MinIOTenant/SeaweedFSCluster are deliberately excluded:
+# they predate this contract and are plain `pydantic.BaseModel`, not
+# `CapabilitySpec` -- `docs/structure.md` calls this the "closed to new
+# work" shape, and `__subclasses__()` correctly does not find them.
+def test_every_spec_is_in_every_spec():
+    import importlib
+    import pkgutil
+
+    import multistack
+    from multistack.capability import CapabilitySpec
+
+    for modinfo in pkgutil.walk_packages(multistack.__path__, prefix="multistack."):
+        if modinfo.name.endswith(".spec"):
+            importlib.import_module(modinfo.name)
+
+    # __subclasses__() is process-wide, not scoped to the modules just
+    # imported above -- a synthetic CapabilitySpec subclass any other
+    # test file defines (tests/test_capability.py's `Fake`, built to
+    # test the base class itself) is just as visible here when the
+    # whole suite runs together, and is not a capability this document
+    # or every_spec() should ever have to know about.
+    found = {c for c in CapabilitySpec.__subclasses__() if c.__module__.startswith("multistack.")}
+    listed = set(every_spec())
+    missing = found - listed
+    assert not missing, (
+        f"{[c.__name__ for c in missing]} define a CapabilitySpec but "
+        "are not in every_spec() in this file -- none of the four "
+        "wiring tests above have ever checked them. Add them to the "
+        "list every_spec() returns."
+    )
+
+
 # -- the database capability ----------------------------------------------
 def test_recording_a_cnpg_cluster_publishes_the_database_url(stack):
     from multistack.database import Database, DatabaseConfig
 
     cluster = stack.build(
-        Database, name="admin-pg", namespace="platform-db",
-        database=DatabaseConfig(name="admin_control_plane", owner="admin",
-                                password="s3cret"),
+        Database,
+        name="admin-pg",
+        namespace="platform-db",
+        database=DatabaseConfig(name="admin_control_plane", owner="admin", password="s3cret"),
     )
     stack.record(cluster)
 
@@ -311,4 +371,5 @@ def test_the_unmet_database_url_message_names_the_capability(stack):
 
     assert CAPABILITY_OUTPUT["database"] == "database_url"
     assert "create_cluster()" in Stack(kubeconfig_path=KUBECONFIG)._unmet_message(
-        type("Fake", (), {"__name__": "Fake"}), [("database_url", "database_url")])
+        type("Fake", (), {"__name__": "Fake"}), [("database_url", "database_url")]
+    )

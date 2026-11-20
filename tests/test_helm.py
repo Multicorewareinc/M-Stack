@@ -4,6 +4,7 @@ The async machinery underneath is pyhelm3's; what is ours is the sync
 boundary, the repository handling, the values check and the error typing.
 Those are what these cover, without needing a cluster or the extra.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +65,7 @@ def test_a_bare_asyncio_run_would_have_failed_here():
         try:
             return asyncio.run(coro)
         finally:
-            coro.close()   # asyncio.run raised before awaiting it
+            coro.close()  # asyncio.run raised before awaiting it
 
     with pytest.raises(RuntimeError, match="cannot be called from a running event loop"):
         asyncio.run(caller())
@@ -80,13 +81,13 @@ def test_kubeconfig_is_required():
 
 def test_a_runner_is_bound_to_one_cluster():
     runner = HelmRunner(KUBECONFIG)
-    assert str(runner._config.kubeconfig) == KUBECONFIG
+    assert runner._config.kubeconfig.as_posix() == KUBECONFIG
 
 
 def test_helm_is_not_imported_until_an_operation_runs():
     import sys
 
-    HelmRunner(KUBECONFIG)          # constructing must not need the extra
+    HelmRunner(KUBECONFIG)  # constructing must not need the extra
     assert "pyhelm3" not in sys.modules or True  # tolerant: another test may have
     # The real guarantee: the manager is built lazily, not in __init__.
     assert HelmRunner(KUBECONFIG)._manager is None
@@ -165,14 +166,36 @@ def test_strict_refuses():
 
 
 def test_known_paths_are_accepted():
-    assert V.validate(
-        {"persistence": {"defaultClassReplicaCount": 2}}, LONGHORN_DEFAULTS
-    ) == []
+    assert V.validate({"persistence": {"defaultClassReplicaCount": 2}}, LONGHORN_DEFAULTS) == []
 
 
 def test_an_empty_default_mapping_accepts_anything_under_it():
     # `nodeSelector: {}` exists so callers can supply arbitrary keys.
     assert V.validate({"nodeSelector": {"disk": "ssd"}}, LONGHORN_DEFAULTS) == []
+
+
+def test_a_chart_with_no_values_file_is_not_malformed():
+    """pyhelm3 parses an absent values.yaml to None. CRD-only charts are
+    the normal case -- KServe publishes `kserve-crd` that way -- and
+    refusing them meant the SDK could not install a chart whose whole
+    purpose is to carry no configuration."""
+    assert V.validate({}, None) == []
+
+
+def test_a_value_passed_to_a_chart_with_no_values_is_still_unknown():
+    """Treating absent defaults as empty must not also make them
+    permissive: a chart that declares nothing supports nothing."""
+    warnings = V.validate({"replicas": 2}, None)
+    assert len(warnings) == 1 and "replicas" in warnings[0]
+    with pytest.raises(HelmValidationError, match="replicas"):
+        V.validate({"replicas": 2}, None, strict=True)
+
+
+def test_genuinely_malformed_defaults_are_still_refused():
+    """A list or a string at the top of values.yaml is a broken chart,
+    not an empty one."""
+    with pytest.raises(HelmValidationError, match="must be a dictionary"):
+        V.validate({}, ["not", "a", "mapping"])
 
 
 def test_every_unknown_path_is_reported_not_just_the_first():
@@ -296,9 +319,7 @@ class NoisyManager(FakeManager):
         return await super().get_release(release, namespace=namespace)
 
 
-def test_get_release_does_not_log_the_absence_it_was_asked_about(
-    monkeypatch, caplog
-):
+def test_get_release_does_not_log_the_absence_it_was_asked_about(monkeypatch, caplog):
     """`helm status` exits non-zero for a release that is not there.
 
     pyhelm3 logs every non-zero exit as `command failed`, so a delete()
@@ -325,9 +346,7 @@ def test_the_suppression_does_not_outlive_the_call(monkeypatch, caplog):
     runner.get_release("x", namespace="ns")
 
     with caplog.at_level(logging.WARNING):
-        logging.getLogger("pyhelm3.command").warning(
-            "command failed: %s", "helm upgrade x"
-        )
+        logging.getLogger("pyhelm3.command").warning("command failed: %s", "helm upgrade x")
 
     assert "command failed" in caplog.text
 
@@ -340,14 +359,12 @@ def test_is_deployed_is_false_when_the_release_is_absent(monkeypatch):
 def test_is_deployed_is_false_for_a_failed_release(monkeypatch):
     # Helm refuses to upgrade over a failed release, so a caller has to
     # know the difference between "not there" and "there but broken".
-    runner = runner_over(FakeManager(result=FakeRelease(ReleaseStatus.FAILED)),
-                         monkeypatch)
+    runner = runner_over(FakeManager(result=FakeRelease(ReleaseStatus.FAILED)), monkeypatch)
     assert runner.is_deployed("x", namespace="ns") is False
 
 
 def test_is_deployed_is_true_for_a_deployed_release(monkeypatch):
-    runner = runner_over(FakeManager(result=FakeRelease(ReleaseStatus.DEPLOYED)),
-                         monkeypatch)
+    runner = runner_over(FakeManager(result=FakeRelease(ReleaseStatus.DEPLOYED)), monkeypatch)
     assert runner.is_deployed("x", namespace="ns") is True
 
 
@@ -361,9 +378,9 @@ def test_is_deployed_does_not_read_a_failure_message_as_absence(monkeypatch):
     on it by installing.
     """
     runner = runner_over(
-        FakeManager(raises=HelmDeploymentError(
-            "Helm status failed for release 'x': repo was not found"
-        )),
+        FakeManager(
+            raises=HelmDeploymentError("Helm status failed for release 'x': repo was not found")
+        ),
         monkeypatch,
     )
     with pytest.raises(HelmDeploymentError):
@@ -394,9 +411,7 @@ def handle(exc, operation="status"):
     try:
         raise exc
     except BaseException:
-        return HelmManager._handle_exception(
-            operation=operation, release_name="x", exc=exc
-        )
+        return HelmManager._handle_exception(operation=operation, release_name="x", exc=exc)
 
 
 def test_a_missing_release_is_not_logged_as_a_failure(caplog):
@@ -412,9 +427,7 @@ def test_a_missing_release_is_not_logged_as_a_failure(caplog):
         with pytest.raises(HelmReleaseNotFoundError):
             # pyhelm3 builds its errors from the command result:
             # (returncode, stdout, stderr).
-            handle(pyhelm3.ReleaseNotFoundError(
-                1, b"", b"Error: release: not found"
-            ))
+            handle(pyhelm3.ReleaseNotFoundError(1, b"", b"Error: release: not found"))
 
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert not [r for r in caplog.records if r.exc_info]
@@ -439,9 +452,9 @@ def test_a_real_failure_still_logs_a_traceback(caplog):
 # that recognises them, and the two ways it could go wrong: mistaking a
 # repository chart name for a path, or accepting a path silently when it
 # is misspelled.
-from pathlib import Path                                  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-from multistack.helm.manager import HelmManager           # noqa: E402
+from multistack.helm.manager import HelmManager  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -481,7 +494,7 @@ def test_the_first_party_charts_are_recognised():
         assert HelmManager._local_chart(str(chart)) == chart, service
 
 
-def test_a_chart_version_with_a_local_chart_is_refused(tmp_path):
+def test_a_chart_version_with_a_local_chart_is_refused(tmp_path, monkeypatch):
     """A local chart's version is whatever its Chart.yaml says, so a
     chart_version alongside it is a mistake worth naming rather than
     ignoring."""
@@ -489,6 +502,7 @@ def test_a_chart_version_with_a_local_chart_is_refused(tmp_path):
     kubeconfig = tmp_path / "kc.yaml"
     kubeconfig.write_text("apiVersion: v1\n")
     (tmp_path / "Chart.yaml").write_text("name: x\n")
+    monkeypatch.setattr("multistack.helm.manager.PyHelm3Client", lambda config: None)
 
     manager = HelmManager(HelmConfig(kubeconfig=kubeconfig))
     with pytest.raises(HelmValidationError) as raised:
@@ -509,7 +523,7 @@ def test_a_chart_name_is_not():
         assert not HelmManager._is_explicit_ref(name)
 
 
-def test_an_oci_ref_keeps_its_version_and_never_reaches_the_resolver(tmp_path):
+def test_an_oci_ref_keeps_its_version_and_never_reaches_the_resolver(tmp_path, monkeypatch):
     """Two claims in one, both load-bearing.
 
     The version must travel with the ref, because for OCI the version is
@@ -522,6 +536,7 @@ def test_an_oci_ref_keeps_its_version_and_never_reaches_the_resolver(tmp_path):
 
     kubeconfig = tmp_path / "kc.yaml"
     kubeconfig.write_text("apiVersion: v1\n")
+    monkeypatch.setattr("multistack.helm.manager.PyHelm3Client", lambda config: None)
     manager = HelmManager(HelmConfig(kubeconfig=kubeconfig))
 
     def refuse(*a, **k):
@@ -529,11 +544,8 @@ def test_an_oci_ref_keeps_its_version_and_never_reaches_the_resolver(tmp_path):
 
     manager._resolver.resolve = refuse
 
-    source = run_sync(manager._chart_source(
-        "oci://harbor.local/platform/model-gateway", "0.2.1"
-    ))
-    assert source == ChartRef(ref="oci://harbor.local/platform/model-gateway",
-                              version="0.2.1")
+    source = run_sync(manager._chart_source("oci://harbor.local/platform/model-gateway", "0.2.1"))
+    assert source == ChartRef(ref="oci://harbor.local/platform/model-gateway", version="0.2.1")
 
 
 def test_an_oci_ref_without_a_version_is_allowed():
@@ -556,9 +568,13 @@ def test_a_missing_helm_extra_names_the_extra(monkeypatch):
     """
     runner = HelmRunner(KUBECONFIG)
     monkeypatch.setattr(
-        HelmRunner, "_import_manager",
-        staticmethod(lambda: (_ for _ in ()).throw(
-            ModuleNotFoundError("No module named 'yaml'", name="yaml"))),
+        HelmRunner,
+        "_import_manager",
+        staticmethod(
+            lambda: (_ for _ in ()).throw(
+                ModuleNotFoundError("No module named 'yaml'", name="yaml")
+            )
+        ),
     )
     with pytest.raises(HelmConfigurationError) as raised:
         runner.is_deployed("x", namespace="ns")
@@ -566,7 +582,7 @@ def test_a_missing_helm_extra_names_the_extra(monkeypatch):
     message = str(raised.value)
     assert 'pip install "multistack-sdk[helm]"' in message
     assert "yaml" in message
-    assert "on PATH" in message      # helm itself is still needed
+    assert "on PATH" in message  # helm itself is still needed
 
 
 # -- chart metadata on a release ------------------------------------------
@@ -612,8 +628,9 @@ def test_unavailable_chart_metadata_does_not_lose_the_release():
     second helm invocation. Failing the whole call because it did not
     work would throw away the name, revision and status the caller
     actually asked for."""
-    release = run_sync(HelmManager._build_release(
-        FakeRevision(raises=RuntimeError("helm get metadata failed"))))
+    release = run_sync(
+        HelmManager._build_release(FakeRevision(raises=RuntimeError("helm get metadata failed")))
+    )
     assert release.name == "gateway"
     assert release.revision == 2
     assert release.status is ReleaseStatus.DEPLOYED

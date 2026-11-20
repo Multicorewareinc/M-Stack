@@ -4,10 +4,11 @@ CRUD over the `deployments` and `health_checks` tables.
 StateManager works entirely in terms of these methods and the models in
 `models.py`; nothing above this file writes SQL.
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import List, Optional
+import builtins
+from datetime import UTC, datetime
 
 from .db import SQLiteStore
 from .errors import DeploymentConflictError, DeploymentNotFoundError
@@ -15,7 +16,7 @@ from .models import Deployment, DeploymentStatus, HealthCheckResult, HealthStatu
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class DeploymentRepository:
@@ -39,7 +40,7 @@ class DeploymentRepository:
         )
         return self.get(name)
 
-    def get(self, name: str) -> Optional[Deployment]:
+    def get(self, name: str) -> Deployment | None:
         row = self._store.query_one("SELECT * FROM deployments WHERE name = ?", (name,))
         return self._row_to_deployment(row) if row else None
 
@@ -49,12 +50,12 @@ class DeploymentRepository:
             raise DeploymentNotFoundError(f"no deployment named '{name}' is recorded.")
         return deployment
 
-    def list(self) -> List[Deployment]:
+    def list(self) -> builtins.list[Deployment]:
         rows = self._store.query_all("SELECT * FROM deployments ORDER BY name")
         return [self._row_to_deployment(r) for r in rows]
 
     def set_status(
-        self, name: str, status: DeploymentStatus, *, error: Optional[str] = None
+        self, name: str, status: DeploymentStatus, *, error: str | None = None
     ) -> Deployment:
         self.require(name)
         self._store.execute(
@@ -76,17 +77,29 @@ class DeploymentRepository:
         """
         self.require(name)
         self._store.execute(
-            "UPDATE deployments SET component_type = ?, updated_at = ? "
-            "WHERE name = ?",
+            "UPDATE deployments SET component_type = ?, updated_at = ? WHERE name = ?",
             (component_type, _utcnow(), name),
         )
         return self.get(name)
 
-    def set_kubeconfig_path(self, name: str, kubeconfig_path: Optional[str]) -> Deployment:
+    def set_kubeconfig_path(self, name: str, kubeconfig_path: str | None) -> Deployment:
         self.require(name)
         self._store.execute(
             "UPDATE deployments SET kubeconfig_path = ?, updated_at = ? WHERE name = ?",
             (kubeconfig_path, _utcnow(), name),
+        )
+        return self.get(name)
+
+    def set_vault_path(self, name: str, vault_path: str) -> Deployment:
+        """Records where this deployment's generated secret landed in
+        Vault. Separate from set_status/set_kubeconfig_path -- a secret
+        can be minted and stored well after the create() that provisions
+        it has already reported healthy (or failed), so this never
+        touches status, just the one column."""
+        self.require(name)
+        self._store.execute(
+            "UPDATE deployments SET vault_path = ?, updated_at = ? WHERE name = ?",
+            (vault_path, _utcnow(), name),
         )
         return self.get(name)
 
@@ -123,10 +136,9 @@ class DeploymentRepository:
             deployment_name=deployment_name, status=status, detail=detail, checked_at=checked_at
         )
 
-    def latest_health_check(self, deployment_name: str) -> Optional[HealthCheckResult]:
+    def latest_health_check(self, deployment_name: str) -> HealthCheckResult | None:
         row = self._store.query_one(
-            "SELECT * FROM health_checks WHERE deployment_name = ? "
-            "ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM health_checks WHERE deployment_name = ? ORDER BY id DESC LIMIT 1",
             (deployment_name,),
         )
         if row is None:
@@ -146,6 +158,7 @@ class DeploymentRepository:
             status=DeploymentStatus(row["status"]),
             kubeconfig_path=row["kubeconfig_path"],
             error=row["error"],
+            vault_path=row["vault_path"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
