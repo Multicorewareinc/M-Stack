@@ -32,6 +32,7 @@ class ModelGatewayOptions(BaseModel):
 class Gateway(BaseModel):
     type: str = "modelgateway"
     kubeconfig_path: str                # required -- the EXISTING cluster this installs onto
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     namespace: Optional[str] = None
     options: Optional[ModelGatewayOptions] = None   # auto-filled from `type` if left unset
 

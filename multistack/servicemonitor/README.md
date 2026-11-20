@@ -95,6 +95,32 @@ Confirm the real selector on your own cluster before relying on it:
 kubectl --kubeconfig <kc> -n monitoring get prometheus -o jsonpath='{.items[0].spec.serviceMonitorSelector}'
 ```
 
+### Platform components
+
+The same `service_monitor_labels` field, wired from the Stack the same way,
+on the infrastructure capabilities. Each turns its monitor on only when the
+cluster already serves the CRD (`monitors_wanted()`), and prints a warning
+otherwise instead of failing the install.
+
+| Capability | Monitor | Selects | Port/path | How |
+|---|---|---|---|---|
+| `Cache` (Valkey) | ServiceMonitor | the chart's metrics Service | `http-metrics` | chart values: `metrics.enabled` (redis-exporter sidecar) + `metrics.serviceMonitor` |
+| `Queue` (NATS) | PodMonitor | the NATS pods | `prom-metrics` (7777) | chart values: `promExporter.podMonitor` |
+| `Database` (CNPG) | PodMonitor `<cluster>-metrics` | `cnpg.io/cluster: <name>` | `metrics` (9187) | applied by `create_cluster()`; deleted by `delete_cluster()` |
+| `Storage` (Longhorn) | ServiceMonitor `longhorn-manager` | `app: longhorn-manager` | `manager` (9500) | `StorageBackend.apply_monitors()` |
+| `IngressGateway` (Istio) | PodMonitor `<release>-envoy` + ServiceMonitor `istiod` | `app: <gateway release>` / `app: istiod` | `http-envoy-prom` `/stats/prometheus` / `http-monitoring` | `IngressGatewayBackend.apply_monitors()` |
+
+CloudNativePG's own `spec.monitoring.enablePodMonitor` is deliberately not
+used: the PodMonitor it generates carries no caller labels, so
+kube-prometheus-stack's `release`-label selector never matches it.
+
+Storage and IngressGateway install *before* `Observability` (whose PVCs
+need the StorageClass), so their `create()` always finds no CRD on a fresh
+build. `apply_monitors()` adds the monitors afterwards without reinstalling
+anything; `examples/full_stack.py` does this in its `platform_metrics`
+stage. Not covered yet: GPU metrics (DCGM / ROCm exporters) and llama.cpp
+(`--metrics`).
+
 ## Grafana
 
 vLLM ships an official dashboard (`grafana.json`) alongside the same

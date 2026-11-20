@@ -29,6 +29,7 @@ class LonghornOptions(BaseModel):
 class Storage(BaseModel):
     type: str                       # required -- only "longhorn" today, no default (an explicit choice)
     kubeconfig_path: str            # required -- the EXISTING cluster this installs onto
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     replica_count: int = 3          # copies of each volume; needs at least this many schedulable nodes
     default_storage_class: bool = True
     namespace: Optional[str] = None    # None means the implementation's own default

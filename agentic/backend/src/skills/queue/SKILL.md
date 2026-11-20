@@ -14,6 +14,7 @@ Helm chart.
 class Queue(CapabilitySpec):
     type: str = "nats"
     kubeconfig_path: str                    # required, no ambient fallback
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     namespace: Optional[str] = None         # defaults to "platform"
     options: Optional[NatsQueueOptions] = None
     storage_class: Optional[str] = None     # where JetStream persists

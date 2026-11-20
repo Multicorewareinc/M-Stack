@@ -36,6 +36,7 @@ class EnricherOptions(BaseModel):
 class Enricher(CapabilitySpec):
     type: str = "enricher"            # the only implementation
     kubeconfig_path: str              # required -- the EXISTING cluster
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     namespace: Optional[str] = None   # defaults to "policy"
     options: Optional[EnricherOptions] = None
     service_port: int = 8000

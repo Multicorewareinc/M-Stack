@@ -20,6 +20,7 @@ with its own Postgres schema and migration Job — the same shape as
 class Billing(CapabilitySpec):
     type: str = "stripe"              # the only implementation
     kubeconfig_path: str              # required -- the EXISTING cluster
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     namespace: Optional[str] = None   # defaults to "billing"
     options: Optional[StripeOptions] = None
 

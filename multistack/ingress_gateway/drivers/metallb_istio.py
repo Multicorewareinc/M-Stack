@@ -11,6 +11,12 @@ from typing import Any, Dict, List
 
 from ...helm import HelmRepository, HelmRunner
 from ...kube import apply, kubectl, require_cli, require_cluster, wait_for
+from ...servicemonitor import (
+    POD_MONITOR_CRD,
+    apply_monitors,
+    pod_monitor_manifest,
+    service_monitor_manifest,
+)
 from ..base import IngressGatewayError, IngressGatewayPrerequisiteError
 from ..spec import IngressGateway
 
@@ -129,7 +135,40 @@ class MetalLBIstioDriver:
         for warning in self._check_reachable(endpoint):
             print(f"[ingress_gateway] warning: {warning}")
         gateway.external_endpoint = endpoint
+        self.apply_monitors(gateway)
         return endpoint
+
+    def apply_monitors(self, gateway: IngressGateway) -> bool:
+        """Prometheus monitors for the gateway's Envoy and for istiod.
+
+        Envoy's stats live on the pod (`http-envoy-prom`, 15090), not on the
+        gateway Service, hence a PodMonitor; the `gateway` chart labels its
+        pods `app: <release>`. istiod's control-plane metrics are on its
+        Service's `http-monitoring` port (15014).
+
+        Separate from create() because this capability installs before the
+        observability stack: create() skips it while the CRDs are missing,
+        and calling this once they exist adds the monitors without
+        reinstalling anything. Both CRDs ship together; the PodMonitor one
+        is checked.
+        """
+        options, labels = gateway.options, gateway.service_monitor_labels
+        return apply_monitors(
+            gateway.kubeconfig_path,
+            [
+                pod_monitor_manifest(
+                    f"{options.ingress_release_name}-envoy", options.ingress_namespace,
+                    {"app": options.ingress_release_name},
+                    port="http-envoy-prom", path="/stats/prometheus", extra_labels=labels,
+                ),
+                service_monitor_manifest(
+                    "istiod", options.istio_namespace, {"app": "istiod"},
+                    port="http-monitoring", interval="30s", extra_labels=labels,
+                ),
+            ],
+            labels, crd=POD_MONITOR_CRD, log_prefix="ingress_gateway",
+            error_cls=IngressGatewayError,
+        )
 
     def delete(self, gateway: IngressGateway) -> None:
         options = gateway.options
