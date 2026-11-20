@@ -1592,6 +1592,10 @@ def stage_observability() -> str:
     """
     observability = stack.build(
         Observability,
+        # A Secret in the observability namespace with an `alertmanager.yaml`
+        # key (receivers/routes). Unset, alerts fire but go to no receiver.
+        alertmanager_config_secret=os.environ.get(
+            "MULTISTACK_ALERTMANAGER_CONFIG_SECRET") or None,
         # Same local-chart escape hatch as storage's LonghornOptions.chart
         # -- prometheus-community's index.yaml is on GitHub Pages, but the
         # tarball comes from release-assets.githubusercontent.com, the

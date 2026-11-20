@@ -17,6 +17,7 @@ class KubePrometheusStackOptions(BaseModel):
     chart: str = "kube-prometheus-stack"
     grafana_service_type: str = "ClusterIP"
     dashboards: bool = True             # ship the SDK's Grafana dashboards (a "Multistack" folder); leave on unless the user says otherwise
+    alert_rules: bool = True            # install the SDK's Prometheus alert rules; leave on unless the user says otherwise
 
 class Observability(CapabilitySpec):
     type: str = "kube_prometheus_stack"
@@ -32,6 +33,7 @@ class Observability(CapabilitySpec):
 
     grafana_admin_user: str = "admin"
     grafana_admin_password: Optional[str] = None  # see rules below
+    alertmanager_config_secret: Optional[str] = None  # name of an EXISTING Secret with an `alertmanager.yaml` key (receivers/routes); never invent one -- unset = alerts go to no receiver
     extra_values: Dict[str, Any] = {}
     options: Optional[KubePrometheusStackOptions] = None
 

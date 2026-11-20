@@ -295,7 +295,9 @@ def test_prerequisites_require_helm_and_a_reachable_cluster(driver, monkeypatch)
         kps, "require_cluster", lambda path, **k: seen.append(("cluster", path))
     )
 
-    assert driver.check_prerequisites(spec()) == []
+    # The only warning on a reachable cluster: alerts have nowhere to go yet.
+    [warning] = driver.check_prerequisites(spec())
+    assert "alertmanager_config_secret" in warning
     assert "helm" in seen
     assert ("cluster", KUBECONFIG) in seen
 
@@ -377,3 +379,77 @@ def test_delete_removes_the_dashboard_configmaps(driver, calls):
     assert deletes, calls
     args = deletes[0][1]
     assert "grafana_dashboard=1" in args[args.index("-l") + 1]
+
+
+# -- alert rules and Alertmanager ---------------------------------------------
+def test_create_installs_the_rules_for_this_releases_prometheus(driver, calls, applied):
+    from multistack.observability.assets import alert_rules
+
+    driver.create(spec(grafana_admin_password="pw",
+                       options=KubePrometheusStackOptions(release_name="kps")))
+
+    [rule] = [m for m in applied if m["kind"] == "PrometheusRule"]
+    assert rule["metadata"]["namespace"] == "monitoring"
+    # What ruleSelectorNilUsesHelmValues makes this chart's Prometheus select.
+    assert rule["metadata"]["labels"]["release"] == "kps"
+    assert rule["spec"] == alert_rules()
+
+
+def test_rules_can_be_turned_off(driver, calls, applied):
+    driver.create(spec(grafana_admin_password="pw",
+                       options=KubePrometheusStackOptions(alert_rules=False)))
+    assert not [m for m in applied if m["kind"] == "PrometheusRule"]
+
+
+def test_every_shipped_rule_is_routable_and_explained():
+    from multistack.observability.assets import alert_rules
+
+    rules = [r for g in alert_rules()["groups"] for r in g["rules"]]
+    assert rules
+    names = [r["alert"] for r in rules]
+    assert len(names) == len(set(names)), "duplicate alert names"
+    for rule in rules:
+        assert rule["labels"]["severity"] in {"critical", "warning"}, rule["alert"]
+        assert rule["annotations"]["summary"], rule["alert"]
+        assert rule["expr"].strip(), rule["alert"]
+
+
+def test_delete_removes_the_rules(driver, calls):
+    driver.delete(spec())
+    assert any(c[0] == "kubectl" and "prometheusrule" in c[1] and kps.RULE_NAME in c[1]
+               for c in calls)
+
+
+def test_alertmanager_reads_its_config_from_the_named_secret(driver):
+    values = driver._helm_values(spec(grafana_admin_password="pw",
+                                      alertmanager_config_secret="am-config"))
+    assert values["alertmanager"]["alertmanagerSpec"]["configSecret"] == "am-config"
+    plain = driver._helm_values(spec(grafana_admin_password="pw"))
+    assert "configSecret" not in plain["alertmanager"]["alertmanagerSpec"]
+
+
+def _secret_with(keys):
+    return json.dumps({"data": {k: "eA==" for k in keys}})
+
+
+def test_a_missing_config_secret_is_a_prerequisite_error(driver, monkeypatch):
+    monkeypatch.setattr(kps, "require_cli", lambda *a, **k: None)
+    monkeypatch.setattr(kps, "require_cluster", lambda *a, **k: None)
+    monkeypatch.setattr(kps, "kubectl", lambda *a, **k: "")
+    with pytest.raises(ObservabilityPrerequisiteError, match="does not exist"):
+        driver.check_prerequisites(spec(alertmanager_config_secret="am-config"))
+
+
+def test_a_config_secret_without_alertmanager_yaml_is_refused(driver, monkeypatch):
+    monkeypatch.setattr(kps, "require_cli", lambda *a, **k: None)
+    monkeypatch.setattr(kps, "require_cluster", lambda *a, **k: None)
+    monkeypatch.setattr(kps, "kubectl", lambda *a, **k: _secret_with(["config.yaml"]))
+    with pytest.raises(ObservabilityPrerequisiteError, match=r"alertmanager\.yaml"):
+        driver.check_prerequisites(spec(alertmanager_config_secret="am-config"))
+
+
+def test_a_valid_config_secret_clears_the_warning(driver, monkeypatch):
+    monkeypatch.setattr(kps, "require_cli", lambda *a, **k: None)
+    monkeypatch.setattr(kps, "require_cluster", lambda *a, **k: None)
+    monkeypatch.setattr(kps, "kubectl", lambda *a, **k: _secret_with(["alertmanager.yaml"]))
+    assert driver.check_prerequisites(spec(alertmanager_config_secret="am-config")) == []

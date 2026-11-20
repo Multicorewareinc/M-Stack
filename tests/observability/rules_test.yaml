@@ -1,0 +1,87 @@
+# promtool unit tests for multistack/observability/rules/multistack.yaml.
+#   promtool test rules tests/observability/rules_test.yaml
+# Run by tests/observability/test_rules.py when promtool is on PATH.
+rule_files:
+  - ../../multistack/observability/rules/multistack.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Only the TPM limiter is deployed and it is failing open: must still fire.
+  - interval: 1m
+    input_series:
+      - series: 'rl_tpm_valkey_errors_total{namespace="policy", op="check"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RateLimiterFailingOpen
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: policy
+            exp_annotations:
+              summary: "A rate limiter cannot read Valkey and is allowing every request"
+              description: "/check fails open on a Valkey error, so limits are not being enforced."
+
+  # A bound consumer is quiet; an unbound one fires after 10m, not before.
+  - interval: 1m
+    input_series:
+      - series: 'billing_consumer_active{pod="billing-0"}'
+        values: '0x20'
+      - series: 'enricher_consumer_active{pod="enricher-0"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: EventConsumerNotBound
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: EventConsumerNotBound
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: billing-0
+            exp_annotations:
+              summary: "billing_consumer_active is 0 on billing-0"
+              description: "The service is up but its event consumer is not bound, so nothing is being counted, enriched or billed."
+
+  # 20% 5xx at real traffic fires; the same ratio at a trickle does not.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{namespace="gw", service="tokenizer", status="200"}'
+        values: '0+48x30'
+      - series: 'http_requests_total{namespace="gw", service="tokenizer", status="500"}'
+        values: '0+12x30'
+      - series: 'http_requests_total{namespace="cp", service="quiet", status="200"}'
+        values: '0+1x30'
+      - series: 'http_requests_total{namespace="cp", service="quiet", status="500"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MultistackServiceHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: gw
+              service: tokenizer
+            exp_annotations:
+              summary: "tokenizer is failing 20% of requests"
+              description: "More than 5% of requests to gw/tokenizer returned 5xx for 10 minutes."
+
+  # Upstream timeouts count as errors.
+  - interval: 1m
+    input_series:
+      - series: 'gw_upstream_requests_total{namespace="gateway", model="qwen", upstream_type="openai", outcome="2xx"}'
+        values: '0+10x30'
+      - series: 'gw_upstream_requests_total{namespace="gateway", model="qwen", upstream_type="openai", outcome="timeout"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayUpstreamErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: gateway
+              model: qwen
+            exp_annotations:
+              summary: "Upstream for model qwen is failing 33.33% of requests"
+              description: "More than 10% of requests forwarded for qwen got a 5xx, timed out or could not connect."

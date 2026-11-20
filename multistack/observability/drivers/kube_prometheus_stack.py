@@ -30,10 +30,14 @@ from ..assets import (
     DASHBOARD_FOLDER_ANNOTATION,
     DASHBOARD_LABEL,
     MANAGED_BY_LABEL,
+    alert_rules,
     dashboards,
 )
 from ..base import ObservabilityError, ObservabilityPrerequisiteError
 from ..spec import Observability
+
+# The PrometheusRule holding multistack/observability/rules/.
+RULE_NAME = "multistack"
 
 
 def _generate_password(length: int = 20) -> str:
@@ -72,7 +76,36 @@ class KubePrometheusStackDriver:
         require_cluster(
             observability.kubeconfig_path, capability="observability",
         )
-        return []
+        warnings = []
+        secret = observability.alertmanager_config_secret
+        if secret:
+            raw = kubectl(
+                observability.kubeconfig_path, "get", "secret", secret,
+                "-n", observability.resolved_namespace, "-o", "json",
+                check=False, error_cls=ObservabilityError,
+            )
+            try:
+                keys = set(json.loads(raw).get("data", {})) if raw.strip() else None
+            except json.JSONDecodeError:
+                keys = None
+            if keys is None:
+                raise ObservabilityPrerequisiteError(
+                    f"alertmanager_config_secret '{secret}' does not exist in "
+                    f"'{observability.resolved_namespace}'. Create it with an "
+                    "`alertmanager.yaml` key first -- Alertmanager will not "
+                    "start without the Secret it is pointed at."
+                )
+            if "alertmanager.yaml" not in keys:
+                raise ObservabilityPrerequisiteError(
+                    f"Secret '{secret}' has no `alertmanager.yaml` key, which is "
+                    "the file the Prometheus Operator mounts as the config."
+                )
+        elif observability.options.alert_rules:
+            warnings.append(
+                "no alertmanager_config_secret: alerts fire and show in "
+                "Alertmanager, but are routed to no receiver."
+            )
+        return warnings
 
     # -- lifecycle ------------------------------------------------------
     def create(self, observability: Observability) -> str:
@@ -119,6 +152,8 @@ class KubePrometheusStackDriver:
         )
         if observability.options.dashboards:
             self._apply_dashboards(observability)
+        if observability.options.alert_rules:
+            self._apply_alert_rules(observability)
 
         endpoint = observability.grafana_endpoint()
         print(
@@ -157,6 +192,11 @@ class KubePrometheusStackDriver:
             observability.kubeconfig_path, "delete", "configmap",
             "-n", observability.resolved_namespace,
             "-l", _selector({**MANAGED_BY_LABEL, DASHBOARD_LABEL: "1"}),
+            "--ignore-not-found", check=False, error_cls=ObservabilityError,
+        )
+        kubectl(
+            observability.kubeconfig_path, "delete", "prometheusrule", RULE_NAME,
+            "-n", observability.resolved_namespace,
             "--ignore-not-found", check=False, error_cls=ObservabilityError,
         )
         print(
@@ -221,6 +261,9 @@ class KubePrometheusStackDriver:
                             observability.alertmanager_volume_size
                         ),
                     },
+                    # Receivers/routes from a caller-owned Secret, never values.
+                    **({"configSecret": observability.alertmanager_config_secret}
+                       if observability.alertmanager_config_secret else {}),
                 },
             },
         }
@@ -254,6 +297,28 @@ class KubePrometheusStackDriver:
             f"[observability] {len(manifests)} dashboards provisioned into "
             f"Grafana's '{DASHBOARD_FOLDER}' folder"
         )
+
+    # -- alert rules ------------------------------------------------------
+    def _rule_manifest(self, observability: Observability) -> dict[str, Any]:
+        """The shipped rules as one PrometheusRule. Labelled `release:
+        <release_name>` because that is what this chart's Prometheus selects
+        on (`ruleSelectorNilUsesHelmValues: true`, its default)."""
+        return {
+            "apiVersion": "monitoring.coreos.com/v1",
+            "kind": "PrometheusRule",
+            "metadata": {
+                "name": RULE_NAME,
+                "namespace": observability.resolved_namespace,
+                "labels": {**MANAGED_BY_LABEL, "release": observability.options.release_name},
+            },
+            "spec": alert_rules(),
+        }
+
+    def _apply_alert_rules(self, observability: Observability) -> None:
+        manifest = self._rule_manifest(observability)
+        apply(observability.kubeconfig_path, manifest, error_cls=ObservabilityError)
+        count = sum(len(g["rules"]) for g in manifest["spec"]["groups"])
+        print(f"[observability] {count} alert rules installed (PrometheusRule '{RULE_NAME}')")
 
     # -- Grafana credentials ---------------------------------------------
     def _resolve_grafana_credentials(self, observability: Observability) -> None:
