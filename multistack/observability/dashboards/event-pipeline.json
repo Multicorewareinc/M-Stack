@@ -1,0 +1,755 @@
+{
+  "uid": "multistack-event-pipeline",
+  "title": "Multistack / Event pipeline",
+  "description": "Gateway events through NATS, the enricher, the rate limiters and billing.",
+  "tags": [
+    "multistack",
+    "events"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Consumers",
+      "collapsed": false,
+      "gridPos": {
+        "w": 24,
+        "h": 1,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [],
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Consumer bound",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "enricher_consumer_active",
+          "legendFormat": "enricher",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "rl_rpm_consumer_active",
+          "legendFormat": "rate-limiter-rpm",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "rl_tpm_consumer_active",
+          "legendFormat": "rate-limiter-tpm",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "billing_consumer_active",
+          "legendFormat": "billing",
+          "refId": "D"
+        }
+      ],
+      "gridPos": {
+        "w": 24,
+        "h": 4,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "description": "1 = bound and consuming. 0 = configured but not counting.",
+      "id": 2
+    },
+    {
+      "type": "row",
+      "title": "Gateway",
+      "collapsed": false,
+      "gridPos": {
+        "w": 24,
+        "h": 1,
+        "x": 0,
+        "y": 5
+      },
+      "panels": [],
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Events published / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (type) (rate(gw_events_published_total[$__rate_interval]))",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Events dropped / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (reason) (rate(gw_events_dropped_total[$__rate_interval]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 5
+    },
+    {
+      "type": "row",
+      "title": "NATS JetStream",
+      "collapsed": false,
+      "gridPos": {
+        "w": 24,
+        "h": 1,
+        "x": 0,
+        "y": 14
+      },
+      "panels": [],
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer backlog (pending)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (stream_name, consumer_name) ({__name__=~\"nats_consumer_num_pending|jetstream_consumer_num_pending\"})",
+          "legendFormat": "{{stream_name}} / {{consumer_name}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "w": 24,
+        "h": 8,
+        "x": 0,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Messages not yet delivered to each durable consumer. Growing = a consumer is falling behind.",
+      "id": 7
+    },
+    {
+      "type": "row",
+      "title": "Enricher",
+      "collapsed": false,
+      "gridPos": {
+        "w": 24,
+        "h": 1,
+        "x": 0,
+        "y": 23
+      },
+      "panels": [],
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "Enriched / s by usage source",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (source) (rate(enricher_events_total[$__rate_interval]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9
+    },
+    {
+      "type": "timeseries",
+      "title": "Failures / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(enricher_republish_failures_total[$__rate_interval]))",
+          "legendFormat": "republish failed (redelivered)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(enricher_build_errors_total[$__rate_interval]))",
+          "legendFormat": "build error (dropped)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (outcome) (rate(enricher_tokenizer_fallback_total[$__rate_interval]))",
+          "legendFormat": "tokenizer {{outcome}}",
+          "refId": "C"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "Processing time p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(enricher_process_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 11
+    },
+    {
+      "type": "row",
+      "title": "Rate limiters",
+      "collapsed": false,
+      "gridPos": {
+        "w": 24,
+        "h": 1,
+        "x": 0,
+        "y": 40
+      },
+      "panels": [],
+      "id": 12
+    },
+    {
+      "type": "timeseries",
+      "title": "Decisions / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (decision) (rate(rl_rpm_decisions_total[$__rate_interval]))",
+          "legendFormat": "rpm {{decision}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (decision) (rate(rl_tpm_decisions_total[$__rate_interval]))",
+          "legendFormat": "tpm {{decision}}",
+          "refId": "B"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 41
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 13
+    },
+    {
+      "type": "timeseries",
+      "title": "Valkey errors / s (check = failing open)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (op) (rate(rl_rpm_valkey_errors_total[$__rate_interval]))",
+          "legendFormat": "rpm {{op}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (op) (rate(rl_tpm_valkey_errors_total[$__rate_interval]))",
+          "legendFormat": "tpm {{op}}",
+          "refId": "B"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 41
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 14
+    },
+    {
+      "type": "row",
+      "title": "Billing",
+      "collapsed": false,
+      "gridPos": {
+        "w": 24,
+        "h": 1,
+        "x": 0,
+        "y": 49
+      },
+      "panels": [],
+      "id": 15
+    },
+    {
+      "type": "timeseries",
+      "title": "Usage persisted / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (countable) (rate(billing_usage_persisted_total[$__rate_interval]))",
+          "legendFormat": "countable={{countable}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 16
+    },
+    {
+      "type": "timeseries",
+      "title": "Stripe outbox backlog",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "billing_outbox_pending",
+          "legendFormat": "pending rows",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "billing_outbox_oldest_pending_seconds",
+          "legendFormat": "oldest (s)",
+          "refId": "B"
+        }
+      ],
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Rows waiting to be reported to Stripe, and the age of the oldest.",
+      "id": 17
+    }
+  ]
+}

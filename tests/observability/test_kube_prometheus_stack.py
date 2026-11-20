@@ -320,3 +320,60 @@ def test_the_error_types_stay_catchable_by_capability():
     # A caller catches ObservabilityError, never a driver's own class.
     assert issubclass(ObservabilityPrerequisiteError, Exception)
     assert issubclass(ObservabilityError, Exception)
+
+
+# -- dashboards -----------------------------------------------------------
+def test_every_shipped_dashboard_is_valid_grafana_json():
+    from multistack.observability.assets import dashboards
+
+    shipped = dashboards()
+    assert {"services", "model-gateway", "event-pipeline", "vllm"} <= set(shipped)
+    uids = set()
+    for name, body in shipped.items():
+        dashboard = json.loads(body)
+        assert dashboard["uid"] not in uids, f"{name}: duplicate uid"
+        uids.add(dashboard["uid"])
+        assert dashboard["title"].startswith("Multistack / ")
+        panel_ids = [p["id"] for p in dashboard["panels"]]
+        assert len(panel_ids) == len(set(panel_ids)), f"{name}: duplicate panel ids"
+        # Datasource is a variable, never a uid baked in from one Grafana.
+        for panel in dashboard["panels"]:
+            for target in panel.get("targets", []):
+                assert target["datasource"]["uid"] == "${datasource}", name
+                assert target["expr"].strip(), name
+
+
+def test_create_provisions_one_labelled_configmap_per_dashboard(driver, calls, applied):
+    from multistack.observability.assets import dashboards
+
+    driver.create(spec(grafana_admin_password="pw"))
+
+    configmaps = [m for m in applied if m["kind"] == "ConfigMap"]
+    assert len(configmaps) == len(dashboards())
+    for cm in configmaps:
+        assert cm["metadata"]["namespace"] == "monitoring"
+        assert cm["metadata"]["labels"]["grafana_dashboard"] == "1"
+        assert cm["metadata"]["annotations"]["grafana_folder"] == "Multistack"
+        [(key, body)] = cm["data"].items()
+        assert key.endswith(".json") and json.loads(body)["uid"]
+
+
+def test_dashboards_can_be_turned_off(driver, calls, applied):
+    driver.create(spec(grafana_admin_password="pw",
+                       options=KubePrometheusStackOptions(dashboards=False)))
+    assert not [m for m in applied if m["kind"] == "ConfigMap"]
+
+
+def test_grafana_files_dashboards_into_folders(driver):
+    values = driver._helm_values(spec(grafana_admin_password="pw"))
+    sidecar = values["grafana"]["sidecar"]["dashboards"]
+    assert sidecar["folderAnnotation"] == "grafana_folder"
+    assert sidecar["provider"]["foldersFromFilesStructure"] is True
+
+
+def test_delete_removes_the_dashboard_configmaps(driver, calls):
+    driver.delete(spec())
+    deletes = [c for c in calls if c[0] == "kubectl" and "configmap" in c[1]]
+    assert deletes, calls
+    args = deletes[0][1]
+    assert "grafana_dashboard=1" in args[args.index("-l") + 1]

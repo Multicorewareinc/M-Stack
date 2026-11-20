@@ -42,6 +42,9 @@ class KubePrometheusStackOptions(BaseModel):
     # `kubectl port-forward` or an ingress_gateway route, not directly
     # from outside the cluster.
     grafana_service_type: str = "ClusterIP"
+    # Ship the SDK's dashboards (multistack/observability/dashboards/) as
+    # ConfigMaps Grafana's dashboard sidecar loads into a "Multistack" folder.
+    dashboards: bool = True
 
     @field_validator("release_name", "chart")
     @classmethod
