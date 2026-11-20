@@ -1,0 +1,231 @@
+# Alert rules for the Multistack platform, in Prometheus rule-file format
+# (`promtool check rules` reads this file as-is). The observability driver
+# wraps the groups in a PrometheusRule labelled for its Prometheus's
+# ruleSelector. Generic cluster alerts (TargetDown, node, kubelet, ...)
+# come with kube-prometheus-stack and are not repeated here.
+#
+# Every alert carries `severity` (critical = user-facing breakage now,
+# warning = degraded or about to be) for Alertmanager routing.
+groups:
+  - name: multistack.services
+    rules:
+      - alert: MultistackServiceHighErrorRate
+        expr: |
+          (
+            sum by (namespace, service) (rate(http_requests_total{status=~"5.."}[5m]))
+              / sum by (namespace, service) (rate(http_requests_total[5m]))
+          ) > 0.05
+          and sum by (namespace, service) (rate(http_requests_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} is failing {{ $value | humanizePercentage }} of requests"
+          description: "More than 5% of requests to {{ $labels.namespace }}/{{ $labels.service }} returned 5xx for 10 minutes."
+
+      - alert: MultistackServiceSlow
+        # The gateway is excluded: its latency is the model's generation time.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (namespace, service, le) (rate(http_request_duration_seconds_bucket{service!~".*gateway.*"}[5m]))
+          ) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} p95 latency is {{ $value | humanizeDuration }}"
+          description: "p95 request latency of {{ $labels.namespace }}/{{ $labels.service }} has been above 1s for 15 minutes."
+
+  - name: multistack.gateway
+    rules:
+      - alert: GatewayUpstreamErrors
+        expr: |
+          (
+            sum by (namespace, model) (rate(gw_upstream_requests_total{outcome=~"5xx|timeout|unreachable"}[5m]))
+              / sum by (namespace, model) (rate(gw_upstream_requests_total[5m]))
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upstream for model {{ $labels.model }} is failing {{ $value | humanizePercentage }} of requests"
+          description: "More than 10% of requests forwarded for {{ $labels.model }} got a 5xx, timed out or could not connect."
+
+      - alert: GatewayKeyVerificationUnavailable
+        expr: sum by (namespace) (rate(gw_api_key_verify_total{result="unavailable"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The gateway cannot verify API keys"
+          description: "Key verification against the organization control plane is failing, so uncached keys get 503s."
+
+      - alert: GatewayPolicyUnavailable
+        expr: sum by (namespace, policy) (rate(gw_policy_decisions_total{decision="unavailable"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy {{ $labels.policy }} is unreachable from the gateway"
+          description: "With fail-open these requests are allowed unchecked; with fail-closed they are rejected."
+
+      - alert: GatewayDroppingEvents
+        expr: sum by (namespace, reason) (increase(gw_events_dropped_total[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The gateway dropped usage events ({{ $labels.reason }})"
+          description: "Dropped events are never metered: rate limiting and billing undercount."
+
+  - name: multistack.pipeline
+    rules:
+      - alert: EventConsumerNotBound
+        # 0 also when a service runs deliberately without a backbone; this
+        # stack always configures one.
+        expr: '{__name__=~"enricher_consumer_active|rl_rpm_consumer_active|rl_tpm_consumer_active|billing_consumer_active"} == 0'
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.__name__ }} is 0 on {{ $labels.pod }}"
+          description: "The service is up but its event consumer is not bound, so nothing is being counted, enriched or billed."
+
+      - alert: RateLimiterFailingOpen
+        # `or`, not `+`: with only one limiter deployed, a sum across both is empty.
+        expr: |
+          sum by (namespace) (rate(rl_rpm_valkey_errors_total{op="check"}[5m])) > 0
+          or sum by (namespace) (rate(rl_tpm_valkey_errors_total{op="check"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A rate limiter cannot read Valkey and is allowing every request"
+          description: "/check fails open on a Valkey error, so limits are not being enforced."
+
+      - alert: EnricherDroppingEvents
+        expr: sum by (namespace) (increase(enricher_build_errors_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The enricher dropped events it could not build"
+          description: "These are acked without republishing, so TPM limits and billing never see them."
+
+      - alert: EnricherRepublishFailing
+        expr: sum by (namespace) (rate(enricher_republish_failures_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The enricher cannot republish enriched events"
+          description: "Events are being redelivered; once max_deliver is exhausted they are lost."
+
+      - alert: NatsConsumerBacklog
+        expr: '{__name__=~"nats_consumer_num_pending|jetstream_consumer_num_pending"} > 1000'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JetStream consumer {{ $labels.consumer_name }} has {{ $value }} pending messages"
+          description: "Consumer {{ $labels.consumer_name }} on stream {{ $labels.stream_name }} is falling behind."
+
+  - name: multistack.billing
+    rules:
+      - alert: BillingOutboxStale
+        expr: billing_outbox_oldest_pending_seconds > 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Usage has been waiting {{ $value | humanizeDuration }} to be reported to Stripe"
+          description: "The oldest pending outbox row is more than an hour old."
+
+      - alert: BillingStripeTerminalFailures
+        expr: sum by (namespace) (increase(billing_stripe_reported_total{outcome="terminal_failure"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Usage rows failed permanently when reported to Stripe"
+          description: "These rows will not be retried; they need manual attention."
+
+      - alert: BillingWebhookSignatureFailures
+        expr: sum by (namespace) (increase(billing_stripe_webhooks_total{outcome="invalid_signature"}[1h])) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stripe webhooks are failing signature verification"
+          description: "Either the webhook secret is wrong or something other than Stripe is calling the endpoint."
+
+  - name: multistack.auth
+    rules:
+      - alert: ControlPlaneLockoutSpike
+        expr: sum by (namespace, service) (increase(cp_auth_lockouts_total[15m])) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} login lockouts on {{ $labels.service }} in 15 minutes"
+          description: "Many accounts are hitting the brute-force lockout at once."
+
+  - name: multistack.data
+    rules:
+      - alert: ValkeyDown
+        expr: redis_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Valkey {{ $labels.pod }} is down"
+          description: "Rate limiting fails open and key verification falls back to the control plane."
+
+      - alert: PostgresCollectorDown
+        expr: cnpg_collector_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL instance {{ $labels.pod }} is not answering"
+
+      - alert: PostgresReplicationLag
+        expr: cnpg_pg_replication_lag > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.pod }} is {{ $value | humanizeDuration }} behind the primary"
+
+      - alert: LonghornVolumeDegraded
+        expr: longhorn_volume_robustness == 2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Longhorn volume {{ $labels.volume }} is degraded"
+          description: "It is running with fewer healthy replicas than configured."
+
+      - alert: LonghornVolumeFaulted
+        expr: longhorn_volume_robustness == 3
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Longhorn volume {{ $labels.volume }} is faulted"
+          description: "No healthy replica is left; the workload using it is down."
+
+  - name: multistack.inference
+    rules:
+      - alert: VLLMQueueBacklog
+        expr: sum by (namespace, model_name) (vllm:num_requests_waiting) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} requests are queued for {{ $labels.model_name }}"
+          description: "vLLM cannot keep up; requests wait before any token is generated."
+
+      - alert: VLLMKVCacheFull
+        expr: 'max by (namespace, model_name) ({__name__=~"vllm:(gpu|kv)_cache_usage_perc"}) > 0.95'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV cache for {{ $labels.model_name }} is {{ $value | humanizePercentage }} full"
+          description: "Requests are being preempted or queued for KV cache space."

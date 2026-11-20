@@ -413,7 +413,26 @@ test-all-ci: test-all
 .PHONY: test-helm
 test-helm:
 	@mkdir -p test-results
-	$(PYTEST) tests/test_charts.py -v $(TEST_ALL_ARGS)
+	$(PYTEST) tests/test_charts.py tests/observability/test_rules.py -v $(TEST_ALL_ARGS)
+
+# promtool, for tests/observability/test_rules.py (skipped without it).
+# Linux amd64 (the CI runners); installs into $(PROMTOOL_DIR) -- add it to PATH.
+PROMTOOL_VERSION ?= 2.53.4
+PROMTOOL_DIR     ?= $(CURDIR)/.tools
+
+.PHONY: install-promtool
+install-promtool:
+	@set -e; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	name=prometheus-$(PROMTOOL_VERSION).linux-amd64; \
+	base=https://github.com/prometheus/prometheus/releases/download/v$(PROMTOOL_VERSION); \
+	curl -sSfL -o "$$tmp/$$name.tar.gz" "$$base/$$name.tar.gz"; \
+	curl -sSfL -o "$$tmp/sha256sums.txt" "$$base/sha256sums.txt"; \
+	(cd "$$tmp" && grep " $$name.tar.gz$$" sha256sums.txt | sha256sum -c -); \
+	tar -xzf "$$tmp/$$name.tar.gz" -C "$$tmp"; \
+	mkdir -p "$(PROMTOOL_DIR)"; \
+	install -m 0755 "$$tmp/$$name/promtool" "$(PROMTOOL_DIR)/promtool"; \
+	"$(PROMTOOL_DIR)/promtool" --version | head -1
 
 
 # ============================================================
