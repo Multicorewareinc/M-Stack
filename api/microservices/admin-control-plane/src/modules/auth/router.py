@@ -10,10 +10,21 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
+from prometheus_client import Counter
 
 from . import service
 from .dependencies import get_authenticated_user, get_current_user
 from .schemas import ChangePasswordIn, LoginRequest, LoginResponse, MeResponse, UserOut
+
+# Local login attempts by outcome. Failure results are the error class, mapped to a fixed set so
+# an unexpected exception cannot add a label value of its own.
+LOGINS = Counter("cp_auth_logins_total", "Local login attempts", ["result"])
+_LOGIN_FAILURES = {
+    "InvalidCredentialsError": "invalid_credentials",
+    "TooManyAttemptsError": "locked",
+    "UserDeactivatedError": "deactivated",
+    "LocalAuthDisabledError": "disabled",
+}
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -61,9 +72,14 @@ def _login_body(outcome: service.LoginOutcome) -> dict:
 async def login(payload: LoginRequest, request: Request) -> Response:
     settings = request.app.state.settings
     ip = _client_ip(request, settings.trusted_proxy_count)
-    outcome = await service.login_local(
-        request.app.state.sessionmaker, settings, payload.email, payload.password, ip=ip
-    )
+    try:
+        outcome = await service.login_local(
+            request.app.state.sessionmaker, settings, payload.email, payload.password, ip=ip
+        )
+    except Exception as exc:
+        LOGINS.labels(_LOGIN_FAILURES.get(type(exc).__name__, "error")).inc()
+        raise
+    LOGINS.labels("success").inc()
     response = JSONResponse(status_code=200, content=_login_body(outcome))
     _set_refresh_cookie(response, outcome.issued.refresh_token, outcome.issued.refresh_max_age)
     return response

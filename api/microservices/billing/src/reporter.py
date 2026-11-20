@@ -39,7 +39,7 @@ from typing import Literal
 
 from models import Outbox, StripeCustomer
 from prometheus_client import Counter, Gauge
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,11 @@ CUSTOMER_RESOLVED = Counter(
     ["outcome"],  # created | reused | failed
 )
 REPORTER_ACTIVE = Gauge("billing_reporter_active", "1 when the reporter's poll task is running, else 0")
+# Backlog, refreshed once per poll: how much usage is not yet billed, and how stale the oldest is.
+OUTBOX_PENDING = Gauge("billing_outbox_pending", "Outbox rows waiting to be reported to Stripe")
+OUTBOX_OLDEST_PENDING = Gauge(
+    "billing_outbox_oldest_pending_seconds", "Age of the oldest pending outbox row (0 when none)",
+)
 
 
 async def report_to_stripe(
@@ -217,6 +222,15 @@ class StripeReporter:
         s = self._settings
         async with self._sessionmaker() as session:
             now = datetime.now(UTC)
+            pending, oldest = (
+                await session.execute(
+                    select(func.count(), func.min(Outbox.created_at)).where(Outbox.status == "pending")
+                )
+            ).one()
+            OUTBOX_PENDING.set(pending)
+            if oldest is not None and oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=UTC)  # SQLite hands timezone-aware columns back naive
+            OUTBOX_OLDEST_PENDING.set((now - oldest).total_seconds() if oldest else 0)
             rows = list(
                 await session.scalars(
                     select(Outbox)

@@ -15,10 +15,12 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import Request
 from keygen import hash_key
+from prometheus_client import Counter
 from redis.exceptions import RedisError
 
 from errors import PolicyDeniedError, ServiceUnavailableError, UnauthorizedError
@@ -28,6 +30,20 @@ log = logging.getLogger(__name__)
 # One opaque, constant-shape rejection for EVERY authentication failure (unknown / revoked / expired /
 # owner-inactive / malformed) — never enumerate which check failed (ADR-026, reference §12.1).
 _INVALID = "Invalid API key"
+
+# `source` is where the record came from (cache / org_cp); `result` is the outcome.
+API_KEY_VERIFY = Counter(
+    "gw_api_key_verify_total", "API-key verifications", ["source", "result"],
+)
+# `policy` is the endpoint's host -- from POLICY_ENDPOINTS, so bounded. `unavailable` is a policy
+# that could not be asked (fail-open turns it into an allow; it is still counted here).
+POLICY_DECISIONS = Counter(
+    "gw_policy_decisions_total", "Policy chain decisions per policy", ["policy", "decision"],
+)
+
+
+def _policy_name(endpoint: str) -> str:
+    return urlparse(endpoint).hostname or endpoint
 
 
 def _cache_key(key_hash: str) -> str:
@@ -105,14 +121,23 @@ async def verify_api_key(request: Request) -> None:
     key_hash = hash_key(token)
 
     record = await _cache_get(request, key_hash)
+    source = "cache"
     if record is None:
-        record = await _org_cp_verify(request, key_hash)  # 503 on transport error (fail-closed)
+        source = "org_cp"
+        try:
+            record = await _org_cp_verify(request, key_hash)  # 503 on transport error (fail-closed)
+        except ServiceUnavailableError:
+            API_KEY_VERIFY.labels(source, "unavailable").inc()
+            raise
         if record is None:
+            API_KEY_VERIFY.labels(source, "invalid").inc()
             raise UnauthorizedError(_INVALID)  # unknown key — opaque
         await _cache_put(request, key_hash, record)
 
     if not _is_valid(record):  # re-validate every request (hit or miss)
+        API_KEY_VERIFY.labels(source, "invalid").inc()
         raise UnauthorizedError(_INVALID)
+    API_KEY_VERIFY.labels(source, "valid").inc()
 
     request.state.principal = str(record["org_id"])  # the tenant whose plan the limiters enforce
     # Attribution only (ADR-028: keys authenticate only, no per-key authorization) — never used
@@ -138,8 +163,12 @@ async def enforce_policies(request: Request) -> None:
     async def ask(endpoint: str) -> dict:
         try:
             resp = await client.post(endpoint, json=ctx)
-            return resp.json()
+            result = resp.json()
+            decision = result.get("decision") if isinstance(result, dict) else None
+            POLICY_DECISIONS.labels(_policy_name(endpoint), str(decision or "malformed")).inc()
+            return result
         except Exception:
+            POLICY_DECISIONS.labels(_policy_name(endpoint), "unavailable").inc()
             if fail_open:
                 return {"decision": "allow"}
             return {"decision": "deny", "status": 503, "type": "policy_unavailable", "reason": f"policy {endpoint} unreachable"}

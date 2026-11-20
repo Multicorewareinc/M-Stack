@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from consumer import TpmConsumer
 from fastapi import FastAPI
+from http_metrics import HttpMetricsMiddleware
 from plan_client import PlanClient
 from router import router
 from service import RateLimiterService
@@ -102,6 +103,8 @@ def create_app(
             await redis_client.aclose()
 
     app = FastAPI(title="Rate Limiter (TPM)", version="0.1.0", lifespan=lifespan)
+    # Request rate / errors / duration on /metrics -- see http_metrics.py.
+    app.add_middleware(HttpMetricsMiddleware)
     app.state.settings = settings
     app.state.service = service
     app.state.consumer = consumer

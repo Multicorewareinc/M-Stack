@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 
 from consumer import EnricherConsumer
 from fastapi import FastAPI
+from http_metrics import HttpMetricsMiddleware
 from router import router
 
 from settings import Settings
@@ -69,6 +70,8 @@ def create_app(settings: Settings | None = None, *, consumer=None, http_client=N
                 await http_client.aclose()
 
     app = FastAPI(title="Event Enricher", version="0.1.0", lifespan=lifespan)
+    # Request rate / errors / duration on /metrics -- see http_metrics.py.
+    app.add_middleware(HttpMetricsMiddleware)
     app.state.settings = settings
     app.state.consumer = consumer
 

@@ -6,14 +6,30 @@ translated via adapters.py. httpx lives here (nowhere else).
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import adapters
 import httpx
+from prometheus_client import Counter, Histogram
 
 from errors import BadGatewayError, BadRequestError, ServiceUnavailableError
 from settings import Settings
+
+# `model` is a MODEL_ROUTES key or "default" (the UPSTREAM_URL fallback) -- never the raw
+# client-supplied model string, which would let any caller mint new series.
+# `outcome` is the upstream status class (2xx/4xx/5xx) or timeout/unreachable.
+UPSTREAM_REQUESTS = Counter(
+    "gw_upstream_requests_total", "Requests forwarded upstream",
+    ["model", "upstream_type", "outcome"],
+)
+# Until the upstream's response headers arrive: for a stream, its time to first byte.
+UPSTREAM_LATENCY = Histogram(
+    "gw_upstream_response_seconds", "Upstream time to response headers",
+    ["model", "upstream_type"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300),
+)
 
 
 @dataclass
@@ -31,6 +47,7 @@ class Target:
     url: str
     type: str = "openai"  # "openai" | "anthropic"
     api_key: str | None = None
+    label: str = "default"  # metrics label: the MODEL_ROUTES key, or "default"
 
 
 class GatewayService:
@@ -45,8 +62,10 @@ class GatewayService:
         if entry is None:
             return Target(self._s.upstream_url.rstrip("/"), "openai", self._s.upstream_api_key)
         if isinstance(entry, str):
-            return Target(entry.rstrip("/"), "openai", None)
-        return Target(entry["url"].rstrip("/"), entry.get("type", "openai"), entry.get("api_key"))
+            return Target(entry.rstrip("/"), "openai", None, model)
+        return Target(
+            entry["url"].rstrip("/"), entry.get("type", "openai"), entry.get("api_key"), model,
+        )
 
     def _headers(self, target: Target) -> dict[str, str]:
         if target.type == "anthropic":
@@ -77,21 +96,21 @@ class GatewayService:
     async def _openai_forward(self, target: Target, path: str, payload: dict, *, stream: bool) -> Result:
         url, headers = target.url + path, self._headers(target)
         if not stream:
-            resp = await self._send(lambda: self._client.post(url, json=payload, headers=headers))
+            resp = await self._send(target, lambda: self._client.post(url, json=payload, headers=headers))
             return _buffered(resp.status_code, resp.content)
-        return await self._stream(url, payload, headers)
+        return await self._stream(target, url, payload, headers)
 
     async def _anthropic_chat(self, target: Target, payload: dict, *, stream: bool) -> Result:
         body = adapters.to_anthropic_request(payload)
         url, headers, model = target.url + "/v1/messages", self._headers(target), payload["model"]
         if not stream:
-            resp = await self._send(lambda: self._client.post(url, json=body, headers=headers))
+            resp = await self._send(target, lambda: self._client.post(url, json=body, headers=headers))
             if resp.status_code >= 400:
                 return _buffered(resp.status_code, resp.content)
             return Result(status_code=200, body=adapters.to_openai_response(resp.json(), model=model))
 
         req = self._client.build_request("POST", url, json=body, headers=headers)
-        resp = await self._send(lambda: self._client.send(req, stream=True))
+        resp = await self._send(target, lambda: self._client.send(req, stream=True))
         if resp.status_code >= 400:
             content = await resp.aread()
             await resp.aclose()
@@ -106,10 +125,10 @@ class GatewayService:
 
         return Result(status_code=200, stream=gen(), media_type="text/event-stream")
 
-    async def _stream(self, url: str, payload: dict, headers: dict) -> Result:
+    async def _stream(self, target: Target, url: str, payload: dict, headers: dict) -> Result:
         payload = _with_usage_requested(payload)
         req = self._client.build_request("POST", url, json=payload, headers=headers)
-        resp = await self._send(lambda: self._client.send(req, stream=True))
+        resp = await self._send(target, lambda: self._client.send(req, stream=True))
         if resp.status_code >= 400:
             content = await resp.aread()
             await resp.aclose()
@@ -128,13 +147,21 @@ class GatewayService:
         await self._client.aclose()
 
     @staticmethod
-    async def _send(call):
+    async def _send(target: Target, call):
+        start = time.perf_counter()
         try:
-            return await call()
+            resp = await call()
         except httpx.TimeoutException as exc:
+            UPSTREAM_REQUESTS.labels(target.label, target.type, "timeout").inc()
             raise ServiceUnavailableError("upstream timed out") from exc
         except httpx.RequestError as exc:
+            UPSTREAM_REQUESTS.labels(target.label, target.type, "unreachable").inc()
             raise ServiceUnavailableError("upstream unreachable") from exc
+        UPSTREAM_LATENCY.labels(target.label, target.type).observe(time.perf_counter() - start)
+        UPSTREAM_REQUESTS.labels(
+            target.label, target.type, f"{resp.status_code // 100}xx",
+        ).inc()
+        return resp
 
 
 def _with_usage_requested(payload: dict) -> dict:
