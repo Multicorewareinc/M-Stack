@@ -46,10 +46,10 @@ This is the only change a backend needs — decorate its `create()`:
 ```python
 from multistack.state.tracking import track_create
 
+
 class MyBackend:
     @track_create("my_capability", name_of=lambda spec: spec.name)
-    def create(self, spec, *args, **kwargs):
-        ...  # the real work, unchanged
+    def create(self, spec, *args, **kwargs): ...  # the real work, unchanged
 ```
 
 * `"my_capability"` is the `component_type` string. It must match
@@ -86,10 +86,10 @@ creates that spec gets correct dependency gating for free.
 ```python
 from multistack.state.tracking import track_delete
 
+
 class MyBackend:
     @track_delete(name_of=lambda spec: spec.name)
-    def delete(self, spec, *args, **kwargs):
-        ...  # the real teardown, unchanged
+    def delete(self, spec, *args, **kwargs): ...  # the real teardown, unchanged
 ```
 
 Only touches state for a name this layer already has a row for — deleting
@@ -111,11 +111,17 @@ replacing would need its own decorator following the same shape.
 from multistack.state import default_state_manager, DeploymentStatus
 
 state = default_state_manager()
-state.get("edge-cluster")            # one Deployment, or None
-state.list_deployments()             # every row
+state.get("edge-cluster")  # one Deployment, or None
+state.list_deployments()  # every row
 state.latest_health_check("edge-cluster")
 [d for d in state.list_deployments() if d.status == DeploymentStatus.FAILED]
 ```
+
+## Viewing the state
+
+`python -m multistack.state.viewer` serves a read-only web view of this database (deployments,
+their status and errors, and a log of recorded outcomes) — see `ui/state-viewer/README.md`. It opens
+the file with SQLite `mode=ro`, so it can never modify state.
 
 ## Two failure modes, both observable
 

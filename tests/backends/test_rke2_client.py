@@ -1,6 +1,7 @@
 """Tests for RKE2Backend logic that doesn't need a real machine: state
 persistence, partial-failure tracking, the parallel helper, and command
 construction. Anything that would shell out is monkeypatched out."""
+
 import os
 import shlex
 import stat
@@ -10,6 +11,7 @@ import pytest
 
 from multistack import RKE2Cluster, RKE2Node
 from multistack.backends.rke2_client import (
+    INSTALL_SCRIPT_URLS,
     ClusterState,
     RKE2Backend,
     RKE2Error,
@@ -18,9 +20,27 @@ from multistack.backends.rke2_client import (
 
 
 @pytest.fixture
+def backend_v4(tmp_path):
+    """Same as `backend`, but asking for Helm 4."""
+    return RKE2Backend(
+        state_dir=str(tmp_path / "state"),
+        poll_interval=0,
+        poll_timeout=1,
+        default_kubeconfig_path=str(tmp_path / "home" / ".kube" / "config"),
+        helm_v4=True,
+    )
+
+
+@pytest.fixture
 def backend(tmp_path):
-    """A backend with state isolated to a temp dir and fast polling."""
-    return RKE2Backend(state_dir=str(tmp_path / "state"), poll_interval=0, poll_timeout=1)
+    """A backend with state isolated to a temp dir and fast polling. Its
+    `~/.kube/config` is a temp path too, so no test can touch the real one."""
+    return RKE2Backend(
+        state_dir=str(tmp_path / "state"),
+        poll_interval=0,
+        poll_timeout=1,
+        default_kubeconfig_path=str(tmp_path / "home" / ".kube" / "config"),
+    )
 
 
 def stub_out_provisioning(backend, monkeypatch, failing_agents=()):
@@ -32,6 +52,8 @@ def stub_out_provisioning(backend, monkeypatch, failing_agents=()):
     monkeypatch.setattr(backend, "_wait_for_node_token", lambda node: None)
     monkeypatch.setattr(backend, "_fetch_kubeconfig", lambda node: "fake-kubeconfig")
     monkeypatch.setattr(backend, "_write_kubeconfig_file", lambda path, kubeconfig: None)
+    monkeypatch.setattr(backend, "_prepare_control_plane", lambda node, path: None)
+    monkeypatch.setattr(backend, "_unlink_kubectl", lambda node: None)
 
     def fake_bootstrap_agent(node, token, version, first_server, pin_node_ip=True):
         if node.address in failing_agents:
@@ -70,6 +92,7 @@ def test_cluster_state_json_roundtrip():
     assert restored.nodes[0].ssh_port == 2222
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file permission bits are unavailable on Windows")
 def test_state_file_is_owner_readable_only(backend):
     # The state file holds the cluster join token.
     backend._save_state(
@@ -85,6 +108,7 @@ def test_state_file_is_owner_readable_only(backend):
     assert stat.S_IMODE(os.stat(backend._state_path("perms")).st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file permission bits are unavailable on Windows")
 def test_kubeconfig_file_is_owner_readable_only(backend, tmp_path):
     # The kubeconfig holds cluster-admin credentials.
     path = tmp_path / "kubeconfig.yaml"
@@ -257,7 +281,57 @@ def test_install_command_shell_quotes_the_version(backend, monkeypatch):
 
     assert shlex.quote(malicious) in captured[0]
     # The payload can't terminate the install command and start a new one.
-    assert "; curl" not in captured[0].replace(shlex.quote(malicious), "")
+    # Not a bare "; curl" check: "set -o pipefail; curl -sfL ..." now
+    # legitimately contains that substring, so the marker unique to the
+    # payload (rather than a phrase the real command also happens to
+    # contain) is what proves it never escaped its quoting.
+    assert "evil.example" not in captured[0].replace(shlex.quote(malicious), "")
+
+
+def test_install_falls_back_to_the_next_source_on_failure(backend, monkeypatch):
+    # get.rke2.io is a Cloudflare Worker with its own failure mode
+    # (observed: a bare HTTP 500 the Worker itself throws), independent of
+    # whatever the install script or release does — so a failure there
+    # should retry against the GitHub-hosted copy rather than giving up.
+    attempts = []
+
+    def fake_run(node, command, check=True):
+        attempts.append(command)
+        if len(attempts) == 1:
+            raise RKE2Error("Command failed: curl: (22) The requested URL returned error 500")
+        return ""
+
+    monkeypatch.setattr(backend, "_run", fake_run)
+
+    backend._install_rke2(RKE2Node(address="10.0.0.1"), role="server")
+
+    assert len(attempts) == 2
+    assert INSTALL_SCRIPT_URLS[0] in attempts[0]
+    assert INSTALL_SCRIPT_URLS[1] in attempts[1]
+
+
+def test_install_raises_the_last_error_when_every_source_fails(backend, monkeypatch):
+    def fake_run(node, command, check=True):
+        raise RKE2Error(f"unreachable: {command}")
+
+    monkeypatch.setattr(backend, "_run", fake_run)
+
+    with pytest.raises(RKE2Error, match=INSTALL_SCRIPT_URLS[-1]):
+        backend._install_rke2(RKE2Node(address="10.0.0.1"), role="server")
+
+
+def test_install_command_enables_pipefail(backend, monkeypatch):
+    # Without this, `curl ... | sh -` takes its exit code from `sh`, not
+    # `curl` — a curl failure that writes nothing still runs `sh -` on an
+    # empty script, which exits 0 and hides the real failure entirely.
+    captured = []
+    monkeypatch.setattr(
+        backend, "_run", lambda node, command, check=True: captured.append(command) or ""
+    )
+
+    backend._install_rke2(RKE2Node(address="10.0.0.1"), role="server")
+
+    assert "set -o pipefail" in captured[0]
 
 
 def test_is_local_detects_loopback_addresses():
@@ -341,7 +415,12 @@ def test_server_config_pins_the_declared_address(backend, monkeypatch):
 
     backend._bootstrap_server(
         RKE2Node(address="192.0.2.10", role="server"),
-        "tok", "v1", "cilium", False, first_server=None, pin_node_ip=True,
+        "tok",
+        "v1",
+        "cilium",
+        False,
+        first_server=None,
+        pin_node_ip=True,
     )
 
     assert "node-ip: 192.0.2.10" in written["contents"]
@@ -361,7 +440,10 @@ def test_agent_config_pins_the_declared_address(backend, monkeypatch):
 
     backend._bootstrap_agent(
         RKE2Node(address="192.0.2.11", role="agent"),
-        "tok", "v1", RKE2Node(address="192.0.2.10", role="server"), True,
+        "tok",
+        "v1",
+        RKE2Node(address="192.0.2.10", role="server"),
+        True,
     )
 
     assert "node-ip: 192.0.2.11" in written["contents"]
@@ -378,7 +460,12 @@ def test_node_ip_pinning_can_be_disabled(backend, monkeypatch):
 
     backend._bootstrap_server(
         RKE2Node(address="192.0.2.10", role="server"),
-        "tok", "v1", "cilium", False, first_server=None, pin_node_ip=False,
+        "tok",
+        "v1",
+        "cilium",
+        False,
+        first_server=None,
+        pin_node_ip=False,
     )
 
     assert "node-ip" not in written["contents"]
@@ -405,21 +492,27 @@ def test_low_path_mtu_between_nodes_is_flagged(backend, monkeypatch):
 def test_standard_path_mtu_produces_no_warning(backend, monkeypatch):
     monkeypatch.setattr(backend, "_measure_path_mtu", lambda node, target: 1500)
 
-    assert backend._check_pod_network_mtu(
-        [RKE2Node(address="10.0.0.1"), RKE2Node(address="10.0.0.2")],
-        cni="cilium",
-        cilium_mtu=None,
-    ) == []
+    assert (
+        backend._check_pod_network_mtu(
+            [RKE2Node(address="10.0.0.1"), RKE2Node(address="10.0.0.2")],
+            cni="cilium",
+            cilium_mtu=None,
+        )
+        == []
+    )
 
 
 def test_low_path_mtu_is_accepted_once_cilium_mtu_fits(backend, monkeypatch):
     monkeypatch.setattr(backend, "_measure_path_mtu", lambda node, target: 1428)
 
-    assert backend._check_pod_network_mtu(
-        [RKE2Node(address="10.0.0.1"), RKE2Node(address="10.0.0.2")],
-        cni="cilium",
-        cilium_mtu=1350,
-    ) == []
+    assert (
+        backend._check_pod_network_mtu(
+            [RKE2Node(address="10.0.0.1"), RKE2Node(address="10.0.0.2")],
+            cni="cilium",
+            cilium_mtu=1350,
+        )
+        == []
+    )
 
 
 def test_unmeasurable_path_mtu_is_reported_rather_than_assumed_fine(backend, monkeypatch):
@@ -471,9 +564,7 @@ def test_cilium_chart_config_omits_kube_proxy_block_when_not_requested(backend, 
 
 
 def test_multi_homed_node_is_flagged(backend, monkeypatch):
-    monkeypatch.setattr(
-        backend, "_probe", lambda node, cmd, what: "192.0.2.10\n10.0.1.108"
-    )
+    monkeypatch.setattr(backend, "_probe", lambda node, cmd, what: "192.0.2.10\n10.0.1.108")
 
     warnings = backend._check_node_addressing(RKE2Node(address="192.0.2.10"))
 
@@ -550,23 +641,467 @@ def test_kubeconfig_is_written_before_agents_join(backend, monkeypatch, tmp_path
     monkeypatch.setattr(backend, "_wait_for_node_token", lambda *a, **k: None)
     monkeypatch.setattr(backend, "_fetch_kubeconfig", lambda *a, **k: "apiVersion: v1\n")
     monkeypatch.setattr(backend, "check_prerequisites", lambda *a, **k: [])
+    monkeypatch.setattr(backend, "_prepare_control_plane", lambda *a, **k: None)
 
     def fake_agent(node, *a, **k):
         seen_when_agent_joined[node.address] = kubeconfig_path.exists()
 
     monkeypatch.setattr(backend, "_bootstrap_agent", fake_agent)
 
-    backend.create(RKE2Cluster(
-        name="early-kubeconfig",
-        kubeconfig_path=str(kubeconfig_path),
-        nodes=[
-            RKE2Node(address="10.0.0.1", role="server"),
-            RKE2Node(address="10.0.0.2", role="agent"),
-            RKE2Node(address="10.0.0.3", role="agent"),
-        ],
-    ))
-
-    assert seen_when_agent_joined == {"10.0.0.2": True, "10.0.0.3": True}, (
-        "kubeconfig should already be on disk while agents are still joining"
+    backend.create(
+        RKE2Cluster(
+            name="early-kubeconfig",
+            kubeconfig_path=str(kubeconfig_path),
+            nodes=[
+                RKE2Node(address="10.0.0.1", role="server"),
+                RKE2Node(address="10.0.0.2", role="agent"),
+                RKE2Node(address="10.0.0.3", role="agent"),
+            ],
+        )
     )
+
+    assert seen_when_agent_joined == {
+        "10.0.0.2": True,
+        "10.0.0.3": True,
+    }, "kubeconfig should already be on disk while agents are still joining"
     assert kubeconfig_path.read_text() == "apiVersion: v1\n"
+
+
+# -- control-plane tooling -------------------------------------------------
+# The first server is the only machine an operator is assumed to have, so
+# the build leaves kubectl, helm and a shared kubeconfig there.
+from multistack.backends import rke2_client  # noqa: E402
+from multistack.backends.rke2_client import (  # noqa: E402
+    HELM_SHA256,
+    HELM_V4_SHA256,
+    HELM_V4_VERSION,
+    HELM_VERSION,
+)
+
+
+def scripted_run(backend, monkeypatch, answers):
+    """Fakes `_run`: the first `answers` key found in a command decides its
+    stdout. Returns the (command, sudo) calls made, in order."""
+    calls = []
+
+    def fake(node, command, check=True, sudo=True):
+        calls.append((command, sudo))
+        for needle, out in answers.items():
+            if needle in command:
+                return out
+        return ""
+
+    monkeypatch.setattr(backend, "_run", fake)
+    return calls
+
+
+def test_kubectl_is_linked_from_rke2_when_none_is_on_path(backend, monkeypatch):
+    calls = scripted_run(backend, monkeypatch, {"command -v kubectl": ""})
+
+    backend._link_kubectl(RKE2Node(address="10.0.0.1", role="server"))
+
+    link = [(c, sudo) for c, sudo in calls if "ln -sfn" in c]
+    assert len(link) == 1
+    assert "ln -sfn /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl" in link[0][0]
+    assert link[0][1] is True  # /usr/local/bin needs root
+
+
+@pytest.mark.parametrize(
+    "found",
+    [
+        "/usr/bin/kubectl",  # operator's own
+        "/var/lib/rancher/rke2/data/v1.32.5-rke2r1/bin/kubectl",  # already linked
+    ],
+)
+def test_an_existing_kubectl_is_left_alone(backend, monkeypatch, found):
+    calls = scripted_run(backend, monkeypatch, {"command -v kubectl": found + "\n"})
+
+    backend._link_kubectl(RKE2Node(address="10.0.0.1", role="server"))
+
+    assert not any("ln -sfn" in c for c, _ in calls)
+
+
+def test_the_kubectl_probe_uses_the_operators_path_not_sudos(backend, monkeypatch):
+    calls = scripted_run(backend, monkeypatch, {"command -v kubectl": "/usr/bin/kubectl"})
+
+    backend._link_kubectl(RKE2Node(address="10.0.0.1", role="server"))
+
+    assert calls[0][1] is False
+
+
+@pytest.mark.parametrize("machine, arch", [("x86_64", "amd64"), ("aarch64", "arm64")])
+def test_helm_is_installed_at_the_pinned_version_and_checksum(backend, monkeypatch, machine, arch):
+    calls = scripted_run(backend, monkeypatch, {"command -v helm": "", "uname -m": machine})
+
+    backend._install_helm(RKE2Node(address="10.0.0.1", role="server"))
+
+    install = [c for c, _ in calls if "get.helm.sh" in c]
+    assert len(install) == 1
+    script = install[0]
+    assert f"https://get.helm.sh/helm-{HELM_VERSION}-linux-{arch}.tar.gz" in script
+    assert "sha256sum helm.tgz" in script
+    assert f"= {HELM_SHA256[arch]} ]" in script
+    assert f"linux-{arch}/helm /usr/local/bin/helm" in script
+
+
+def test_helm_is_not_installed_over_an_existing_one(backend, monkeypatch):
+    calls = scripted_run(
+        backend,
+        monkeypatch,
+        {
+            "command -v helm": "/snap/bin/helm\n",
+            "version --short": "v3.15.0",
+        },
+    )
+
+    backend._install_helm(RKE2Node(address="10.0.0.1", role="server"))
+
+    assert not any("get.helm.sh" in c for c, _ in calls)
+
+
+def test_helm_on_an_unsupported_architecture_fails_by_name(backend, monkeypatch):
+    calls = scripted_run(backend, monkeypatch, {"command -v helm": "", "uname -m": "s390x"})
+
+    with pytest.raises(RKE2Error, match="s390x"):
+        backend._install_helm(RKE2Node(address="10.0.0.1", role="server"))
+    assert not any("get.helm.sh" in c for c, _ in calls)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("sha256sum"), reason="needs sha256sum")
+@pytest.mark.skipif(os.name == "nt", reason="test requires a POSIX shell")
+def test_a_tampered_helm_download_is_refused_before_install(backend, monkeypatch, tmp_path):
+    # Runs the real install script, with `curl` replaced by one that
+    # "downloads" the wrong bytes. It must stop at the checksum, before
+    # `install` is ever reached.
+    scripted_run(backend, monkeypatch, {"command -v helm": "", "uname -m": "x86_64"})
+    captured = {}
+    real_run = backend._run
+
+    def capture(node, command, check=True, sudo=True):
+        if "get.helm.sh" in command:
+            captured["script"] = command
+            return ""
+        return real_run(node, command, check=check, sudo=sudo)
+
+    monkeypatch.setattr(backend, "_run", capture)
+    backend._install_helm(RKE2Node(address="10.0.0.1", role="server"))
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    (fakebin / "curl").write_text(
+        '#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\necho tampered > "$2"\n'
+    )
+    (fakebin / "curl").chmod(0o755)
+    (fakebin / "install").write_text("#!/bin/sh\necho INSTALLED\n")
+    (fakebin / "install").chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", captured["script"]],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fakebin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode != 0
+    assert "checksum mismatch" in result.stderr
+    assert "INSTALLED" not in result.stdout
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="creating symlinks requires Windows developer mode or elevation"
+)
+def test_default_kubeconfig_is_linked_when_absent(backend, tmp_path):
+    target = tmp_path / "multistack" / "kubeconfig"
+    target.parent.mkdir()
+    target.write_text("apiVersion: v1\n")
+    link = backend.default_kubeconfig_path
+
+    backend._link_default_kubeconfig(str(target))
+
+    assert os.path.islink(link)
+    assert os.readlink(link) == str(target)
+    assert stat.S_IMODE(os.stat(os.path.dirname(link)).st_mode) == 0o700
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="creating symlinks requires Windows developer mode or elevation"
+)
+def test_linking_the_default_kubeconfig_twice_changes_nothing(backend, tmp_path, capsys):
+    target = tmp_path / "kubeconfig"
+    target.write_text("apiVersion: v1\n")
+    backend._link_default_kubeconfig(str(target))
+    capsys.readouterr()
+
+    backend._link_default_kubeconfig(str(target))
+
+    assert "already reads" in capsys.readouterr().out
+    assert os.readlink(backend.default_kubeconfig_path) == str(target)
+
+
+def test_an_existing_default_kubeconfig_is_never_overwritten(backend, tmp_path, capsys):
+    target = tmp_path / "kubeconfig"
+    target.write_text("ours\n")
+    link = backend.default_kubeconfig_path
+    os.makedirs(os.path.dirname(link))
+    with open(link, "w") as f:
+        f.write("someone else's cluster\n")
+
+    backend._link_default_kubeconfig(str(target))
+
+    assert not os.path.islink(link)
+    assert open(link).read() == "someone else's cluster\n"
+    out = capsys.readouterr().out
+    assert "warning" in out and f"ln -sfn {target} {link}" in out
+
+
+def test_kubeconfig_that_already_is_the_default_needs_no_link(backend, capsys):
+    # MULTISTACK_KUBECONFIG=~/.kube/config: one file already, nothing to warn about.
+    link = backend.default_kubeconfig_path
+    os.makedirs(os.path.dirname(link))
+    with open(link, "w") as f:
+        f.write("apiVersion: v1\n")
+
+    backend._link_default_kubeconfig(link)
+
+    assert "warning" not in capsys.readouterr().out
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="creating symlinks requires Windows developer mode or elevation"
+)
+def test_a_stale_kubeconfig_export_is_called_out(backend, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "kubeconfig"
+    target.write_text("apiVersion: v1\n")
+    monkeypatch.setenv("KUBECONFIG", str(tmp_path / "elsewhere"))
+
+    backend._link_default_kubeconfig(str(target))
+
+    assert "KUBECONFIG is set to" in capsys.readouterr().out
+
+
+def test_kubeconfig_link_is_skipped_when_the_sdk_runs_elsewhere(
+    backend, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(backend, "_link_kubectl", lambda node: None)
+    monkeypatch.setattr(backend, "_install_helm", lambda node: None)
+    monkeypatch.setattr(backend, "_runs_here", lambda node: False)
+
+    backend._prepare_control_plane(
+        RKE2Node(address="10.0.0.1", role="server"), str(tmp_path / "kubeconfig")
+    )
+
+    assert not os.path.lexists(backend.default_kubeconfig_path)
+    assert "KUBECONFIG=" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="creating symlinks requires Windows developer mode or elevation"
+)
+def test_kubeconfig_link_is_made_when_the_sdk_runs_on_the_first_server(
+    backend, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(backend, "_link_kubectl", lambda node: None)
+    monkeypatch.setattr(backend, "_install_helm", lambda node: None)
+    monkeypatch.setattr(backend, "_runs_here", lambda node: True)
+    target = tmp_path / "kubeconfig"
+    target.write_text("apiVersion: v1\n")
+
+    backend._prepare_control_plane(RKE2Node(address="10.0.0.1", role="server"), str(target))
+
+    assert os.readlink(backend.default_kubeconfig_path) == str(target)
+
+
+IP_ADDR_SHOW = (
+    "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+    "2: eno1    inet 10.0.0.10/24 brd 10.0.0.255 scope global eno1\\  valid_lft forever\n"
+    "2: eno1    inet6 fe80::1/64 scope link \\       valid_lft forever\n"
+)
+
+
+@pytest.mark.parametrize(
+    "address, expected",
+    [
+        ("127.0.0.1", True),  # loopback: _is_local already says so
+        ("10.0.0.10", True),  # the node's real address, on one of our interfaces
+        ("10.0.0.11", False),  # another machine
+    ],
+)
+def test_runs_here_recognises_this_machine_by_its_real_address(
+    backend, monkeypatch, address, expected
+):
+    monkeypatch.setattr(
+        rke2_client.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, IP_ADDR_SHOW, ""),
+    )
+
+    assert backend._runs_here(RKE2Node(address=address, role="server")) is expected
+
+
+def test_runs_here_without_ip_is_false_not_a_crash(backend, monkeypatch):
+    def missing(argv, **kw):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(rke2_client.subprocess, "run", missing)
+
+    assert backend._runs_here(RKE2Node(address="10.0.0.10", role="server")) is False
+
+
+def test_create_prepares_the_first_server_before_agents_join(backend, monkeypatch):
+    stub_out_provisioning(backend, monkeypatch)
+    order = []
+    monkeypatch.setattr(
+        backend,
+        "_prepare_control_plane",
+        lambda node, path: order.append(("tooling", node.address)),
+    )
+    monkeypatch.setattr(
+        backend, "_bootstrap_agent", lambda node, *a, **k: order.append(("join", node.address))
+    )
+
+    backend.create(
+        RKE2Cluster(
+            name="tooling-order",
+            nodes=[
+                RKE2Node(address="server-1", role="server"),
+                RKE2Node(address="agent-1", role="agent"),
+            ],
+        )
+    )
+
+    assert order == [("tooling", "server-1"), ("join", "agent-1")]
+
+
+def test_update_prepares_the_first_server_too(backend, monkeypatch):
+    # So a cluster built before this existed picks it up without a rebuild.
+    stub_out_provisioning(backend, monkeypatch)
+    backend.create(three_node_cluster("tooling-update"))
+    prepared = []
+    monkeypatch.setattr(
+        backend, "_prepare_control_plane", lambda node, path: prepared.append(node.address)
+    )
+
+    backend.update(three_node_cluster("tooling-update"))
+
+    assert prepared == ["server-1"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="creating symlinks requires Windows developer mode or elevation"
+)
+def test_delete_removes_only_the_links_the_sdk_made(backend, monkeypatch, tmp_path):
+    stub_out_provisioning(backend, monkeypatch)
+    monkeypatch.setattr(backend, "_teardown_node", lambda node: None)
+    unlinked = []
+    monkeypatch.setattr(backend, "_unlink_kubectl", lambda node: unlinked.append(node.address))
+    target = tmp_path / "kubeconfig"
+    target.write_text("apiVersion: v1\n")
+    backend._link_default_kubeconfig(str(target))
+    cluster = three_node_cluster("tooling-delete")
+    cluster.kubeconfig_path = str(target)
+    backend.create(cluster)
+
+    backend.delete("tooling-delete")
+
+    assert unlinked == ["server-1"]
+    assert not os.path.lexists(backend.default_kubeconfig_path)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="creating symlinks requires Windows developer mode or elevation"
+)
+def test_delete_keeps_a_default_kubeconfig_that_is_not_ours(backend, monkeypatch, tmp_path):
+    stub_out_provisioning(backend, monkeypatch)
+    monkeypatch.setattr(backend, "_teardown_node", lambda node: None)
+    link = backend.default_kubeconfig_path
+    os.makedirs(os.path.dirname(link))
+    os.symlink(str(tmp_path / "another-cluster"), link)
+    cluster = three_node_cluster("tooling-keep")
+    cluster.kubeconfig_path = str(tmp_path / "kubeconfig")
+    backend.create(cluster)
+
+    backend.delete("tooling-keep")
+
+    assert os.path.islink(link)
+
+
+def test_kubectl_unlink_only_removes_rke2s_link(backend, monkeypatch):
+    calls = scripted_run(backend, monkeypatch, {})
+
+    backend._unlink_kubectl(RKE2Node(address="10.0.0.1", role="server"))
+
+    ((command, _),) = calls
+    assert '[ "$(readlink /usr/local/bin/kubectl)" = /var/lib/rancher/rke2/bin/kubectl ]' in command
+    assert "rm -f /usr/local/bin/kubectl" in command
+
+
+def test_prepare_control_plane_uses_the_saved_first_server(backend, monkeypatch):
+    # For a cluster built before create() did this: no spec to restate,
+    # nothing about the cluster itself changed.
+    stub_out_provisioning(backend, monkeypatch)
+    cluster = three_node_cluster("tooling-later")
+    cluster.kubeconfig_path = "/tmp/kc.yaml"
+    backend.create(cluster)
+    prepared = []
+    monkeypatch.setattr(
+        backend, "_prepare_control_plane", lambda node, path: prepared.append((node.address, path))
+    )
+
+    backend.prepare_control_plane("tooling-later")
+
+    assert prepared == [("server-1", "/tmp/kc.yaml")]
+
+
+def test_prepare_control_plane_needs_a_cluster_the_sdk_built(backend):
+    with pytest.raises(RKE2Error, match="no state found for cluster 'nope'"):
+        backend.prepare_control_plane("nope")
+
+
+# -- which Helm major gets installed -------------------------------------
+# pyhelm3, the SDK's own Helm layer, targets 3. Against a 4 it still works
+# but rewrites deprecated flags as it goes, which is a compatibility shim
+# rather than support -- so 3 is what gets installed unless asked otherwise,
+# and the operator's helm then matches the one the SDK drives.
+
+
+def test_the_default_is_helm_3():
+    """Pinned by major deliberately. A bump to 4 here would silently change
+    what every control-plane node gets."""
+    assert HELM_VERSION.startswith("v3.")
+    assert HELM_V4_VERSION.startswith("v4.")
+
+
+@pytest.mark.parametrize("machine, arch", [("x86_64", "amd64"), ("aarch64", "arm64")])
+def test_helm_v4_installs_the_v4_build_and_its_own_checksum(backend_v4, monkeypatch, machine, arch):
+    calls = scripted_run(backend_v4, monkeypatch, {"command -v helm": "", "uname -m": machine})
+
+    backend_v4._install_helm(RKE2Node(address="10.0.0.1", role="server"))
+
+    script = next(c for c, _ in calls if "get.helm.sh" in c)
+    assert f"https://get.helm.sh/helm-{HELM_V4_VERSION}-linux-{arch}.tar.gz" in script
+    assert f"= {HELM_V4_SHA256[arch]} ]" in script
+    # The 3 build's hash must not travel with the 4 tarball: that pairing
+    # would refuse every install, and only on a real node.
+    assert HELM_SHA256[arch] not in script
+
+
+def test_the_two_majors_do_not_share_a_checksum():
+    """Guards the copy/paste that would make the flag change the URL and
+    not the hash."""
+    for arch in HELM_SHA256:
+        assert HELM_SHA256[arch] != HELM_V4_SHA256[arch]
+
+
+def test_an_existing_helm_is_kept_whichever_major_was_asked_for(backend_v4, monkeypatch):
+    """The flag decides what gets installed, never what gets replaced."""
+    calls = scripted_run(
+        backend_v4,
+        monkeypatch,
+        {
+            "command -v helm": "/usr/local/bin/helm\n",
+            "version --short": "v3.15.0",
+        },
+    )
+
+    backend_v4._install_helm(RKE2Node(address="10.0.0.1", role="server"))
+
+    assert not any("get.helm.sh" in c for c, _ in calls)

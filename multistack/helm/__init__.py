@@ -47,14 +47,16 @@ pyhelm3 is an optional extra (`pip install -e ".[helm]"`) and is imported
 only when an operation actually runs, so importing this module costs
 nothing without it.
 """
+
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
 import contextlib
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any
 
 from .config import HelmConfig
 from .errors import (
@@ -73,17 +75,31 @@ from .models import HelmRelease, HelmRepository, ReleaseStatus
 from .repositories import (
     BITNAMI_REPOSITORY,
     DEFAULT_REPOSITORIES,
+    HASHICORP_REPOSITORY,
     LONGHORN_REPOSITORY,
     MINIO_OPERATOR_REPOSITORY,
     PROMETHEUS_COMMUNITY_REPOSITORY,
 )
 
 # Keys whose values never reach a log or an error message.
-SENSITIVE_KEYS = frozenset({
-    "password", "passwd", "secret", "secretkey", "secret_key", "token",
-    "apikey", "api_key", "private_key", "privatekey", "accesskey",
-    "access_key", "rootpassword", "root_password",
-})
+SENSITIVE_KEYS = frozenset(
+    {
+        "password",
+        "passwd",
+        "secret",
+        "secretkey",
+        "secret_key",
+        "token",
+        "apikey",
+        "api_key",
+        "private_key",
+        "privatekey",
+        "accesskey",
+        "access_key",
+        "rootpassword",
+        "root_password",
+    }
+)
 
 
 def redact(values: Any) -> Any:
@@ -96,8 +112,7 @@ def redact(values: Any) -> Any:
     """
     if isinstance(values, dict):
         return {
-            key: ("***REDACTED***" if str(key).lower() in SENSITIVE_KEYS
-                  else redact(value))
+            key: ("***REDACTED***" if str(key).lower() in SENSITIVE_KEYS else redact(value))
             for key, value in values.items()
         }
     if isinstance(values, (list, tuple)):
@@ -164,12 +179,12 @@ class HelmRunner:
         self,
         kubeconfig_path: str,
         *,
-        repositories: Optional[Sequence[HelmRepository]] = None,
+        repositories: Sequence[HelmRepository] | None = None,
         executable: str = "helm",
-        kubecontext: Optional[str] = None,
+        kubecontext: str | None = None,
         timeout: str = "5m",
         insecure_skip_tls_verify: bool = False,
-        error_cls: Optional[type] = None,
+        error_cls: type | None = None,
     ) -> None:
         if not kubeconfig_path:
             raise HelmConfigurationError(
@@ -240,11 +255,11 @@ class HelmRunner:
         self,
         release: str,
         *,
-        chart: Optional[str] = None,
-        accelerator_type: Optional[str] = None,
+        chart: str | None = None,
+        accelerator_type: str | None = None,
         namespace: str,
-        values: Optional[Dict[str, Any]] = None,
-        chart_version: Optional[str] = None,
+        values: dict[str, Any] | None = None,
+        chart_version: str | None = None,
         atomic: bool = True,
         wait: bool = True,
         create_namespace: bool = True,
@@ -260,18 +275,20 @@ class HelmRunner:
         back rather than left half-installed for someone to find later.
         """
         manager = self._get_manager()
-        result = self._call(manager.install(
-            release,
-            chart,
-            accelerator_type=accelerator_type,
-            chart_version=chart_version,
-            namespace=namespace,
-            values=values or {},
-            wait=wait,
-            atomic=atomic,
-            create_namespace=create_namespace,
-            strict_values=strict_values,
-        ))
+        result = self._call(
+            manager.install(
+                release,
+                chart,
+                accelerator_type=accelerator_type,
+                chart_version=chart_version,
+                namespace=namespace,
+                values=values or {},
+                wait=wait,
+                atomic=atomic,
+                create_namespace=create_namespace,
+                strict_values=strict_values,
+            )
+        )
         return result.release
 
     def uninstall(
@@ -289,21 +306,21 @@ class HelmRunner:
         without it, "there was nothing to remove" is reported rather than
         swallowed.
         """
-        self._call(self._get_manager().uninstall(
-            release,
-            namespace=namespace,
-            wait=wait,
-            keep_history=keep_history,
-            missing_ok=missing_ok,
-        ))
+        self._call(
+            self._get_manager().uninstall(
+                release,
+                namespace=namespace,
+                wait=wait,
+                keep_history=keep_history,
+                missing_ok=missing_ok,
+            )
+        )
 
     def status(self, release: str, *, namespace: str) -> HelmRelease:
         """The release's current revision and status."""
         return self._call(self._get_manager().status(release, namespace=namespace))
 
-    def get_release(
-        self, release: str, *, namespace: str
-    ) -> Optional[HelmRelease]:
+    def get_release(self, release: str, *, namespace: str) -> HelmRelease | None:
         """The release as it stands, or None when there is none.
 
         `status()` raises for a missing release; this returns None, for
@@ -320,9 +337,7 @@ class HelmRunner:
         with the stderr in it.
         """
         with _quiet_expected_command_failure():
-            return self._call(
-                self._get_manager().get_release(release, namespace=namespace)
-            )
+            return self._call(self._get_manager().get_release(release, namespace=namespace))
 
     def is_deployed(self, release: str, *, namespace: str) -> bool:
         """Whether the release exists and its last operation succeeded.
@@ -350,27 +365,28 @@ class HelmRunner:
 
 
 __all__ = [
-    "HelmRunner",
-    "HelmRelease",
-    "HelmRepository",
-    "ReleaseStatus",
-    "redact",
-    "run_sync",
-    "DEFAULT_REPOSITORIES",
-    "LONGHORN_REPOSITORY",
-    "NATS_REPOSITORY",
-    "MINIO_OPERATOR_REPOSITORY",
-    "PROMETHEUS_COMMUNITY_REPOSITORY",
     "BITNAMI_REPOSITORY",
-    # Errors, so a caller can handle failures without importing internals.
-    "HelmManagerError",
+    "DEFAULT_REPOSITORIES",
+    "HASHICORP_REPOSITORY",
+    "LONGHORN_REPOSITORY",
+    "MINIO_OPERATOR_REPOSITORY",
+    "NATS_REPOSITORY",
+    "PROMETHEUS_COMMUNITY_REPOSITORY",
     "HelmChartNotFoundError",
     "HelmChartVersionNotFoundError",
     "HelmConfigurationError",
     "HelmDeploymentError",
+    # Errors, so a caller can handle failures without importing internals.
+    "HelmManagerError",
     "HelmOperationCancelledError",
+    "HelmRelease",
     "HelmReleaseNotFoundError",
+    "HelmRepository",
     "HelmRepositoryError",
+    "HelmRunner",
     "HelmTimeoutError",
     "HelmValidationError",
+    "ReleaseStatus",
+    "redact",
+    "run_sync",
 ]

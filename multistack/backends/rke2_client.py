@@ -26,23 +26,34 @@ the address of the original first server, the node list, and the RKE2
 version. `create()` refuses to run if state already exists (use `update()`
 instead); `update()`/`delete()` refuse to run if it doesn't.
 """
+
 from __future__ import annotations
-import json
+
 import os
 import re
 import secrets
 import shlex
+import socket
+import subprocess
 import time
-from datetime import datetime, timezone
-from typing import List, Optional, Union
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.rke2 import RKE2Cluster, RKE2Node
 from ..state.tracking import track_create, track_delete, track_update
 from .transport import NodeCommandError, NodeCommandMixin, NodePrerequisiteError
 
-INSTALL_SCRIPT_URL = "https://get.rke2.io"
+# get.rke2.io is a Cloudflare Worker in front of the real script, and that
+# Worker has its own failure mode independent of the script or the release
+# it fetches (seen in the wild as a bare HTTP 500 "error code: 1101" —
+# Cloudflare's own "Worker threw an exception" page). The GitHub-hosted copy
+# is the same script served a completely different way, so it is the
+# fallback rather than a second attempt at the same edge.
+INSTALL_SCRIPT_URLS = (
+    "https://get.rke2.io",
+    "https://raw.githubusercontent.com/rancher/rke2/master/install.sh",
+)
 CONFIG_PATH = "/etc/rancher/rke2/config.yaml"
 KUBECONFIG_REMOTE_PATH = "/etc/rancher/rke2/rke2.yaml"
 NODE_TOKEN_PATH = "/var/lib/rancher/rke2/server/node-token"
@@ -52,10 +63,41 @@ NODE_TOKEN_PATH = "/var/lib/rancher/rke2/server/node-token"
 # https://docs.rke2.io/install/uninstall
 UNINSTALL_SCRIPT_PATHS = [
     "/usr/local/bin/rke2-uninstall.sh",  # tarball (what get.rke2.io uses)
-    "/usr/bin/rke2-uninstall.sh",        # RPM
-    "/opt/rke2/bin/rke2-uninstall.sh",   # read-only / btrfs filesystems
+    "/usr/bin/rke2-uninstall.sh",  # RPM
+    "/opt/rke2/bin/rke2-uninstall.sh",  # read-only / btrfs filesystems
 ]
 CILIUM_HELM_CHART_CONFIG_PATH = "/var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml"
+
+# The control-plane node is the only machine an operator has, so the
+# cluster build leaves it with the tools every later stage and every
+# manual command needs. RKE2 ships a `kubectl` matching the cluster but
+# keeps it off PATH; it ships no `helm` at all.
+RKE2_BIN_DIR = "/var/lib/rancher/rke2/bin"
+TOOL_BIN_DIR = "/usr/local/bin"
+# Pinned, with checksums held here rather than fetched next to the
+# tarball: a checksum from the same host only proves the download wasn't
+# truncated. Bumping a version means replacing both hashes, from
+# https://get.helm.sh/helm-<version>-linux-<arch>.tar.gz.sha256sum.
+#
+# Helm 3 is the default because the SDK's own Helm layer is pyhelm3, which
+# targets 3: against a 4 it still works but rewrites deprecated flags as it
+# goes (`--atomic` becomes `--rollback-on-failure`), which is a compatibility
+# shim rather than support. Installing the major version the library was
+# written for keeps the operator's `helm` and the SDK's on the same
+# behaviour. Pass helm_v4=True to RKE2Backend for a node that needs 4.
+HELM_VERSION = "v3.22.0"
+HELM_SHA256 = {
+    "amd64": "1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb",
+    "arm64": "f14e804dfee240f55525b667488fe9adca349e63e00c9af634c0beb1421ac310",
+}
+HELM_V4_VERSION = "v4.3.0"
+HELM_V4_SHA256 = {
+    "amd64": "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
+    "arm64": "31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08",
+}
+HELM_ARCHES = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+# Where a bare `kubectl` (and `helm`) look when $KUBECONFIG is unset.
+DEFAULT_KUBECONFIG_LINK = os.path.expanduser("~/.kube/config")
 
 DEFAULT_STATE_DIR = os.path.expanduser("~/.multistack/state")
 
@@ -95,7 +137,7 @@ class RKE2Error(NodeCommandError):
 
 def _utcnow() -> str:
     """Current UTC time as an ISO-8601 string, for state timestamps."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _safe_filename(name: str) -> str:
@@ -107,6 +149,7 @@ def _safe_filename(name: str) -> str:
 class ClusterState(BaseModel):
     """Everything the backend needs to remember between calls, since RKE2
     clusters (unlike K8s resources) have no live API to query beforehand."""
+
     model_config = ConfigDict(
         # A misspelled field name is a typo, not a value to keep.
         extra="forbid",
@@ -120,10 +163,10 @@ class ClusterState(BaseModel):
     version: str
     token: str
     first_server_address: str
-    kubeconfig_path: Optional[str]
+    kubeconfig_path: str | None
     cni: str = "canal"
     disable_kube_proxy: bool = False
-    nodes: List[RKE2Node] = Field(default_factory=list)
+    nodes: list[RKE2Node] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 
@@ -132,7 +175,7 @@ class ClusterState(BaseModel):
         return self.model_dump_json(indent=2)
 
     @classmethod
-    def from_json(cls, raw: str) -> "ClusterState":
+    def from_json(cls, raw: str) -> ClusterState:
         """Deserializes a `ClusterState` from JSON produced by `to_json()`.
 
         Nested RKE2Nodes are rebuilt and validated by the model, which is
@@ -163,6 +206,8 @@ class RKE2Backend(NodeCommandMixin):
         state_dir: str = DEFAULT_STATE_DIR,
         max_parallel: int = 10,
         command_timeout: int = 900,
+        default_kubeconfig_path: str = DEFAULT_KUBECONFIG_LINK,
+        helm_v4: bool = False,
     ):
         """
         `ssh_timeout`: seconds to wait for an SSH connection to establish.
@@ -176,6 +221,15 @@ class RKE2Backend(NodeCommandMixin):
         command. Generous by default because the RKE2 install script pulls
         images; it exists so a command that hangs after connecting can't
         block a worker thread indefinitely.
+        `default_kubeconfig_path`: where a bare `kubectl` looks for its
+        kubeconfig — linked to `cluster.kubeconfig_path` when this machine
+        is the first server, so the SDK and the operator's own commands
+        read one file. See `_prepare_control_plane`.
+        `helm_v4`: install Helm 4 instead of the default 3. The SDK's own
+        Helm layer (pyhelm3) targets 3, so 3 is what the rest of this SDK
+        is exercised against; set this when a chart or workflow on the node
+        needs 4. An existing `helm` is kept either way, so this only
+        decides what gets installed when there is none.
         """
         self.ssh_timeout = ssh_timeout
         self.poll_interval = poll_interval
@@ -186,6 +240,8 @@ class RKE2Backend(NodeCommandMixin):
         # agent nodes in parallel (server nodes always run sequentially —
         # see _run_parallel).
         self.max_parallel = max_parallel
+        self.default_kubeconfig_path = default_kubeconfig_path
+        self.helm_v4 = helm_v4
 
     # -- public API -------------------------------------------------------
     @track_create("cluster", name_of=lambda cluster: cluster.name)
@@ -242,7 +298,16 @@ class RKE2Backend(NodeCommandMixin):
         )
 
         print(f"[rke2] bootstrapping first server {first.address}")
-        self._bootstrap_server(first, cluster.token, cluster.version, cluster.cni, cluster.disable_kube_proxy, first_server=None, pin_node_ip=cluster.pin_node_ip, cilium_mtu=cluster.cilium_mtu)
+        self._bootstrap_server(
+            first,
+            cluster.token,
+            cluster.version,
+            cluster.cni,
+            cluster.disable_kube_proxy,
+            first_server=None,
+            pin_node_ip=cluster.pin_node_ip,
+            cilium_mtu=cluster.cilium_mtu,
+        )
         self._wait_for_node_token(first)
         self._upsert_node_in_state(state, first)
 
@@ -256,20 +321,36 @@ class RKE2Backend(NodeCommandMixin):
         kubeconfig = self._fetch_kubeconfig(first)
         self._write_kubeconfig_file(cluster.kubeconfig_path, kubeconfig)
         if cluster.kubeconfig_path:
-            print(f"[rke2] kubeconfig ready at {cluster.kubeconfig_path} "
-                  f"({len(cluster.agent_nodes)} node(s) still joining)")
+            print(
+                f"[rke2] kubeconfig ready at {cluster.kubeconfig_path} "
+                f"({len(cluster.agent_nodes)} node(s) still joining)"
+            )
+        self._prepare_control_plane(first, cluster.kubeconfig_path)
 
         for node in cluster.server_nodes[1:]:
             print(f"[rke2] joining server {node.address}")
-            self._bootstrap_server(node, cluster.token, cluster.version, cluster.cni, cluster.disable_kube_proxy, first_server=first, pin_node_ip=cluster.pin_node_ip, cilium_mtu=cluster.cilium_mtu)
+            self._bootstrap_server(
+                node,
+                cluster.token,
+                cluster.version,
+                cluster.cni,
+                cluster.disable_kube_proxy,
+                first_server=first,
+                pin_node_ip=cluster.pin_node_ip,
+                cilium_mtu=cluster.cilium_mtu,
+            )
             self._upsert_node_in_state(state, node)
 
         if cluster.agent_nodes:
-            print(f"[rke2] joining {len(cluster.agent_nodes)} agent node(s) in parallel "
-                  f"(up to {min(len(cluster.agent_nodes), self.max_parallel)} at once)")
+            print(
+                f"[rke2] joining {len(cluster.agent_nodes)} agent node(s) in parallel "
+                f"(up to {min(len(cluster.agent_nodes), self.max_parallel)} at once)"
+            )
             self._run_parallel(
                 cluster.agent_nodes,
-                lambda node: self._bootstrap_agent(node, cluster.token, cluster.version, first, cluster.pin_node_ip),
+                lambda node: self._bootstrap_agent(
+                    node, cluster.token, cluster.version, first, cluster.pin_node_ip
+                ),
                 label="agent join",
                 on_success=lambda node, _result: self._upsert_node_in_state(state, node),
             )
@@ -300,9 +381,7 @@ class RKE2Backend(NodeCommandMixin):
 
         state = self._load_state(cluster.name)
         if state is None:
-            raise RKE2Error(
-                f"no state found for cluster '{cluster.name}'. Use create() first."
-            )
+            raise RKE2Error(f"no state found for cluster '{cluster.name}'. Use create() first.")
 
         new_addresses = {n.address for n in cluster.nodes}
         if state.first_server_address not in new_addresses:
@@ -331,9 +410,7 @@ class RKE2Backend(NodeCommandMixin):
             )
 
         token = state.token  # join token is fixed at cluster creation
-        first_server = next(
-            n for n in cluster.nodes if n.address == state.first_server_address
-        )
+        first_server = next(n for n in cluster.nodes if n.address == state.first_server_address)
 
         old_by_address = {n.address: n for n in state.nodes}
         added = [n for n in cluster.nodes if n.address not in old_by_address]
@@ -377,13 +454,24 @@ class RKE2Backend(NodeCommandMixin):
         added_agents = [n for n in added if n.role == "agent"]
         for node in added_servers:
             print(f"[rke2] joining new server {node.address}")
-            self._bootstrap_server(node, token, cluster.version, cluster.cni, cluster.disable_kube_proxy, first_server=first_server, pin_node_ip=cluster.pin_node_ip, cilium_mtu=cluster.cilium_mtu)
+            self._bootstrap_server(
+                node,
+                token,
+                cluster.version,
+                cluster.cni,
+                cluster.disable_kube_proxy,
+                first_server=first_server,
+                pin_node_ip=cluster.pin_node_ip,
+                cilium_mtu=cluster.cilium_mtu,
+            )
             self._upsert_node_in_state(state, node)
         if added_agents:
             print(f"[rke2] joining {len(added_agents)} new agent node(s) in parallel")
             self._run_parallel(
                 added_agents,
-                lambda node: self._bootstrap_agent(node, token, cluster.version, first_server, cluster.pin_node_ip),
+                lambda node: self._bootstrap_agent(
+                    node, token, cluster.version, first_server, cluster.pin_node_ip
+                ),
                 label="agent join",
                 on_success=lambda node, _r: self._upsert_node_in_state(state, node),
             )
@@ -394,11 +482,15 @@ class RKE2Backend(NodeCommandMixin):
             # servers upgrade sequentially, first server last, so the
             # control plane stays up as long as possible.
             kept_agents = [n for n in kept if n.role == "agent"]
-            kept_other_servers = [n for n in kept if n.role == "server" and n.address != first_server.address]
+            kept_other_servers = [
+                n for n in kept if n.role == "server" and n.address != first_server.address
+            ]
             kept_first_server = [n for n in kept if n.address == first_server.address]
 
             if kept_agents:
-                print(f"[rke2] upgrading {len(kept_agents)} agent node(s) to {cluster.version} in parallel")
+                print(
+                    f"[rke2] upgrading {len(kept_agents)} agent node(s) to {cluster.version} in parallel"
+                )
                 self._run_parallel(
                     kept_agents,
                     lambda node: self._upgrade_node(node, cluster.version),
@@ -410,6 +502,9 @@ class RKE2Backend(NodeCommandMixin):
 
         kubeconfig = self._fetch_kubeconfig(first_server)
         self._write_kubeconfig_file(cluster.kubeconfig_path, kubeconfig)
+        # Here too, so a cluster built before create() did this picks it
+        # up from one update() rather than a rebuild. Idempotent.
+        self._prepare_control_plane(first_server, cluster.kubeconfig_path)
 
         # `state.nodes` is already correct — it's been maintained
         # incrementally by _upsert_node_in_state/_remove_node_from_state
@@ -428,7 +523,7 @@ class RKE2Backend(NodeCommandMixin):
         return kubeconfig
 
     @track_delete(name_of=lambda cluster: cluster if isinstance(cluster, str) else cluster.name)
-    def delete(self, cluster: Union[RKE2Cluster, str]) -> None:
+    def delete(self, cluster: RKE2Cluster | str) -> None:
         """
         Tears down every node in the cluster (uninstalling RKE2 via its own
         uninstall scripts) and removes the saved state. Agents go first,
@@ -442,7 +537,9 @@ class RKE2Backend(NodeCommandMixin):
             raise RKE2Error(f"no state found for cluster '{name}'. Nothing to delete.")
 
         agents = [n for n in state.nodes if n.role == "agent"]
-        other_servers = [n for n in state.nodes if n.role == "server" and n.address != state.first_server_address]
+        other_servers = [
+            n for n in state.nodes if n.role == "server" and n.address != state.first_server_address
+        ]
         first_server_node = [n for n in state.nodes if n.address == state.first_server_address]
 
         if agents:
@@ -450,9 +547,12 @@ class RKE2Backend(NodeCommandMixin):
             self._run_parallel(agents, self._teardown_node, label="teardown")
 
         for node in other_servers + first_server_node:
+            if node.address == state.first_server_address:
+                self._unlink_kubectl(node)
             print(f"[rke2] tearing down {node.address}")
             self._teardown_node(node)
 
+        self._unlink_default_kubeconfig(state.kubeconfig_path)
         if state.kubeconfig_path and os.path.exists(state.kubeconfig_path):
             os.remove(state.kubeconfig_path)
 
@@ -463,7 +563,7 @@ class RKE2Backend(NodeCommandMixin):
         """Path to the state JSON file for cluster `name`."""
         return os.path.join(self.state_dir, f"{_safe_filename(name)}.json")
 
-    def _load_state(self, name: str) -> Optional[ClusterState]:
+    def _load_state(self, name: str) -> ClusterState | None:
         """Loads the saved state for cluster `name`, or `None` if it has none."""
         path = self._state_path(name)
         if not os.path.exists(path):
@@ -506,10 +606,10 @@ class RKE2Backend(NodeCommandMixin):
     # -- prerequisite checks (https://docs.rke2.io/install/requirements) --
     def check_prerequisites(
         self,
-        nodes_to_check: List[RKE2Node],
-        all_cluster_nodes: Optional[List[RKE2Node]] = None,
-        cluster: Optional[RKE2Cluster] = None,
-    ) -> List[str]:
+        nodes_to_check: list[RKE2Node],
+        all_cluster_nodes: list[RKE2Node] | None = None,
+        cluster: RKE2Cluster | None = None,
+    ) -> list[str]:
         """
         Runs RKE2's documented install requirements against `nodes_to_check`
         and returns a list of warning strings for soft issues (below
@@ -550,7 +650,7 @@ class RKE2Backend(NodeCommandMixin):
             if hostname:
                 hostname_owner[hostname] = node.address
 
-        warnings: List[str] = []
+        warnings: list[str] = []
         server_count_warning = self._server_count_warning(all_nodes)
         if server_count_warning:
             warnings.append(server_count_warning)
@@ -558,9 +658,7 @@ class RKE2Backend(NodeCommandMixin):
         # Needs the spec to know which CNI and MTU are intended, so it only
         # runs when the caller passed the cluster.
         if cluster is not None:
-            warnings.extend(
-                self._check_pod_network_mtu(all_nodes, cluster.cni, cluster.cilium_mtu)
-            )
+            warnings.extend(self._check_pod_network_mtu(all_nodes, cluster.cni, cluster.cilium_mtu))
 
         if not nodes_to_check:
             return warnings
@@ -572,7 +670,7 @@ class RKE2Backend(NodeCommandMixin):
         return warnings
 
     @staticmethod
-    def _server_count_warning(nodes: List[RKE2Node]) -> Optional[str]:
+    def _server_count_warning(nodes: list[RKE2Node]) -> str | None:
         """Flags an even server-node count: etcd needs a simple majority to
         make progress, so an odd count (1, 3, 5, ...) gets fault tolerance
         an even count wastes (e.g. 4 servers tolerates the same 1 lost node
@@ -588,11 +686,11 @@ class RKE2Backend(NodeCommandMixin):
             )
         return None
 
-    def _check_node_prerequisites(self, node: RKE2Node) -> List[str]:
+    def _check_node_prerequisites(self, node: RKE2Node) -> list[str]:
         """Runs the single-node hard/soft checks documented in
         `check_prerequisites` and returns the soft-warning strings for
         `node`; hard failures raise `RKE2PrerequisiteError` directly."""
-        warnings: List[str] = []
+        warnings: list[str] = []
 
         # First, because every later step in provisioning depends on it.
         self._check_passwordless_sudo(node)
@@ -660,7 +758,7 @@ class RKE2Backend(NodeCommandMixin):
         warnings.extend(self._check_node_addressing(node))
         return warnings
 
-    def _measure_path_mtu(self, node: RKE2Node, target: str) -> Optional[int]:
+    def _measure_path_mtu(self, node: RKE2Node, target: str) -> int | None:
         """Binary-searches the largest packet that survives the path from
         `node` to `target` with DF set, and returns that path MTU.
 
@@ -683,8 +781,8 @@ class RKE2Backend(NodeCommandMixin):
         return best + ICMP_HEADER_BYTES
 
     def _check_pod_network_mtu(
-        self, nodes: List[RKE2Node], cni: str, cilium_mtu: Optional[int]
-    ) -> List[str]:
+        self, nodes: list[RKE2Node], cni: str, cilium_mtu: int | None
+    ) -> list[str]:
         """
         Warns when the path between nodes can't carry the pod-network MTU
         the CNI is going to use.
@@ -700,7 +798,7 @@ class RKE2Backend(NodeCommandMixin):
         if cni not in VXLAN_CNIS or len(nodes) < 2:
             return []
 
-        warnings: List[str] = []
+        warnings: list[str] = []
         target = nodes[0]
         for node in nodes[1:]:
             path_mtu = self._measure_path_mtu(node, target.address)
@@ -726,7 +824,7 @@ class RKE2Backend(NodeCommandMixin):
                 )
         return warnings
 
-    def _check_node_addressing(self, node: RKE2Node) -> List[str]:
+    def _check_node_addressing(self, node: RKE2Node) -> list[str]:
         """Warns when a node's declared address isn't the only address it
         has, or isn't present on it at all.
 
@@ -737,7 +835,7 @@ class RKE2Backend(NodeCommandMixin):
         prevents that; this check flags the hosts where it matters, and
         catches a declared address that belongs to no local interface.
         """
-        warnings: List[str] = []
+        warnings: list[str] = []
         raw = self._probe(
             node,
             "ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1",
@@ -773,9 +871,9 @@ class RKE2Backend(NodeCommandMixin):
         version: str,
         cni: str,
         disable_kube_proxy: bool,
-        first_server: Optional[RKE2Node],
+        first_server: RKE2Node | None,
         pin_node_ip: bool = True,
-        cilium_mtu: Optional[int] = None,
+        cilium_mtu: int | None = None,
     ) -> None:
         """Installs and starts `rke2-server` on `node`: runs the install
         script, stages the Cilium HelmChartConfig first if any Cilium
@@ -883,7 +981,7 @@ class RKE2Backend(NodeCommandMixin):
         except Exception as exc:
             print(f"[rke2] warning: couldn't reach {node.address} to tear down cleanly: {exc}")
 
-    def _find_uninstall_script(self, node: RKE2Node) -> Optional[str]:
+    def _find_uninstall_script(self, node: RKE2Node) -> str | None:
         """Returns the first uninstall-script path that exists on `node`, or
         None. RKE2 puts it in a different place per install method, and uses
         the same script for servers and agents."""
@@ -897,31 +995,67 @@ class RKE2Backend(NodeCommandMixin):
     def _rke2_still_present(self, node: RKE2Node) -> bool:
         """Whether `node` still has RKE2 installed — used to tell "already
         clean" apart from "uninstall script is missing but RKE2 isn't"."""
-        return self._run(
-            node,
-            "command -v rke2 >/dev/null || systemctl list-unit-files 'rke2-*' 2>/dev/null "
-            "| grep -q rke2 && echo present || echo absent",
-            check=False,
-        ).strip() == "present"
+        return (
+            self._run(
+                node,
+                "command -v rke2 >/dev/null || systemctl list-unit-files 'rke2-*' 2>/dev/null "
+                "| grep -q rke2 && echo present || echo absent",
+                check=False,
+            ).strip()
+            == "present"
+        )
 
-    def _install_rke2(self, node: RKE2Node, role: str, version: Optional[str] = None) -> None:
-        """Runs RKE2's get.rke2.io install script on `node` for the given
-        `role` ("server" or "agent"), pinned to `version` if given (else
-        latest stable). `role`/`version` are shell-quoted before going into
-        the command line — `version` in particular is free-form and this
-        line is executed via a real shell (ssh's remote-command handling,
-        or local `bash -c`), so an unquoted value would let shell
-        metacharacters (";", "|", "$()", ...) run as arbitrary commands."""
+    def _install_rke2(self, node: RKE2Node, role: str, version: str | None = None) -> None:
+        """Runs RKE2's install script on `node` for the given `role`
+        ("server" or "agent"), pinned to `version` if given (else latest
+        stable). Tries each of INSTALL_SCRIPT_URLS in turn, falling back to
+        the next on failure — see that constant's own comment for why a
+        second source exists at all. `role`/`version` are shell-quoted
+        before going into the command line — `version` in particular is
+        free-form and this line is executed via a real shell (ssh's
+        remote-command handling, or local `bash -c`), so an unquoted value
+        would let shell metacharacters (";", "|", "$()", ...) run as
+        arbitrary commands.
+
+        `set -o pipefail` matters as much as the fallback itself: without
+        it, `curl ... | sh -` takes its exit code from `sh`, not `curl`, so
+        a curl failure that writes nothing to stdout still runs `sh -` on
+        an empty script — which exits 0. That turned a dead install source
+        into a silent no-op here before this existed, surfacing only
+        several steps later as a missing systemd unit with no real error
+        to explain it. No manual `bash -c` wrapper needed for it: `_run`
+        already guarantees bash — explicitly for local execution and for
+        the `sudo -n bash -c ...` path a non-root SSH user always takes,
+        and implicitly via sshd's own `$SHELL -c` for a root SSH user,
+        the same assumption the pre-fallback version of this method also
+        made.
+        """
         env = f"INSTALL_RKE2_TYPE={shlex.quote(role)}"
         if version:
             env += f" INSTALL_RKE2_VERSION={shlex.quote(version)}"
-        self._run(node, f"curl -sfL {INSTALL_SCRIPT_URL} | {env} sh -")
+
+        last_error: Exception | None = None
+        for i, url in enumerate(INSTALL_SCRIPT_URLS):
+            command = f"set -o pipefail; curl -sfL {shlex.quote(url)} | {env} sh -"
+            try:
+                self._run(node, command)
+                if i > 0:
+                    print(f"[rke2] {node.address}: installed from fallback source {url}")
+                return
+            except self.error_cls as exc:
+                last_error = exc
+                remaining = INSTALL_SCRIPT_URLS[i + 1 :]
+                if remaining:
+                    print(
+                        f"[rke2] {node.address}: install from {url} failed, trying {remaining[0]}"
+                    )
+        raise last_error
 
     def _write_cilium_chart_config(
         self,
         node: RKE2Node,
         disable_kube_proxy: bool = False,
-        cilium_mtu: Optional[int] = None,
+        cilium_mtu: int | None = None,
     ) -> None:
         """Stages the HelmChartConfig for RKE2's bundled Cilium chart in the
         auto-apply manifests directory, so it takes effect the moment
@@ -954,9 +1088,7 @@ class RKE2Backend(NodeCommandMixin):
             f"{values}"
         )
         heredoc = (
-            f"cat > {CILIUM_HELM_CHART_CONFIG_PATH} <<'RKE2_CILIUM_EOF'\n"
-            f"{manifest}"
-            f"RKE2_CILIUM_EOF"
+            f"cat > {CILIUM_HELM_CHART_CONFIG_PATH} <<'RKE2_CILIUM_EOF'\n{manifest}RKE2_CILIUM_EOF"
         )
         self._run(node, heredoc)
 
@@ -967,11 +1099,7 @@ class RKE2Backend(NodeCommandMixin):
         self._run(node, "mkdir -p /etc/rancher/rke2")
         # Write via a heredoc over SSH/local-exec rather than scp, so we
         # don't need a second transport just to drop one small file.
-        heredoc = (
-            f"cat > {CONFIG_PATH} <<'RKE2_CONFIG_EOF'\n"
-            f"{contents}\n"
-            f"RKE2_CONFIG_EOF"
-        )
+        heredoc = f"cat > {CONFIG_PATH} <<'RKE2_CONFIG_EOF'\n{contents}\nRKE2_CONFIG_EOF"
         self._run(node, heredoc)
 
     def _wait_for_service(self, node: RKE2Node, service: str) -> None:
@@ -983,9 +1111,7 @@ class RKE2Backend(NodeCommandMixin):
             if result.strip() == "active":
                 return
             time.sleep(self.poll_interval)
-        raise RKE2Error(
-            f"Timed out waiting for {service} to become active on {node.address}"
-        )
+        raise RKE2Error(f"Timed out waiting for {service} to become active on {node.address}")
 
     def _wait_for_node_token(self, node: RKE2Node) -> None:
         """Polls the first server for its node-token file to appear
@@ -993,15 +1119,11 @@ class RKE2Backend(NodeCommandMixin):
         `RKE2Error` after `self.poll_timeout` seconds."""
         deadline = time.time() + self.poll_timeout
         while time.time() < deadline:
-            result = self._run(
-                node, f"test -s {NODE_TOKEN_PATH} && echo ready", check=False
-            )
+            result = self._run(node, f"test -s {NODE_TOKEN_PATH} && echo ready", check=False)
             if result.strip() == "ready":
                 return
             time.sleep(self.poll_interval)
-        raise RKE2Error(
-            f"Timed out waiting for node token on first server {node.address}"
-        )
+        raise RKE2Error(f"Timed out waiting for node token on first server {node.address}")
 
     def _fetch_kubeconfig(self, node: RKE2Node) -> str:
         """Reads rke2.yaml off `node` and rewrites its default
@@ -1019,7 +1141,7 @@ class RKE2Backend(NodeCommandMixin):
             return raw
         return raw.replace("127.0.0.1", node.address)
 
-    def _write_kubeconfig_file(self, path: Optional[str], kubeconfig: str) -> None:
+    def _write_kubeconfig_file(self, path: str | None, kubeconfig: str) -> None:
         """Writes `kubeconfig` to `path` (if given) with owner-only
         permissions — it carries cluster-admin credentials."""
         if path:
@@ -1027,3 +1149,228 @@ class RKE2Backend(NodeCommandMixin):
                 f.write(kubeconfig)
             # Holds cluster-admin credentials — don't leave it world/group-readable.
             os.chmod(path, 0o600)
+
+    # -- control-plane tooling ------------------------------------------
+    def prepare_control_plane(self, name: str) -> None:
+        """Gives an existing cluster's first server `kubectl`, `helm` and
+        the shared kubeconfig, without touching the cluster itself.
+
+        `create()` and `update()` do this as they go. This is for a cluster
+        built before they did, where neither fits: `create()` refuses an
+        existing cluster, and `update()` reconciles the node set to a spec
+        the caller would have to restate exactly. Idempotent.
+        """
+        state = self._load_state(name)
+        if state is None:
+            raise RKE2Error(
+                f"no state found for cluster '{name}' — this needs a cluster "
+                "this SDK created. For any other cluster, put kubectl and helm "
+                "on PATH and its kubeconfig at ~/.kube/config yourself."
+            )
+        first = next(
+            (n for n in state.nodes if n.address == state.first_server_address),
+            None,
+        )
+        if first is None:
+            raise RKE2Error(
+                f"cluster '{name}' has no record of its first server "
+                f"({state.first_server_address}) — its create() did not finish."
+            )
+        self._prepare_control_plane(first, state.kubeconfig_path)
+
+    def _prepare_control_plane(self, node: RKE2Node, kubeconfig_path: str | None) -> None:
+        """Leaves the first server usable on its own: `kubectl` and `helm`
+        on PATH, and a bare `kubectl` reading the kubeconfig the SDK wrote.
+
+        The first server is the only machine an operator is assumed to
+        have, and before this every one of those was a manual step. Missed,
+        each failed differently: no `kubectl` failed every stage after the
+        cluster as "not found"; no `helm` failed the first chart; and with
+        no `~/.kube/config` the operator's own `kubectl` reached no cluster
+        — or, worse, one left over from before, so a deploy could be
+        "verified" against a cluster it never touched.
+
+        The tools go on the node itself. The kubeconfig link goes on this
+        machine, because that is where the SDK's kubeconfig is written —
+        so it is made only when this machine *is* the first server; from
+        anywhere else the two would be different machines' files.
+
+        Never replaces anything already there: an operator's own `kubectl`,
+        `helm` or `~/.kube/config` is kept, and reported.
+        """
+        print(f"[rke2] preparing control-plane tooling on {node.address}")
+        self._link_kubectl(node)
+        self._install_helm(node)
+        if self._runs_here(node):
+            self._link_default_kubeconfig(kubeconfig_path)
+        elif kubeconfig_path:
+            print(
+                f"[rke2] kubeconfig: not linking {self.default_kubeconfig_path} — "
+                f"this machine isn't {node.address}. Bare kubectl here "
+                f"needs KUBECONFIG={kubeconfig_path}."
+            )
+
+    def _existing_tool(self, node: RKE2Node, name: str) -> str | None:
+        """Where `name` resolves on `node`'s PATH, symlinks followed, or
+        None. Without sudo: the question is what the operator will run,
+        and sudo's secure_path is not their PATH."""
+        out = self._run(
+            node,
+            f'p=$(command -v {name}) && readlink -f "$p"',
+            check=False,
+            sudo=False,
+        ).strip()
+        return out or None
+
+    def _link_kubectl(self, node: RKE2Node) -> None:
+        """Puts RKE2's own `kubectl` on PATH, unless one already is.
+
+        A link rather than a download: it is the client built for this
+        cluster's version, needs no network, and follows RKE2 upgrades.
+        """
+        existing = self._existing_tool(node, "kubectl")
+        if existing:
+            # RKE2's link resolves into its versioned data dir.
+            source = "RKE2's own" if existing.startswith("/var/lib/rancher/rke2/") else "existing"
+            print(f"[rke2] kubectl: using {source} {existing}")
+            return
+        bundled = f"{RKE2_BIN_DIR}/kubectl"
+        self._run(
+            node,
+            f"test -x {bundled} || {{ echo 'RKE2 installed no kubectl at {bundled}' >&2; exit 1; }}; "
+            f"ln -sfn {bundled} {TOOL_BIN_DIR}/kubectl",
+        )
+        print(f"[rke2] kubectl: linked {TOOL_BIN_DIR}/kubectl -> {bundled}")
+
+    def _install_helm(self, node: RKE2Node) -> None:
+        """Installs Helm on `node`, checksum-verified, unless a `helm` is
+        already on PATH.
+
+        Helm 3 unless `helm_v4` was set on this backend — see __init__ for
+        why 3 is the default.
+
+        RKE2 has no Helm CLI of its own (its helm-controller runs in
+        cluster), and every chart-backed capability shells out to one.
+        A tarball from get.helm.sh rather than a package manager or
+        Helm's install script: the script installs whatever is newest on
+        the day, and snap needs root and a login shell to land on PATH.
+        """
+        existing = self._existing_tool(node, "helm")
+        if existing:
+            version = self._run(
+                node, f"{shlex.quote(existing)} version --short", check=False, sudo=False
+            ).strip()
+            print(f"[rke2] helm: using existing {existing} ({version or 'version unknown'})")
+            return
+
+        machine = self._probe(node, "uname -m", "CPU architecture")
+        arch = HELM_ARCHES.get(machine)
+        if arch is None:
+            raise RKE2Error(
+                f"{node.address}: no Helm build for architecture '{machine}' "
+                f"(supported: {', '.join(sorted(HELM_ARCHES))})"
+            )
+        version = HELM_V4_VERSION if self.helm_v4 else HELM_VERSION
+        checksum = (HELM_V4_SHA256 if self.helm_v4 else HELM_SHA256)[arch]
+        url = f"https://get.helm.sh/helm-{version}-linux-{arch}.tar.gz"
+        script = (
+            "set -eu; "
+            'tmp=$(mktemp -d); trap \'rm -rf "$tmp"\' EXIT; cd "$tmp"; '
+            f"curl -fsSL --retry 3 -o helm.tgz {url} "
+            f"|| {{ echo 'could not download {url}' >&2; exit 1; }}; "
+            # Compared by hand: `sha256sum -c --status` is GNU-only.
+            f'[ "$(sha256sum helm.tgz | cut -d" " -f1)" = {checksum} ] '
+            "|| { echo 'checksum mismatch: refusing to install' >&2; exit 1; }; "
+            "tar -xzf helm.tgz; "
+            f"install -m 0755 linux-{arch}/helm {TOOL_BIN_DIR}/helm"
+        )
+        self._run(node, script)
+        print(f"[rke2] helm: installed {version} at {TOOL_BIN_DIR}/helm (sha256 verified)")
+
+    def _runs_here(self, node: RKE2Node) -> bool:
+        """Whether `node` is the machine this SDK is running on.
+
+        `_is_local` only recognises loopback, but on a control-plane node
+        the operator names it by its real address — which still routes
+        over SSH to itself. So this also asks the interfaces.
+        """
+        if self._is_local(node):
+            return True
+        if node.address in (socket.gethostname(), socket.getfqdn()):
+            return True
+        try:
+            listing = subprocess.run(
+                ["ip", "-o", "addr", "show"],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=10,
+            ).stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        addresses = {
+            fields[3].split("/")[0]
+            for fields in (line.split() for line in listing.splitlines())
+            if len(fields) > 3
+        }
+        return node.address in addresses
+
+    def _link_default_kubeconfig(self, kubeconfig_path: str | None) -> None:
+        """Points `~/.kube/config` at the kubeconfig the SDK wrote.
+
+        A link, not a copy: one file, so the SDK and a bare `kubectl`
+        cannot drift apart, and a rebuilt cluster updates both. Never
+        replaces an existing file — that may be another cluster's
+        credentials — and says what to run instead.
+        """
+        if not kubeconfig_path:
+            return
+        target = os.path.abspath(os.path.expanduser(kubeconfig_path))
+        link = self.default_kubeconfig_path
+
+        if os.path.realpath(link) == os.path.realpath(target):
+            print(f"[rke2] kubeconfig: {link} already reads {target}")
+        elif os.path.lexists(link):
+            print(
+                f"[rke2] warning: {link} already exists and is not {target}, so "
+                "a bare kubectl/helm here may reach a different cluster than the "
+                f"SDK. Left untouched. To align: ln -sfn {target} {link}"
+            )
+        else:
+            os.makedirs(os.path.dirname(link), mode=0o700, exist_ok=True)
+            os.symlink(target, link)
+            print(f"[rke2] kubeconfig: linked {link} -> {target}")
+
+        # $KUBECONFIG outranks ~/.kube/config, so a stale export in the
+        # operator's shell would undo all of the above.
+        ambient = os.environ.get("KUBECONFIG")
+        if ambient and os.path.realpath(ambient) != os.path.realpath(target):
+            print(
+                f"[rke2] warning: KUBECONFIG is set to {ambient}, which a bare "
+                f"kubectl reads instead of {link}. Unset it, or set it to {target}."
+            )
+
+    def _unlink_kubectl(self, node: RKE2Node) -> None:
+        """Removes the `kubectl` link `_link_kubectl` made — and only that.
+        Best-effort, like the rest of a teardown."""
+        link = f"{TOOL_BIN_DIR}/kubectl"
+        try:
+            self._run(
+                node,
+                f'[ -L {link} ] && [ "$(readlink {link})" = {RKE2_BIN_DIR}/kubectl ] '
+                f"&& rm -f {link}; true",
+                check=False,
+            )
+        except Exception as exc:  # unreachable host, etc.
+            print(f"[rke2] warning: couldn't remove {link} on {node.address}: {exc}")
+
+    def _unlink_default_kubeconfig(self, kubeconfig_path: str | None) -> None:
+        """Removes `~/.kube/config` if it is the link to this cluster's
+        kubeconfig, so it isn't left dangling. Anything else is not ours."""
+        link = self.default_kubeconfig_path
+        if not kubeconfig_path or not os.path.islink(link):
+            return
+        target = os.path.abspath(os.path.expanduser(kubeconfig_path))
+        if os.readlink(link) == target:
+            os.remove(link)
+            print(f"[rke2] removed {link} (linked to the deleted cluster's kubeconfig)")
