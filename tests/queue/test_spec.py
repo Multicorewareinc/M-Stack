@@ -24,6 +24,7 @@ def test_it_declares_cluster_and_storage() -> None:
 def test_from_stack_wires_kubeconfig_and_storage_class() -> None:
     assert Queue.FROM_STACK == {
         "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
         "storage_class": "storage_class",
     }
 

@@ -41,6 +41,7 @@ class OrganizationControlPlaneOptions(BaseModel):
 class ControlPlane(CapabilitySpec):
     type: str = "admin"                 # "admin" or "organization"
     kubeconfig_path: str                # required -- the EXISTING cluster
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     namespace: Optional[str] = None
     options: Optional[ControlPlaneOptions] = None   # auto-filled from `type`: AdminControlPlaneOptions or OrganizationControlPlaneOptions
 

@@ -28,6 +28,7 @@ class ValkeyOptions(BaseModel):
 class Cache(CapabilitySpec):
     type: str = "valkey"        # the only implementation today
     kubeconfig_path: str        # required -- the EXISTING cluster this installs onto
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     name: str                   # required -- identifies the Helm release
     namespace: Optional[str] = None    # None => the implementation's default, "valkey"
     options: Optional[ValkeyOptions] = None   # filled in automatically to match `type`

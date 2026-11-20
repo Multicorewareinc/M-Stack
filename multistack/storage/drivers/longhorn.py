@@ -25,8 +25,9 @@ from typing import List, Optional
 from ..spec import Storage
 from ..base import StorageError, StoragePrerequisiteError
 from ...backends.transport import NodeCommandMixin
-from ...kube import require_cli, run_local
+from ...kube import apply, kubectl, require_cli, run_local
 from ...helm import HelmRunner
+from ...servicemonitor import apply_monitors, service_monitor_manifest
 
 # Binaries Longhorn's node components shell out to.
 REQUIRED_BINARIES = ["bash", "curl", "findmnt", "grep", "awk", "blkid", "lsblk"]
@@ -384,7 +385,69 @@ class LonghornDriver(NodeCommandMixin):
 
         storage_class = self._verify_storage_class(storage)
         print(f"[longhorn] ready — StorageClass '{storage_class}' available")
+        self.apply_monitors(storage)
         return storage_class
+
+    def apply_monitors(self, storage: Storage) -> bool:
+        """A ServiceMonitor for longhorn-manager's metrics (the
+        `longhorn-backend` Service, port `manager`) -- Longhorn's documented
+        Prometheus integration.
+
+        Applied as its own object rather than the chart's
+        `metrics.serviceMonitor`: storage installs *before* the
+        observability stack (whose PVCs it provides), so the CRD never
+        exists at chart install time in a fresh build. create() skips this
+        until it does; calling it afterwards adds the monitor without
+        another helm upgrade.
+        """
+        applied = apply_monitors(
+            storage.kubeconfig_path,
+            [service_monitor_manifest(
+                "longhorn-manager", storage.resolved_namespace, {"app": "longhorn-manager"},
+                port="manager", interval="30s", extra_labels=storage.service_monitor_labels,
+            )],
+            storage.service_monitor_labels, log_prefix="longhorn", error_cls=StorageError,
+        )
+        if applied:
+            self._allow_prometheus(storage)
+        return applied
+
+    def _allow_prometheus(self, storage: Storage) -> None:
+        """Lets Prometheus through Longhorn's own NetworkPolicy, if it has one.
+
+        Longhorn's chart can install a `longhorn-manager` NetworkPolicy that
+        admits only Longhorn's own pods, which leaves the ServiceMonitor's
+        target timing out (seen on a live cluster). NetworkPolicies are
+        additive, so this adds a second one admitting Prometheus pods (the
+        Operator labels them `app.kubernetes.io/name: prometheus`, in
+        whichever namespace) on the manager port. Only when Longhorn's policy
+        exists: on pods no policy selects, adding one would *isolate* them
+        and cut off everything else.
+        """
+        namespace = storage.resolved_namespace
+        existing = kubectl(
+            storage.kubeconfig_path, "get", "networkpolicy", "longhorn-manager",
+            "-n", namespace, "-o", "name", check=False, error_cls=StorageError,
+        )
+        if not (existing or "").strip():
+            return
+        apply(storage.kubeconfig_path, {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {"name": "longhorn-manager-prometheus", "namespace": namespace},
+            "spec": {
+                "podSelector": {"matchLabels": {"app": "longhorn-manager"}},
+                "policyTypes": ["Ingress"],
+                "ingress": [{
+                    "from": [{
+                        "namespaceSelector": {},
+                        "podSelector": {"matchLabels": {"app.kubernetes.io/name": "prometheus"}},
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 9500}],
+                }],
+            },
+        }, error_cls=StorageError)
+        print("[longhorn] Prometheus allowed through the longhorn-manager NetworkPolicy")
 
     def delete(self, storage: Storage) -> None:
         """

@@ -55,6 +55,11 @@ class StorageBackend(CapabilityBackend):
     def delete(self, storage: Storage) -> None:
         return self.driver_for(storage).delete(storage)
 
+    def apply_monitors(self, storage: Storage) -> bool:
+        """Adds the Prometheus monitors create() skipped because the
+        observability stack (and its CRDs) came after this capability."""
+        return self.driver_for(storage).apply_monitors(storage)
+
     # -- claims ----------------------------------------------------------
     # Not driver methods. A PersistentVolumeClaim is a Kubernetes object
     # that names a StorageClass, and every block-storage implementation

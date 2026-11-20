@@ -99,6 +99,7 @@ class Queue(CapabilitySpec):
 
     FROM_STACK: ClassVar[Dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
         "storage_class": "storage_class",
     }
     # `event_backbone_url` is the key Gateway/Policy/Enricher/Billing
@@ -107,6 +108,11 @@ class Queue(CapabilitySpec):
 
     type: str = "nats"
     kubeconfig_path: str
+    # Labels for this capability's Prometheus monitor(s); must match the
+    # installed Prometheus's selector (`{"release": <Observability
+    # release_name>}` for kube-prometheus-stack). Empty => no monitor.
+    # Wired from the Stack; see multistack/servicemonitor/README.md.
+    service_monitor_labels: Dict[str, str] = Field(default_factory=dict)
     namespace: Optional[str] = None
     options: Optional[NatsQueueOptions] = None
 

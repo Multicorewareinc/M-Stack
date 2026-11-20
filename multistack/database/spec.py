@@ -181,6 +181,7 @@ class Database(CapabilitySpec):
 
     FROM_STACK: ClassVar[Dict[str, str]] = {
         "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
     }
 
     # What a consumer needs to reach the database. One key, like every
@@ -193,6 +194,11 @@ class Database(CapabilitySpec):
     type: str = "cnpg"
     kubeconfig_path: str
     options: Optional[CNPGOptions] = None
+    # Labels for this capability's Prometheus monitor(s); must match the
+    # installed Prometheus's selector (`{"release": <Observability
+    # release_name>}` for kube-prometheus-stack). Empty => no monitor.
+    # Wired from the Stack; see multistack/servicemonitor/README.md.
+    service_monitor_labels: Dict[str, str] = Field(default_factory=dict)
 
     # PostgreSQL Cluster configuration. These fields are optional so the
     # same model also drives operator-only lifecycle operations.

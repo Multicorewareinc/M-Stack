@@ -27,3 +27,8 @@ class IngressGatewayBackend(CapabilityBackend):
     @track_delete(name_of=lambda gateway: gateway.type)
     def delete(self, gateway: IngressGateway) -> None:
         return self.driver_for(gateway).delete(gateway)
+
+    def apply_monitors(self, gateway: IngressGateway) -> bool:
+        """Adds the Prometheus monitors create() skipped because the
+        observability stack (and its CRDs) came after this capability."""
+        return self.driver_for(gateway).apply_monitors(gateway)

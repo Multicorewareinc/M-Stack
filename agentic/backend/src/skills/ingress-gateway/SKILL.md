@@ -36,6 +36,7 @@ class MetalLBIstioOptions(BaseModel):
 class IngressGateway(BaseModel):
     type: str = "metallb_istio"
     kubeconfig_path: str             # required -- the EXISTING cluster this installs onto
+    service_monitor_labels: Dict[str, str] = {}  # Prometheus monitor labels (`{"release": <observability release_name>}`); empty = no monitor. Filled from the Stack once observability is composed -- never invent one
     options: Optional[MetalLBIstioOptions] = None   # auto-filled from `type` if left unset
 
     # LAN IP ranges MetalLB may hand to LoadBalancer Services. Required,

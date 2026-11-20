@@ -57,7 +57,10 @@ class IngressGateway(CapabilitySpec):
         "metallb_istio": MetalLBIstioOptions}
     REQUIRES: ClassVar[Tuple[str, ...]] = ("cluster",)
 
-    FROM_STACK: ClassVar[Dict[str, str]] = {"kubeconfig_path": "kubeconfig_path"}
+    FROM_STACK: ClassVar[Dict[str, str]] = {
+        "kubeconfig_path": "kubeconfig_path",
+        "service_monitor_labels": "service_monitor_labels",
+    }
     # Only known once MetalLB assigns it, so it is recorded onto the spec
     # by create() rather than computed as a property — see driver.create().
     PROVIDES: ClassVar[Dict[str, str]] = {
@@ -66,6 +69,11 @@ class IngressGateway(CapabilitySpec):
     type: str = "metallb_istio"
     kubeconfig_path: str
     options: Optional[MetalLBIstioOptions] = None
+    # Labels for this capability's Prometheus monitor(s); must match the
+    # installed Prometheus's selector (`{"release": <Observability
+    # release_name>}` for kube-prometheus-stack). Empty => no monitor.
+    # Wired from the Stack; see multistack/servicemonitor/README.md.
+    service_monitor_labels: Dict[str, str] = Field(default_factory=dict)
 
     # IP ranges MetalLB may hand to LoadBalancer Services, each either a
     # "start-end" range or a CIDR (MetalLB's own IPAddressPool syntax).
