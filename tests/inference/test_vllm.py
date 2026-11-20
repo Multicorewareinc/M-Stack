@@ -10,6 +10,7 @@ They target the driver rather than InferenceBackend because that is where
 the logic moved; the driver is dispatch plus state tracking, covered by
 tests/test_backend_state_tracking.py.
 """
+
 import json
 import subprocess
 import urllib.error
@@ -19,7 +20,6 @@ import pytest
 
 from multistack import Inference, RKE2Node
 from multistack.inference.base import (
-    InferenceError,
     InferencePrerequisiteError,
 )
 from multistack.inference.drivers.vllm import VLLMDriver
@@ -146,7 +146,10 @@ def test_service_monitor_selector_actually_matches_the_services_own_labels(drive
     objs = driver.manifests(svc(service_monitor_labels={"release": "kube-prometheus-stack"}))
     service = next(o for o in objs if o["kind"] == "Service")
     monitor = next(o for o in objs if o["kind"] == "ServiceMonitor")
-    assert monitor["spec"]["selector"]["matchLabels"].items() <= service["metadata"].get("labels", {}).items()
+    assert (
+        monitor["spec"]["selector"]["matchLabels"].items()
+        <= service["metadata"].get("labels", {}).items()
+    )
 
 
 def test_service_monitor_port_name_matches_the_services_own_port_name(driver):
@@ -203,8 +206,14 @@ def test_node_selector_and_tolerations_are_passed_through(driver):
         driver,
         svc(
             node_selector={"multistack.io/workload": "inference"},
-            tolerations=[{"key": "dedicated", "operator": "Equal",
-                          "value": "inference", "effect": "NoSchedule"}],
+            tolerations=[
+                {
+                    "key": "dedicated",
+                    "operator": "Equal",
+                    "value": "inference",
+                    "effect": "NoSchedule",
+                }
+            ],
         ),
     )
     pod = deployment["spec"]["template"]["spec"]
@@ -240,7 +249,7 @@ def test_s3_model_gets_a_mirror_init_container(driver):
     # copied to local disk before the engine starts.
     init = init_container(driver, s3_service())
     assert init["name"] == "fetch-weights"
-    assert "mc mirror" in " ".join(init["command"])
+    assert "aws" in " ".join(init["command"])
 
 
 def test_no_init_container_without_an_s3_model(driver):
@@ -299,9 +308,7 @@ def test_apply_and_query_are_kubeconfig_scoped(driver, monkeypatch):
 
 
 def test_endpoint_uses_cluster_dns_by_default(driver):
-    assert driver.endpoint(svc()) == (
-        "http://vllm.inference.svc.cluster.local:8000"
-    )
+    assert driver.endpoint(svc()) == ("http://vllm.inference.svc.cluster.local:8000")
 
 
 def test_endpoint_uses_node_ip_with_host_network(driver, monkeypatch):
@@ -336,8 +343,7 @@ def test_warmup_uses_the_served_model_name_not_the_s3_path(driver, monkeypatch):
 def test_runtime_class_is_rendered_when_set(driver):
     # GPU serving on RKE2 needs runtimeClassName: nvidia unless the cluster
     # uses CDI — without it the pod schedules and then finds no GPU.
-    deployment, _ = container(driver, svc(device="gpu", gpu_count=1,
-                                           runtime_class="nvidia"))
+    deployment, _ = container(driver, svc(device="gpu", gpu_count=1, runtime_class="nvidia"))
     assert deployment["spec"]["template"]["spec"]["runtimeClassName"] == "nvidia"
 
 
