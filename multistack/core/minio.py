@@ -14,12 +14,11 @@ the internet.
 """
 from __future__ import annotations
 
-import re
-import secrets
-import string
 from typing import ClassVar, Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ._quantity import _generate_credential, parse_quantity
 
 # Helm repo hosting both the operator and tenant charts. The chart
 # references below are resolved against the local alias, so the two have
@@ -31,30 +30,6 @@ DEFAULT_HELM_REPO_URL = "https://operator.min.io/"
 # MinIO erasure coding needs at least 4 drives across the tenant, which is
 # what makes a "distributed" tenant able to lose one and keep serving.
 MIN_DISTRIBUTED_DRIVES = 4
-
-# Kubernetes quantity suffixes, for comparing volume sizes without
-# pulling in a dependency just to parse "10Gi".
-_QUANTITY_UNITS = {
-    "": 1,
-    "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15,
-    "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50,
-}
-
-
-def parse_quantity(qty: str) -> int:
-    """Parse a Kubernetes resource quantity (e.g. '20Gi', '500M') into bytes."""
-    match = re.match(r"^([0-9.]+)\s*([A-Za-z]*)$", qty.strip())
-    if not match:
-        raise ValueError(f"Cannot parse Kubernetes quantity: {qty!r}")
-    value, unit = match.groups()
-    if unit not in _QUANTITY_UNITS:
-        raise ValueError(f"Unknown unit in Kubernetes quantity: {qty!r}")
-    return int(float(value) * _QUANTITY_UNITS[unit])
-
-
-def _generate_credential(length: int) -> str:
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 class MinIOTenant(BaseModel):
