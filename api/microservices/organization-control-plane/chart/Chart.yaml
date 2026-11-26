@@ -7,8 +7,8 @@ description: |
   one per org). Schema migrations run via Alembic through a
   pre-install/pre-upgrade Helm hook Job, ahead of the Deployment.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 keywords: [organization, control-plane, rbac, multi-tenant]
 home: https://github.com/Multicorewareinc/M-Stack
 sources:

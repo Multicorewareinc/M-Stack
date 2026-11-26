@@ -1,6 +1,12 @@
-# Root .dockerignore -- agentic/backend/Dockerfile is built with the repo
-# root as its context (it needs the sibling multistack/ package), so this
-# is the one Docker actually reads for that build.
+# Root .dockerignore -- the repo root is the build context for every image that
+# needs the sibling `multistack` SDK package: agentic/backend, and since ADR-033
+# the five event-pipeline services under api/microservices/ too. This is the one
+# Docker reads for all of them, so it has to keep the context small without
+# dropping anything a Dockerfile COPYs.
+#
+# Still required by some Dockerfile, do NOT add: pyproject.toml, README.md,
+# multistack/, agentic/backend/{requirements.txt,src,tests,pytest.ini},
+# api/microservices/*/{requirements.txt,src,alembic.ini,migrations,docker-entrypoint.sh}.
 .git/
 __pycache__/
 *.pyc
@@ -11,3 +17,24 @@ agentic/backend/.env
 .pytest_cache/
 *.md
 !README.md
+
+# --- context slimming (none of this is COPYd by any Dockerfile) ---
+# Front-ends and their dependency trees dwarf everything else here.
+ui/
+agentic/frontend/
+**/node_modules/
+**/dist/
+**/.vite/
+
+# Service tests are MOUNTED at run, never copied into the image (project.md).
+api/tests/
+
+# SDK test suite, examples and the generated/spec docs trees.
+tests/
+examples/
+docs/
+*/docs_/
+docs__/
+openspec/
+spec-docs.zip
+.github/

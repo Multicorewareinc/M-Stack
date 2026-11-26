@@ -1,29 +1,19 @@
-# tokenizer
-#
-# Stateless, no consumer, no state of its own -- unlike the rate
-# limiters, this is safe to run with more than one replica and to roll
-# with the default strategy.
-#
-# config.tokenizerDefault must name a backend the service actually
-# registers (only "cl100k_base" today). Get this wrong and the service
-# fails fast at startup (RuntimeError) rather than serving with a bad
-# default -- so a typo here surfaces as CrashLoopBackOff, not a wrong
-# token count downstream in rate-limiter-tpm.
-
 replicaCount: 2
 
 image:
-  repository: ghcr.io/multicorewareinc/tokenizer
+  repository: ghcr.io/multicorewareinc/m-stack/tokenizer
   tag: ""
+  # A sha256 digest, e.g. sha256:abc123... When set it REPLACES the tag,
+  # which is the only way to guarantee every node runs the same build --
+  # a re-pushed tag plus imagePullPolicy IfNotPresent otherwise leaves
+  # already-cached nodes on the old image indefinitely. Pin this for any
+  # deploy you would need to reproduce.
+  digest: ""
   pullPolicy: IfNotPresent
 
-# GHCR packages are private by default, so a pull needs credentials.
-# Named by convention rather than passed through every spec: the
-# Secret is namespace-scoped and created alongside the release (see
-# docs/publishing.md). Set it to [] for a public package or a
-# mirror that needs no auth.
 imagePullSecrets:
   - name: ghcr-creds
+
 nameOverride: ""
 fullnameOverride: ""
 
@@ -31,11 +21,8 @@ service:
   type: ClusterIP
   port: 8000
 
-# Must match the port the image's uvicorn command binds (8000).
 containerPort: 8000
 
-# --- configuration -> ConfigMap -> envFrom ------------------------------
-# Nothing here is a credential: no Secret object exists for this chart.
 config:
   logLevel: INFO
   tokenizerDefault: cl100k_base
@@ -59,17 +46,66 @@ probes:
 
 metrics:
   scrapeAnnotations: true
+  # A ServiceMonitor for the Prometheus Operator. Off by default because it
+  # needs the operator's CRDs installed -- with them absent the object is
+  # rejected at apply time, so this refuses at template time instead, with
+  # a message rather than an "unknown kind" from the API server. The
+  # scrapeAnnotations above are the CRD-free path and stay independent of
+  # this.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Extra labels, e.g. the `release: kube-prometheus-stack` many operator
+    # installs select ServiceMonitors on.
+    labels: {}
 
-podSecurityContext: {}
+# Runs as the non-root uid the Dockerfiles create (10001), which is what
+# lets these pods clear Pod Security Standards "restricted". runAsUser is
+# repeated here rather than left to the image so the guarantee is visible
+# in the manifest and survives an image rebuild that forgets its USER.
+#
+# Group 0 matches the Dockerfile: /app stays root-owned and group-readable,
+# so nothing needs a recursive chown at build time.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 0
+  fsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
+  # Nothing here writes to its image at runtime -- verified by running each
+  # image with a read-only root and no tmpfs. /tmp is mounted as an
+  # emptyDir by the Deployment when this is true, so a library that spools
+  # a temp file still works while the image itself stays immutable.
+  readOnlyRootFilesystem: true
   capabilities:
-    drop: ["ALL"]
-  # runAsNonRoot/runAsUser unset: the image has no non-root user yet.
+    drop:
+      - ALL
 
 # Keeps pods off the control plane, which nothing else enforces.
+# podAntiAffinity is preferred, not required: on a single-node cluster a
+# required rule would leave the second replica Pending forever, and a chart
+# that only works on a multi-node cluster is worse than one that degrades
+# to co-located pods. Where there is more than one eligible node the
+# scheduler honours it -- which is what stops replicaCount 2 from being two
+# pods on one node, i.e. no redundancy against the very failure a second
+# replica exists for.
+#
+# The selector matches on chart name alone: values.yaml cannot see
+# .Release.Name, and repelling other releases of the same chart is the
+# behaviour you want here anyway.
 affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: tokenizer
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
@@ -80,3 +116,30 @@ affinity:
 nodeSelector: {}
 tolerations: []
 podAnnotations: {}
+
+# A ServiceAccount of this release's own, bound to no Role. None of these
+# services call the Kubernetes API, so the token is never mounted (see
+# serviceaccount.yaml) -- this exists to stop the pods inheriting whatever
+# the namespace's shared "default" SA has been granted.
+serviceAccount:
+  create: true
+  # Empty => <release>-<chart>. Set a name to reuse an existing account.
+  name: ""
+  annotations: {}
+
+# A voluntary-disruption floor, so a node drain or cluster upgrade cannot
+# take every replica at once. minAvailable 1 with replicaCount 2 lets one
+# pod move at a time.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Enabling it with an EMPTY allowedIngress denies all
+# ingress to this service, so set the callers at the same time.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort. Its callers are:
+  #   - app.kubernetes.io/name: enricher            # usage estimation
+  allowedIngress: []

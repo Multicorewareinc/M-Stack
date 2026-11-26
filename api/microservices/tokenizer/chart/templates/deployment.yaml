@@ -2,21 +2,18 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "tokenizer.fullname" . }}
-  labels: {{- include "tokenizer.labels" . | nindent 4 }}
+  labels:
+    {{- include "tokenizer.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
-    matchLabels: {{- include "tokenizer.selectorLabels" . | nindent 6 }}
+    matchLabels:
+      {{- include "tokenizer.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "tokenizer.selectorLabels" . | nindent 8 }}
+      labels:
+        {{- include "tokenizer.selectorLabels" . | nindent 8 }}
       annotations:
-        {{/*
-        Roll the pods when config changes. Without this, editing a value
-        rewrites the ConfigMap and the running pods keep the old env
-        until something unrelated restarts them -- which reads as "the
-        setting did not work".
-        */}}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- if .Values.metrics.scrapeAnnotations }}
         prometheus.io/scrape: "true"
@@ -27,18 +24,27 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      serviceAccountName: {{ include "tokenizer.serviceAccountName" . }}
+      {{/*
+      No Kubernetes API token in the pod: nothing here calls the API, so
+      mounting one only hands an attacker a credential after an RCE.
+      */}}
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
-      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.podSecurityContext }}
-      securityContext: {{- toYaml . | nindent 8 }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: tokenizer
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "tokenizer.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
-          securityContext: {{- toYaml . | nindent 12 }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
             - name: http
@@ -48,24 +54,50 @@ spec:
             - configMapRef:
                 name: {{ include "tokenizer.fullname" . }}
           livenessProbe:
-            httpGet: {path: /health, port: http}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
-            httpGet: {path: /health, port: http}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           {{- with .Values.resources }}
-          resources: {{- toYaml . | nindent 12 }}
+          resources:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if (.Values.securityContext | default dict).readOnlyRootFilesystem }}
+          {{/*
+          The only writable path the container gets. readOnlyRootFilesystem
+          makes everything else immutable at runtime, which is the point --
+          nothing here writes to disk in normal operation, so anything that
+          suddenly does is either a library spooling a temp file or an
+          attacker. An emptyDir keeps the former working and the latter
+          non-persistent across a restart.
+          */}}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+      {{- if (.Values.securityContext | default dict).readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
       {{- with .Values.nodeSelector }}
-      nodeSelector: {{- toYaml . | nindent 8 }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
-      affinity: {{- toYaml . | nindent 8 }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.tolerations }}
-      tolerations: {{- toYaml . | nindent 8 }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
       {{- end }}

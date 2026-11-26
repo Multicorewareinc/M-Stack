@@ -2,26 +2,24 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "billing.fullname" . }}
-  labels: {{- include "billing.labels" . | nindent 4 }}
+  labels:
+    {{- include "billing.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   {{- with .Values.strategy }}
-  strategy: {{- toYaml . | nindent 4 }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
   {{- end }}
   selector:
-    matchLabels: {{- include "billing.selectorLabels" . | nindent 6 }}
+    matchLabels:
+      {{- include "billing.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "billing.selectorLabels" . | nindent 8 }}
+      labels:
+        {{- include "billing.selectorLabels" . | nindent 8 }}
       annotations:
-        {{/*
-        Roll the pods when config changes. Without this, editing a value
-        rewrites the ConfigMap/Secret and the running pods keep the old
-        env until something unrelated restarts them -- which reads as
-        "the setting did not work".
-        */}}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- if and .Values.secret.create (not .Values.secret.existingSecret) }}
+        {{- if .Values.secret.create }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
         {{- if .Values.metrics.scrapeAnnotations }}
@@ -33,18 +31,27 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      serviceAccountName: {{ include "billing.serviceAccountName" . }}
+      {{/*
+      No Kubernetes API token in the pod: nothing here calls the API, so
+      mounting one only hands an attacker a credential after an RCE.
+      */}}
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
-      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.podSecurityContext }}
-      securityContext: {{- toYaml . | nindent 8 }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: billing
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "billing.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
-          securityContext: {{- toYaml . | nindent 12 }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
             - name: http
@@ -55,25 +62,67 @@ spec:
                 name: {{ include "billing.fullname" . }}
             - secretRef:
                 name: {{ include "billing.secretName" . }}
-          livenessProbe:
+          {{- if ((.Values.probes | default dict).startup | default dict).enabled }}
+          {{/*
+          The image's entrypoint runs `alembic upgrade head` before uvicorn
+          binds, so /health does not answer until migrations finish. Without
+          a startupProbe the liveness probe owns that window -- roughly 35s
+          at the defaults below it -- and a migration slower than that (a
+          cold database, a large table, a first install) gets the container
+          SIGKILLed and restarted, which re-runs the migration and loops.
+          A startupProbe suspends liveness until it first succeeds, so slow
+          startup and "wedged after startup" stop being the same signal.
+          */}}
+          startupProbe:
             httpGet: {path: /health, port: http}
+            periodSeconds: {{ ((.Values.probes | default dict).startup | default dict).periodSeconds | default 5 }}
+            failureThreshold: {{ ((.Values.probes | default dict).startup | default dict).failureThreshold | default 30 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
-            httpGet: {path: /health, port: http}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           {{- with .Values.resources }}
-          resources: {{- toYaml . | nindent 12 }}
+          resources:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if (.Values.securityContext | default dict).readOnlyRootFilesystem }}
+          {{/*
+          The only writable path the container gets. readOnlyRootFilesystem
+          makes everything else immutable at runtime, which is the point --
+          nothing here writes to disk in normal operation, so anything that
+          suddenly does is either a library spooling a temp file or an
+          attacker. An emptyDir keeps the former working and the latter
+          non-persistent across a restart.
+          */}}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+      {{- if (.Values.securityContext | default dict).readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
       {{- with .Values.nodeSelector }}
-      nodeSelector: {{- toYaml . | nindent 8 }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
-      affinity: {{- toYaml . | nindent 8 }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.tolerations }}
-      tolerations: {{- toYaml . | nindent 8 }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
       {{- end }}

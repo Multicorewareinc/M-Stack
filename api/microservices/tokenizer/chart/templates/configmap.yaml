@@ -1,8 +1,12 @@
+{{- if ne .Values.config.tokenizerDefault "cl100k_base" }}
+{{- fail "config.tokenizerDefault must name a tokenizer registered by this image; currently only cl100k_base is available" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "tokenizer.fullname" . }}
-  labels: {{- include "tokenizer.labels" . | nindent 4 }}
+  labels:
+    {{- include "tokenizer.labels" . | nindent 4 }}
 data:
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
-  TOKENIZER_DEFAULT: {{ required "config.tokenizerDefault is required -- an empty default fails the service at startup" .Values.config.tokenizerDefault | quote }}
+  TOKENIZER_DEFAULT: {{ required "config.tokenizerDefault is required" .Values.config.tokenizerDefault | quote }}

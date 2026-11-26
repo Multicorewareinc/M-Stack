@@ -1,0 +1,21 @@
+{{- if (.Values.networkPolicy | default dict).enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "billing.fullname" . }}
+  labels: {{- include "billing.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "billing.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.allowedIngress }}
+        - podSelector:
+            matchLabels: {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.containerPort }}
+{{- end }}

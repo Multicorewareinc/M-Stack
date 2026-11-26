@@ -19,6 +19,9 @@ BLACK   ?= black
 MYPY    ?= mypy
 
 DOCKER  ?= docker
+BUILDX ?= 0
+CACHE_ENABLED ?= 0
+PUSH_TO_GHCR ?= false
 KUBECTL ?= kubectl
 HELM    ?= helm
 HELM_ARGS ?=
@@ -53,12 +56,36 @@ TEST_ALL_ARGS ?=
 SERVICE_DIR ?= $(if $(SERVICE),$(API_DIR)/$(SERVICE),$(API_DIR))
 CHECK_DIR   ?= $(SERVICE_DIR)/app $(SERVICE_DIR)/tests
 TYPECHECK_DIR ?= $(SERVICE_DIR)/app
+E2E_PROJECT ?= multistack-e2e
+E2E_COMPOSE_FILE ?= api/tests/manual-test/docker-compose.full.yml
+E2E_RESULTS_DIR ?= test-results
 
 NAMESPACE ?= multistack
 
 # Image/chart registry root — the service name is appended per-command.
-REGISTRY ?= ghcr.io/multicorewareinc/m-stack
-CHART_REGISTRY ?= oci://ghcr.io/multicorewareinc/m-stack/charts
+# Owner is derived from the repo, never hardcoded: GITHUB_REPOSITORY_OWNER
+# in CI, otherwise the origin remote. This is what makes the same Makefile
+# resolve to the right owner for whatever repo it runs in -- for example
+# ghcr.io/multicorewareinc/m-stack in M-Stack, with nothing to edit per repo.
+GH_REPO ?= $(shell \
+	if [ -n "$$GITHUB_REPOSITORY" ]; then echo "$${GITHUB_REPOSITORY##*/}"; \
+	else basename "$$(git config --get remote.origin.url 2>/dev/null)" .git; fi \
+	| tr '[:upper:]' '[:lower:]')
+ifeq ($(strip $(GH_REPO)),)
+GH_REPO := m-stack
+endif
+
+GH_OWNER ?= $(shell \
+	if [ -n "$$GITHUB_REPOSITORY_OWNER" ]; then echo "$$GITHUB_REPOSITORY_OWNER"; \
+	else git config --get remote.origin.url 2>/dev/null; fi \
+	| sed -E 's,^(git@|https://|ssh://git@)github\.com[:/]+([^/]+)/.*,\2,' \
+	| tr '[:upper:]' '[:lower:]')
+ifeq ($(strip $(GH_OWNER)),)
+GH_OWNER := multicorewareinc
+endif
+
+REGISTRY ?= ghcr.io/$(GH_OWNER)/$(GH_REPO)
+CHART_REGISTRY ?= oci://ghcr.io/$(GH_OWNER)/$(GH_REPO)/charts
 TAG      ?= latest
 
 
@@ -102,14 +129,22 @@ SERVICES := \
 	organization-control-plane \
 	rate-limiter-rpm \
 	rate-limiter-tpm \
-	stripe-service \
+	rag \
 	tokenizer
 
-SERVICE_CONTEXT_mock-upstream := api/tests/model-gateway/e2e/mock-upstream
+# The two SPAs. Not in SERVICES: they are not under $(API_DIR), and their
+# build context is the ui/ workspace root rather than their own directory,
+# because each depends on the @multistack/ui workspace package. Nothing
+# built these until now -- the images in GHCR were pushed by hand, and by
+# 2026-10-09 were three weeks older than the UI they served.
+PORTALS := \
+	admin-portal \
+	organization-portal
 
-define service_context
-$(if $(SERVICE_CONTEXT_$(1)),$(SERVICE_CONTEXT_$(1)),$(API_DIR)/$(1))
-endef
+UI_DIR ?= ui
+
+DOCKER_SERVICES := $(SERVICES) $(PORTALS)
+ROOT_CONTEXT_SERVICES := billing enricher model-gateway rate-limiter-rpm rate-limiter-tpm
 
 # Which services have a Helm chart (skip the rest in chart-* targets).
 SERVICES_WITH_CHART := $(shell for s in $(SERVICES); do \
@@ -142,8 +177,8 @@ github-variables:
 	else \
 		VERSION="$${GITHUB_SHA:0:7}"; \
 	fi; \
-	OWNER=$$(echo "$${GITHUB_REPOSITORY_OWNER:-multicorewareinc}" | tr '[:upper:]' '[:lower:]'); \
-	REPO_NAME=$${GITHUB_REPOSITORY##*/}; \
+	OWNER="$(GH_OWNER)"; \
+	REPO_NAME="$(GH_REPO)"; \
 	REPO_NAME=$${REPO_NAME:-m-stack}; \
 	echo "version=$$VERSION"; \
 	echo "python_version=$${PYTHON_VERSION:-3.11}"; \
@@ -206,6 +241,7 @@ help:
 	@echo "  make chart-push SERVICE=<name>"
 	@echo ""
 	@echo "Kubernetes:"
+	@echo "  make deploy-infrastructure Deploy PostgreSQL, then NATS"
 	@echo "  make deploy               Deploy all services with Helm"
 	@echo "  make deploy SERVICE=<name>"
 	@echo "  make status               Show pod status"
@@ -214,6 +250,7 @@ help:
 	@echo "  make restart SERVICE=<name>"
 	@echo "  make rollout-status SERVICE=<name>"
 	@echo "  make delete SERVICE=<name>"
+	@echo "  make delete-e2e-apps     Remove E2E application releases only"
 	@echo ""
 	@echo "RKE2 Provisioning:"
 	@echo "  make provision            Full end-to-end: setup + create + kubeconfig + verify"
@@ -393,6 +430,17 @@ ci-gate:
 	@echo "All microservice CI checks passed."
 
 
+# Lint the complete SDK and all Python microservices
+.PHONY: lint-sdk
+lint-sdk:
+	$(RUFF) check multistack/ examples/ tests/ api/microservices/
+
+# If you want formatting checks for the same scope, add:
+.PHONY: format-check-sdk
+format-check-sdk:
+	$(RUFF) format --check multistack/ examples/ tests/ api/microservices/
+# 	$(BLACK) --check multistack/ examples/ tests/ api/microservices/
+
 # ============================================================
 # Tests
 # ============================================================
@@ -415,43 +463,135 @@ test-helm:
 	@mkdir -p test-results
 	$(PYTEST) tests/test_charts.py -v $(TEST_ALL_ARGS)
 
+# ============================================================
+# End-to-end checks
+# ============================================================
+
+# .PHONY: api-full
+
+# api-full:
+# 	@set -e; \
+# 		mkdir -p "$(E2E_RESULTS_DIR)/api"; \
+# 		trap '$(DOCKER) compose -p "$(E2E_PROJECT)" -f "$(E2E_COMPOSE_FILE)" logs --no-color > "$(E2E_RESULTS_DIR)/api/compose.log" || true; $(DOCKER) compose -p "$(E2E_PROJECT)" -f "$(E2E_COMPOSE_FILE)" down -v --remove-orphans || true' EXIT; \
+# 		$(DOCKER) compose -p "$(E2E_PROJECT)" -f "$(E2E_COMPOSE_FILE)" up -d --build \
+# 			mock-upstream redis nats admin-postgres org-postgres tokenizer \
+# 			rate-limiter-rpm rate-limiter-tpm admin-control-plane \
+# 			organization-control-plane seed-admin seed-api-key gateway; \
+# 		$(DOCKER) run --rm --network host \
+# 			-v "$(CURDIR)/api/tests/manual-test/postman_collection.json:/etc/newman/collection.json:ro" \
+# 			-v "$(CURDIR)/$(E2E_RESULTS_DIR)/api:/etc/newman/results" \
+# 			postman/newman:alpine run /etc/newman/collection.json \
+# 			--reporters cli,junit \
+# 			--reporter-junit-export /etc/newman/results/newman-results.xml
+
+.PHONY: api-e2e-ci
+api-e2e-ci:
+	cd api/tests/ci && npm ci && bash run-ci.sh
+
+.PHONY: agentic-back
+
+agentic-back:
+	@mkdir -p "$(E2E_RESULTS_DIR)"
+	cd agentic/backend && $(PYTHON) -m pytest -q --junitxml=../../$(E2E_RESULTS_DIR)/agentic-junit.xml
+
+
+.PHONY: agentic-front
+
+agentic-front:
+	cd agentic/frontend && npm ci && npm run build
+
+
+.PHONY: ui-admin
+
+ui-admin:
+	cd ui && npm ci && npx playwright install --with-deps chromium && npm --workspace admin-portal run test:e2e
+
+
+.PHONY: ui-organization
+
+ui-organization:
+	cd ui && npm ci && npx playwright install --with-deps chromium && npm --workspace organization-portal run test:e2e
+
+
+.PHONY: e2e
+
+e2e: api-e2e-ci agentic-back agentic-front ui-admin ui-organization
 
 # ============================================================
 # Docker
 # ------------------------------------------------------------
 # Image path: $(REGISTRY)/<service>:$(TAG)
-#   e.g. ghcr.io/multicorewareinc/m-stack/billing:latest
+#   Covers $(SERVICES) plus $(PORTALS). Most services build from their own
+#   directory; SDK-dependent services use the repository root, and portals
+#   build from the ui/ workspace root with -f.
+#   e.g. ghcr.io/<owner>/<repo>/billing:latest  (derived, see GH_OWNER/GH_REPO)
 # ============================================================
 
 .PHONY: docker-build
 docker-build:
-	@if [ -n "$(SERVICE)" ]; then \
-		echo "Building Docker image for $(SERVICE)..."; \
-		$(DOCKER) build \
-			-t $(REGISTRY)/$(SERVICE):$(TAG) \
-			$(call service_context,$(SERVICE)); \
+	@set -eu; \
+	if [ -n "$(SERVICE)" ]; then \
+		services="$(SERVICE)"; \
 	else \
-		for service in $(SERVICES); do \
-			context="$(API_DIR)/$$service"; \
-			[ -d "$$context" ] || { echo "skip $$service (no dir)"; continue; }; \
-			echo ""; \
-			echo "========================================="; \
-			echo "Building $$service"; \
-			echo "========================================="; \
+		services="$(DOCKER_SERVICES)"; \
+	fi; \
+	for service in $$services; do \
+		if [ -f "$(API_DIR)/$$service/Dockerfile" ]; then \
+			dockerfile="$(API_DIR)/$$service/Dockerfile"; \
+			case " $(ROOT_CONTEXT_SERVICES) " in \
+				*" $$service "*) context="." ;; \
+				*) context="$(API_DIR)/$$service" ;; \
+			esac; \
+		elif [ -f "$(UI_DIR)/$$service/Dockerfile" ]; then \
+			context="$(UI_DIR)"; \
+			dockerfile="$(UI_DIR)/$$service/Dockerfile"; \
+		else \
+			if [ -n "$(SERVICE)" ]; then \
+				echo "ERROR: no Dockerfile found for $$service under $(API_DIR) or $(UI_DIR)" >&2; \
+				exit 1; \
+			fi; \
+			echo "Skipping $$service (no Dockerfile)"; \
+			continue; \
+		fi; \
+		image="$(REGISTRY)/$$service:$(TAG)"; \
+		echo "Building $$image (context=$$context, dockerfile=$$dockerfile)"; \
+		if [ "$(BUILDX)" = "1" ]; then \
+			output_args=(--load); \
+			if [ "$(PUSH_TO_GHCR)" = "true" ]; then output_args=(--push); fi; \
+			cache_args=(); \
+			if [ "$(CACHE_ENABLED)" = "1" ]; then \
+				cache_args=( \
+					--cache-from "type=gha,scope=$$service" \
+					--cache-to "type=gha,scope=$$service,mode=max" \
+				); \
+			fi; \
+			$(DOCKER) buildx build \
+				"$${cache_args[@]}" \
+				"$${output_args[@]}" \
+				-f "$$dockerfile" \
+				-t "$$image" \
+				"$$context"; \
+		else \
 			$(DOCKER) build \
-				-t $(REGISTRY)/$$service:$(TAG) \
-				$$context; \
-		done; \
-	fi
+				-f "$$dockerfile" \
+				-t "$$image" \
+				"$$context"; \
+		fi; \
+	done
 
 .PHONY: docker-push
 docker-push:
-	@if [ -n "$(SERVICE)" ]; then \
+	@set -e; \
+	if [ -n "$(SERVICE)" ]; then \
 		$(DOCKER) push $(REGISTRY)/$(SERVICE):$(TAG); \
 	else \
 		for service in $(SERVICES); do \
 			echo "Pushing $$service..."; \
 			$(DOCKER) push $(REGISTRY)/$$service:$(TAG); \
+		done; \
+		for portal in $(PORTALS); do \
+			echo "Pushing $$portal..."; \
+			$(DOCKER) push $(REGISTRY)/$$portal:$(TAG); \
 		done; \
 	fi
 
@@ -466,7 +606,7 @@ docker-login:
 # ------------------------------------------------------------
 # Only services with chart/Chart.yaml are packaged.
 # Pushes to: oci://$(CHART_REGISTRY)
-#   e.g. oci://ghcr.io/multicorewareinc/m-stack/charts/billing
+#   e.g. oci://ghcr.io/<owner>/<repo>/charts/billing  (derived)
 # ============================================================
 
 .PHONY: chart-package
@@ -505,7 +645,7 @@ chart-push: chart-package
 # ============================================================
 
 .PHONY: deploy
-deploy:
+deploy: deploy-infrastructure
 	@if [ -n "$(SERVICE)" ]; then \
 		chart="$(API_DIR)/$(SERVICE)/chart"; \
 		[ -f "$$chart/Chart.yaml" ] || { echo "ERROR: no chart for $(SERVICE)"; exit 1; }; \
@@ -514,6 +654,7 @@ deploy:
 			$(SERVICE) "$$chart" \
 			-n $(NAMESPACE) \
 			--create-namespace \
+			--set-string image.repository="$(REGISTRY)/$(SERVICE)" \
 			$(HELM_ARGS); \
 	else \
 		for service in $(SERVICES_WITH_CHART); do \
@@ -525,9 +666,24 @@ deploy:
 				$$service "$(API_DIR)/$$service/chart" \
 				-n $(NAMESPACE) \
 				--create-namespace \
+				--set-string image.repository="$(REGISTRY)/$$service" \
 				$(HELM_ARGS); \
 		done; \
 	fi
+
+.PHONY: deploy-infrastructure
+deploy-infrastructure:
+	@if [ -z "$$CNPG_PASSWORD" ]; then \
+		echo "ERROR: CNPG_PASSWORD is required to create the PostgreSQL cluster"; exit 1; \
+	fi
+	@if [ ! -f "$(MULTISTACK_KUBECONF)" ]; then \
+		echo "ERROR: kubeconfig missing at $(MULTISTACK_KUBECONF)"; exit 1; \
+	fi
+	KUBECONFIG="$(MULTISTACK_KUBECONF)" $(KUBECTL) get storageclass longhorn >/dev/null
+	KUBECONFIG="$(MULTISTACK_KUBECONF)" MULTISTACK_KUBECONFIG="$(MULTISTACK_KUBECONF)" PYTHONPATH="$(CURDIR):$(CURDIR)/multistack:$$PYTHONPATH" $(PYTHON) examples/database/create_operator.py
+	KUBECONFIG="$(MULTISTACK_KUBECONF)" MULTISTACK_KUBECONFIG="$(MULTISTACK_KUBECONF)" CNPG_PASSWORD="$$CNPG_PASSWORD" PYTHONPATH="$(CURDIR):$(CURDIR)/multistack:$$PYTHONPATH" $(PYTHON) examples/database/create_pgcluster.py
+	KUBECONFIG="$(MULTISTACK_KUBECONF)" $(KUBECTL) wait --for=jsonpath='{.status.phase}'='Cluster in healthy state' cluster/$${MULTISTACK_CNPG_NAME:-cnpg-test} -n $${MULTISTACK_CNPG_NS:-postgres} --timeout=20m
+	KUBECONFIG="$(MULTISTACK_KUBECONF)" MULTISTACK_KUBECONFIG="$(MULTISTACK_KUBECONF)" PYTHONPATH="$(CURDIR):$(CURDIR)/multistack:$$PYTHONPATH" $(PYTHON) examples/nats/deploy_nats.py
 
 
 .PHONY: cluster-info
@@ -536,16 +692,16 @@ cluster-info:
 	$(KUBECTL) cluster-info
 
 
-.PHONY: docker-smoke
-docker-smoke:
-	$(DOCKER) run --rm \
-		-e STRIPE_SECRET_KEY=sk_test_placeholder \
-		-e STRIPE_WEBHOOK_SECRET=whsec_placeholder \
-		-e ENABLE_STRIPE_CLI=false \
-		-e ENVIRONMENT=test \
-		-e DEBUG=false \
-		$(REGISTRY)/$(or $(SERVICE),stripe-service):$(TAG) \
-		python -c "import app.main; print('image import ok')"
+# .PHONY: docker-smoke
+# docker-smoke:
+# 	$(DOCKER) run --rm \
+# 		-e STRIPE_SECRET_KEY=sk_test_placeholder \
+# 		-e STRIPE_WEBHOOK_SECRET=whsec_placeholder \
+# 		-e ENABLE_STRIPE_CLI=false \
+# 		-e ENVIRONMENT=test \
+# 		-e DEBUG=false \
+# 		$(REGISTRY)/$(or $(SERVICE),stripe-service):$(TAG) \
+# 		python -c "import app.main; print('image import ok')"
 
 
 .PHONY: health-check
@@ -645,6 +801,15 @@ delete:
 			$(HELM) uninstall $$service -n $(NAMESPACE) || true; \
 		done; \
 	fi
+
+.PHONY: delete-e2e-apps
+delete-e2e-apps:
+	@set -e; \
+	for service in admin-control-plane organization-control-plane model-gateway rate-limiter-rpm rate-limiter-tpm tokenizer billing enricher; do \
+		echo "Removing application release $$service from $(NAMESPACE)..."; \
+		KUBECONFIG="$(MULTISTACK_KUBECONF)" $(HELM) uninstall "$$service" \
+			--namespace "$(NAMESPACE)" --ignore-not-found; \
+	done
 
 
 # ============================================================
