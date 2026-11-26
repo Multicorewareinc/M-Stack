@@ -17,7 +17,14 @@ RUN npm run build
 
 # No credentials, no DB access, no dev dependencies in the final image —
 # only the static build output served by nginx (blueprint §164, §166).
-FROM nginx:1.27-alpine AS serve
+#
+# nginx-unprivileged, not stock nginx: it already runs as uid 101 with its
+# cache, log and pid paths owned by that uid, so the chart can set
+# runAsNonRoot and clear Pod Security Standards "restricted". Stock nginx
+# starts its master as root to bind :80, which no securityContext can
+# undo. The trade is the listen port -- unprivileged cannot bind <1024, so
+# this serves 8080 and the chart's containerPort matches.
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS serve
 COPY --from=build /workspace/organization-portal/dist /usr/share/nginx/html
 COPY organization-portal/nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+EXPOSE 8080

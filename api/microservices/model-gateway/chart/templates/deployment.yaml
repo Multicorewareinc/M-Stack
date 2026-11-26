@@ -2,21 +2,18 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "model-gateway.fullname" . }}
-  labels: {{- include "model-gateway.labels" . | nindent 4 }}
+  labels:
+    {{- include "model-gateway.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
-    matchLabels: {{- include "model-gateway.selectorLabels" . | nindent 6 }}
+    matchLabels:
+      {{- include "model-gateway.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "model-gateway.selectorLabels" . | nindent 8 }}
+      labels:
+        {{- include "model-gateway.selectorLabels" . | nindent 8 }}
       annotations:
-        {{/*
-        Roll the pods when config changes. Without this, editing a value
-        rewrites the ConfigMap and the running pods keep the old env
-        until something unrelated restarts them -- which reads as "the
-        setting did not work".
-        */}}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- if and .Values.secret.create (not .Values.secret.existingSecret) }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
@@ -30,18 +27,35 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      serviceAccountName: {{ include "model-gateway.serviceAccountName" . }}
+      {{/*
+      No Kubernetes API token in the pod: nothing here calls the API, so
+      mounting one only hands an attacker a credential after an RCE.
+      */}}
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
-      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.podSecurityContext }}
-      securityContext: {{- toYaml . | nindent 8 }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{/*
+      Longer than config.requestTimeout, or a rollout cuts requests that
+      were still legitimately in flight: an inference call is allowed 60s,
+      and Kubernetes' default grace is 30. SIGTERM goes out at t=0 and
+      SIGKILL at this deadline, so this has to cover preStop plus the
+      longest request the gateway will wait on.
+      */}}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 75 }}
       containers:
         - name: model-gateway
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "model-gateway.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
-          securityContext: {{- toYaml . | nindent 12 }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
             - name: http
@@ -53,24 +67,64 @@ spec:
             - secretRef:
                 name: {{ include "model-gateway.secretName" . }}
           livenessProbe:
-            httpGet: {path: /health, port: http}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
-            httpGet: {path: /health, port: http}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
-          {{- with .Values.resources }}
-          resources: {{- toYaml . | nindent 12 }}
+          {{- if .Values.preStopSleepSeconds }}
+          {{/*
+          Endpoint removal and SIGTERM race: kube-proxy/ingress learn this
+          pod is going away asynchronously, so uvicorn can stop accepting
+          before the last caller has stopped being routed here -- which
+          shows up as connection-refused on a perfectly healthy rollout.
+          Sleeping in preStop delays SIGTERM (not the endpoint removal)
+          long enough for that propagation to finish.
+          */}}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.preStopSleepSeconds | default 5 }}"]
           {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if (.Values.securityContext | default dict).readOnlyRootFilesystem }}
+          {{/*
+          The only writable path the container gets. readOnlyRootFilesystem
+          makes everything else immutable at runtime, which is the point --
+          nothing here writes to disk in normal operation, so anything that
+          suddenly does is either a library spooling a temp file or an
+          attacker. An emptyDir keeps the former working and the latter
+          non-persistent across a restart.
+          */}}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+      {{- if (.Values.securityContext | default dict).readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
       {{- with .Values.nodeSelector }}
-      nodeSelector: {{- toYaml . | nindent 8 }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
-      affinity: {{- toYaml . | nindent 8 }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.tolerations }}
-      tolerations: {{- toYaml . | nindent 8 }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
       {{- end }}

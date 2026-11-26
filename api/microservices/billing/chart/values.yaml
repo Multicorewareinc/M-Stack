@@ -1,55 +1,7 @@
-# billing
-#
-# Four things worth knowing before you set values:
-#
-#   1. DATABASE_URL, SERVICE_API_KEY, STRIPE_SECRET_KEY and
-#      STRIPE_WEBHOOK_SECRET are all credentials and all live in the
-#      Secret, never the ConfigMap.
-#
-#   2. This service MUST consume the ENRICHED stream
-#      (GATEWAY_EVENTS_ENRICHED / gateway.events.enriched), never the
-#      raw gateway stream -- the app itself enforces this with a
-#      fail-fast RuntimeError at startup if EVENT_STREAM_NAME/SUBJECT
-#      don't match exactly, before any DB engine or consumer is built.
-#      Because there is only one correct value, this chart does not
-#      expose them as configurable at all -- they're hardcoded in the
-#      ConfigMap template. If you're wiring this up, point config.events
-#      .backboneUrl at the same NATS the `enricher` service publishes
-#      to; the stream/subject names take care of themselves.
-#
-#   3. SERVICE_API_KEY must be the exact same value configured on
-#      admin-control-plane's chart -- it's the outbound bearer admin-cp
-#      reuses to notify this service of org/plan changes
-#      (BILLING_INTERNAL_URL), a third participant in the same
-#      shared-secret chain as admin-cp <-> org-cp's SERVICE_API_KEY.
-#      This chart cannot see admin-cp's release; keeping them in sync is
-#      on you.
-#
-#   4. STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are both genuinely,
-#      deliberately optional. Unset means the Stripe reporter and the
-#      webhook endpoint are both fully inert (zero Stripe calls, zero
-#      outbox mutations; the webhook route 501s without reading the
-#      request body) -- not a broken deploy, a valid "usage metering
-#      only, no Stripe integration yet" configuration. No install-time
-#      guard exists for either, unlike the other secrets here.
-#
-# The Stripe CLI auto-forwarder (ENABLE_STRIPE_CLI) is dev-only -- "never
-# enable this in a deployed environment" per the service's own
-# .env.example -- so this chart does not expose it at all.
-
 replicaCount: 1
 
-# maxSurge 0, for the same reason rate-limiter-rpm's chart has this: the
-# metering consumer is a *push* consumer (src/consumer.py calls
-# js.subscribe with a durable name), and JetStream allows only one
-# subscription bound to a durable at a time. The default RollingUpdate
-# starts the new pod before terminating the old one, so the new pod's
-# subscribe races the old one's still-live subscription and loses --
-# "billing_consumer_durable_conflict" in the logs, the pod stays Ready,
-# and metering silently stops until the next restart. maxSurge 0 costs a
-# gap in consumption during an upgrade (bounded by JetStream's own
-# redelivery once the new pod does bind), which is the correct direction
-# to fail for a metering pipeline.
+# The billing consumer binds one durable push consumer. Avoid a surge pod
+# competing for the same durable during an upgrade.
 strategy:
   type: RollingUpdate
   rollingUpdate:
@@ -57,13 +9,16 @@ strategy:
     maxUnavailable: 1
 
 image:
-  repository: ghcr.io/multicorewareinc/billing
+  repository: ghcr.io/multicorewareinc/m-stack/billing
   tag: ""
+  # A sha256 digest, e.g. sha256:abc123... When set it REPLACES the tag,
+  # which is the only way to guarantee every node runs the same build --
+  # a re-pushed tag plus imagePullPolicy IfNotPresent otherwise leaves
+  # already-cached nodes on the old image indefinitely. Pin this for any
+  # deploy you would need to reproduce.
+  digest: ""
   pullPolicy: IfNotPresent
 
-# Secret is namespace-scoped and created alongside the release (see
-# docs/publishing.md). Set it to [] for a public package or a
-# mirror that needs no auth.
 imagePullSecrets:
   - name: ghcr-creds
 
@@ -74,23 +29,20 @@ service:
   type: ClusterIP
   port: 8000
 
-# Must match the port the image's uvicorn command binds (8000).
 containerPort: 8000
 
-# --- non-secret configuration -> ConfigMap -> envFrom ------------------
 config:
   logLevel: INFO
 
+  queue:
+    backend: nats
+
   events:
-    # nats://<nats-service>:4222. Empty => no consumer, no metering.
+    # Set the credential-free broker URL here even when a Secret overrides
+    # EVENT_BACKBONE_URL with an authenticated URL.
     backboneUrl: ""
     durableName: billing-metering
 
-  # Set true only to deploy deliberately without a backbone -- a
-  # service that meters nothing and never drains its outbox, which is
-  # useful for standing up the DB/API surface before NATS exists.
-  # Without this the install refuses, because "deployed and metering
-  # nothing" otherwise looks identical to "deployed and working".
   allowNoBackbone: false
 
   stripe:
@@ -104,38 +56,16 @@ config:
     backoffBaseSeconds: 30
     backoffMaxSeconds: 3600
 
-# --- secret configuration -----------------------------------------------
 secret:
-  # A Secret you created, holding DATABASE_URL, SERVICE_API_KEY, and
-  # optionally STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET. This is the
-  # intended path for anything past local work.
   existingSecret: ""
-
-  # Local work only: create the Secret from the values below. They then
-  # sit in your values file and in `helm get values`, readable by anyone
-  # with release access.
   create: false
-
-  # postgresql+asyncpg://<user>:<pass>@<host>:5432/billing_service
-  databaseUrl: ""
-
-  # Shared with admin-control-plane's SERVICE_API_KEY -- see note 3
-  # above. No safe default; an unset value fails this endpoint closed
-  # (500) on first use rather than silently accepting any bearer.
+  allowInsecureDefaults: false
+  databaseUrl_billing: ""
   serviceApiKey: ""
-
-  # Optional -- see note 4 above. Leave empty to run usage metering
-  # without Stripe reporting.
   stripeSecretKey: ""
   stripeWebhookSecret: ""
+  eventBackboneUrl: ""
 
-  # The service's own .env.example ships no default for SERVICE_API_KEY
-  # at all (an unset value already fails closed), so the only thing this
-  # guards is an accidentally-empty value on a Secret this chart creates
-  # itself.
-  allowInsecureDefaults: false
-
-# The pre-install/pre-upgrade migration Job.
 migration:
   activeDeadlineSeconds: 120
   backoffLimit: 2
@@ -147,9 +77,15 @@ resources:
   limits:
     memory: 256Mi
 
-# /health serves both probes -- it does not touch Postgres or Stripe, so
-# readiness cannot flap on transient trouble in either.
 probes:
+  # Covers the migrate-then-serve window in the entrypoint. failureThreshold
+  # x periodSeconds is the budget (default 30 x 5 = 150s) before the pod is
+  # declared failed to start; liveness only begins after this first
+  # succeeds.
+  startup:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 30
   liveness:
     initialDelaySeconds: 5
     periodSeconds: 10
@@ -161,18 +97,45 @@ probes:
 
 metrics:
   scrapeAnnotations: true
+  # A ServiceMonitor for the Prometheus Operator. Off by default because it
+  # needs the operator's CRDs installed -- with them absent the object is
+  # rejected at apply time, so this refuses at template time instead, with
+  # a message rather than an "unknown kind" from the API server. The
+  # scrapeAnnotations above are the CRD-free path and stay independent of
+  # this.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Extra labels, e.g. the `release: kube-prometheus-stack` many operator
+    # installs select ServiceMonitors on.
+    labels: {}
 
-podSecurityContext: {}
+# Runs as the non-root uid the Dockerfiles create (10001), which is what
+# lets these pods clear Pod Security Standards "restricted". runAsUser is
+# repeated here rather than left to the image so the guarantee is visible
+# in the manifest and survives an image rebuild that forgets its USER.
+#
+# Group 0 matches the Dockerfile: /app stays root-owned and group-readable,
+# so nothing needs a recursive chown at build time.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 0
+  fsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
+  # Nothing here writes to its image at runtime -- verified by running each
+  # image with a read-only root and no tmpfs. /tmp is mounted as an
+  # emptyDir by the Deployment when this is true, so a library that spools
+  # a temp file still works while the image itself stays immutable.
+  readOnlyRootFilesystem: true
   capabilities:
-    drop: ["ALL"]
-  # runAsNonRoot/runAsUser are deliberately unset: the image builds on
-  # python:3.12-slim with no non-root user created, so enabling them
-  # without first rebuilding the image gives a pod that cannot start.
+    drop:
+      - ALL
 
-# Keeps pods off the control plane, which nothing else enforces.
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -184,3 +147,33 @@ affinity:
 nodeSelector: {}
 tolerations: []
 podAnnotations: {}
+
+# A ServiceAccount of this release's own, bound to no Role. None of these
+# services call the Kubernetes API, so the token is never mounted (see
+# serviceaccount.yaml) -- this exists to stop the pods inheriting whatever
+# the namespace's shared "default" SA has been granted.
+serviceAccount:
+  create: true
+  # Empty => <release>-<chart>. Set a name to reuse an existing account.
+  name: ""
+  annotations: {}
+
+# Off deliberately. This workload runs a single replica on purpose (see
+# replicaCount above), and a PDB over one pod cannot both keep it up and
+# let a node drain: minAvailable 1 would block the drain indefinitely,
+# which is worse than the brief gap a drain already costs here. Enable it
+# only alongside a replicaCount above 1.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Enabling it with an EMPTY allowedIngress denies all
+# ingress to this service, so set the callers at the same time.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort. Its callers are:
+  #   - app.kubernetes.io/name: admin-control-plane  # subscription linkage
+  #   - app.kubernetes.io/name: organization-control-plane  # usage proxy
+  allowedIngress: []

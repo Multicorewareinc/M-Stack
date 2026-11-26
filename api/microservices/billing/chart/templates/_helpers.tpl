@@ -1,13 +1,7 @@
-{{/* Chart name, overridable. */}}
 {{- define "billing.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{/*
-Fully-qualified name. Release-scoped, so two releases in one namespace do
-not collide -- except when the release is already named after the chart,
-where "platform-billing" would just be noise.
-*/}}
 {{- define "billing.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
@@ -21,6 +15,11 @@ where "platform-billing" would just be noise.
 {{- end -}}
 {{- end -}}
 
+{{- define "billing.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "billing.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
 {{- define "billing.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{ include "billing.selectorLabels" . }}
@@ -29,22 +28,42 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: platformforge-api
 {{- end -}}
 
-{{- define "billing.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "billing.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-{{- end -}}
-
-{{/*
-The Secret holding DATABASE_URL, SERVICE_API_KEY, and optionally
-STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET. All are credentials:
-DATABASE_URL embeds the DB user/password, SERVICE_API_KEY is a bearer
-token shared with admin-control-plane, and the Stripe values are live
-API credentials when set.
-*/}}
 {{- define "billing.secretName" -}}
 {{- if .Values.secret.existingSecret -}}
 {{- .Values.secret.existingSecret -}}
-{{- else -}}
+{{- else if .Values.secret.create -}}
 {{- include "billing.fullname" . -}}
+{{- else -}}
+{{- fail "billing requires secret.existingSecret or secret.create=true; the Secret must contain DATABASE_URL_BILLING" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The ServiceAccount this release's pods run as. A dedicated one rather than
+"default": the default SA is shared by everything in the namespace, so any
+RoleBinding granted to it silently applies here too. This one is bound to
+nothing, which is the point -- none of these services call the Kubernetes
+API.
+*/}}
+{{- define "billing.serviceAccountName" -}}
+{{- $sa := .Values.serviceAccount | default dict -}}
+{{- if or (not (hasKey $sa "create")) $sa.create -}}
+{{- default (include "billing.fullname" .) ($sa.name | default "") -}}
+{{- else -}}
+{{- default "default" ($sa.name | default "") -}}
+{{- end -}}
+{{- end -}}
+{{/*
+The image reference. A digest wins over a tag when both are set: a tag is
+mutable, so "0.1.0" on one node can be a different build from "0.1.0" on
+another after a re-push, and with imagePullPolicy IfNotPresent a node that
+already cached it never finds out. A digest is the only form that names
+one specific build.
+*/}}
+{{- define "billing.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end -}}
 {{- end -}}

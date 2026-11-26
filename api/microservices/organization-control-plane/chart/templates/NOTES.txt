@@ -19,7 +19,7 @@ Check it:
 Using the existing Secret {{ .Values.secret.existingSecret }}. This chart never
 reads its contents, so check it carries every key:
 
-    DATABASE_URL
+    DATABASE_URL_ORG
     SERVICE_API_KEY
     VALKEY_URL
     JWT_SECRET

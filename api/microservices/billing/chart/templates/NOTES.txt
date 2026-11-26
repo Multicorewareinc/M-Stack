@@ -1,41 +1,35 @@
 {{ include "billing.fullname" . }} is deployed.
 
-Migrations ran via the {{ include "billing.fullname" . }}-migrate
-Job before this Deployment was touched. If this install/upgrade
-succeeded, the schema is at head.
+The pre-install/pre-upgrade migration Job must complete before the application Deployment
+is updated. It runs `alembic upgrade head` using the database URL from the Secret.
 
-{{ if .Values.config.events.backboneUrl -}}
-Metering from: {{ .Values.config.events.backboneUrl }}
-  stream GATEWAY_EVENTS_ENRICHED, subject gateway.events.enriched, durable {{ .Values.config.events.durableName }}
-{{- else -}}
-NOT METERING. No event backbone, so no consumer runs and the outbox
-never fills. You set config.allowNoBackbone=true, so this is
-deliberate. Give it a backbone to start metering:
-
-  --set config.events.backboneUrl=nats://<nats-service>:4222
+Queue backend: {{ .Values.config.queue.backend }}
+{{- if .Values.config.events.backboneUrl }}
+Metering from the enriched stream:
+  stream GATEWAY_EVENTS_ENRICHED
+  subject gateway.events.enriched
+  durable {{ .Values.config.events.durableName }}
+Ensure the enriched stream and NACK consumer exist before relying on metering.
+{{- else }}
+No event backbone is configured; no usage will be metered.
 {{- end }}
 
-{{ if .Values.secret.stripeSecretKey -}}
-Stripe reporting: ENABLED (draining the outbox every {{ .Values.config.reporter.pollIntervalSeconds }}s)
-{{- else -}}
-Stripe reporting: INERT. STRIPE_SECRET_KEY is unset -- usage is still
-metered into the ledger, but nothing is reported to Stripe and outbox
-rows stay pending. This is a valid configuration, not a broken one.
+{{- if .Values.secret.existingSecret }}
+Stripe configuration is managed by the external Secret {{ .Values.secret.existingSecret }}.
+{{- else if .Values.secret.stripeSecretKey }}
+Stripe reporting is enabled.
+{{- else }}
+Stripe reporting is inert; usage remains in the ledger and outbox rows stay pending.
+{{- end }}
+{{- if .Values.secret.existingSecret }}
+Stripe webhook configuration is managed by the external Secret {{ .Values.secret.existingSecret }}.
+{{- else if .Values.secret.stripeWebhookSecret }}
+Stripe webhook verification is configured.
+{{- else }}
+Stripe webhooks are inert and return 501.
 {{- end }}
 
-{{ if .Values.secret.stripeWebhookSecret -}}
-Stripe webhooks: ENABLED at /webhooks/stripe
-{{- else -}}
-Stripe webhooks: INERT (STRIPE_WEBHOOK_SECRET unset) -- POST
-/webhooks/stripe returns 501 without reading the request body.
-{{- end }}
-
-Remember: SERVICE_API_KEY must match the value configured on
-admin-control-plane's release, or its best-effort subscription
-notifications on org creation / plan change will fail (logged, never
-blocking the org/plan operation itself).
-
-Check it:
+Check the service:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "billing.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
   curl -s localhost:{{ .Values.service.port }}/health
   curl -s localhost:{{ .Values.service.port }}/metrics

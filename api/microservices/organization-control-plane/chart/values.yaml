@@ -2,8 +2,8 @@
 #
 # Three things worth knowing before you set values:
 #
-#   1. DATABASE_URL and SERVICE_API_KEY are credentials and both live
-#      in the Secret, never the ConfigMap -- DATABASE_URL because it
+#   1. DATABASE_URL_ORG and SERVICE_API_KEY are credentials and both live
+#      in the Secret, never the ConfigMap -- DATABASE_URL_ORG because it
 #      embeds the DB user/password, SERVICE_API_KEY because it is a
 #      bearer token.
 #
@@ -28,17 +28,23 @@
 #
 # There is one Postgres database for every organization (logical
 # multi-tenant). This chart does not provision it -- it takes a
-# DATABASE_URL for a database that already exists, the same way this
+# DATABASE_URL_ORG for a database that already exists, the same way this
 # SDK's other stateful pieces are provisioned separately and referenced
 # by URL rather than bundled as a chart dependency.
 
 replicaCount: 2
 
 image:
-  repository: ghcr.io/multicorewareinc/organization-control-plane
+  repository: ghcr.io/multicorewareinc/m-stack/organization-control-plane
   # Empty => Chart.appVersion. Pin a digest or tag here for a real
   # deploy; `latest` gives you no way to know what is running.
   tag: ""
+  # A sha256 digest, e.g. sha256:abc123... When set it REPLACES the tag,
+  # which is the only way to guarantee every node runs the same build --
+  # a re-pushed tag plus imagePullPolicy IfNotPresent otherwise leaves
+  # already-cached nodes on the old image indefinitely. Pin this for any
+  # deploy you would need to reproduce.
+  digest: ""
   pullPolicy: IfNotPresent
 
 # GHCR packages are private by default, so a pull needs credentials.
@@ -68,6 +74,12 @@ config:
   adminCpInternalUrl: http://admin-control-plane:8000
   adminTimeoutMs: 3000
 
+  # e2e/CI ONLY. When non-empty, the service seeds one fixed verify API key (plus its org and active
+  # owner) on startup so the model-gateway's fixed test bearer resolves against a real row (src/seed.py).
+  # Leave empty for every real deployment -- it seeds a known, shared credential and must never be set
+  # in production. Only rendered into the ConfigMap when non-empty.
+  seedApiKey: ""
+
   # billing's internal API -- the usage read-through proxy
   # (add-org-cp-usage-proxy, GET /v1/usage/*). Empty renders no
   # BILLING_INTERNAL_URL at all, so the service falls back to its own
@@ -78,9 +90,30 @@ config:
   #   http://<billing-service>.<namespace>.svc.cluster.local:8000
   billingInternalUrl: ""
 
+  # Public URL of the Organization Portal, e.g. https://org.example.com. Invitation links are
+  # accepted there, and this is how the control plane builds the absolute link an admin copies and
+  # sends -- set it, or the Admin Portal has to guess the address. Empty = relative links only.
+  orgPortalBaseUrl: ""
+
+  # How long an invitation link stays valid, in hours (default 7 days).
+  invitationTtlHours: 168
+
+  # Email the invitation. Empty host = no email (the admin copies the link and sends it). Needs
+  # orgPortalBaseUrl above too, since the email carries an absolute link. The password is NOT here: put
+  # SMTP_PASSWORD in the Secret (secret.smtpPassword, or the key in your existingSecret).
+  smtp:
+    host: ""
+    port: 587
+    # starttls (port 587) | ssl (port 465) | none (a local relay or test mailbox only)
+    security: starttls
+    username: ""
+    fromAddress: ""
+    fromName: Multistack
+    timeoutSeconds: 10
+
 # --- secret configuration -----------------------------------------------
 secret:
-  # A Secret you created, holding DATABASE_URL, SERVICE_API_KEY,
+  # A Secret you created, holding DATABASE_URL_ORG, SERVICE_API_KEY,
   # VALKEY_URL and JWT_SECRET. This is the intended path for anything
   # past local work.
   #
@@ -94,7 +127,7 @@ secret:
   create: false
 
   # postgresql+asyncpg://<user>:<pass>@<host>:5432/org_control_plane
-  databaseUrl: ""
+  databaseUrl_org: ""
   serviceApiKey: ""
 
   # Bearer the model-gateway sends to GET /internal/v1/api-keys/verify --
@@ -131,6 +164,10 @@ secret:
   # the other issued.
   jwtSecret: ""
 
+  # Password for config.smtp.username. Optional; with an existingSecret, add an SMTP_PASSWORD key to it
+  # instead.
+  smtpPassword: ""
+
   # The service's own .env.example ships "change-me" as its default for
   # this key, so a forgotten override still boots -- wide open, not
   # broken. This chart refuses to install a Secret it creates itself
@@ -155,6 +192,14 @@ resources:
 # /health serves both probes -- it does not touch Postgres, so
 # readiness cannot flap on transient DB trouble.
 probes:
+  # Covers the migrate-then-serve window in the entrypoint. failureThreshold
+  # x periodSeconds is the budget (default 30 x 5 = 150s) before the pod is
+  # declared failed to start; liveness only begins after this first
+  # succeeds.
+  startup:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 30
   liveness:
     initialDelaySeconds: 5
     periodSeconds: 10
@@ -166,19 +211,65 @@ probes:
 
 metrics:
   scrapeAnnotations: true
+  # A ServiceMonitor for the Prometheus Operator. Off by default because it
+  # needs the operator's CRDs installed -- with them absent the object is
+  # rejected at apply time, so this refuses at template time instead, with
+  # a message rather than an "unknown kind" from the API server. The
+  # scrapeAnnotations above are the CRD-free path and stay independent of
+  # this.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Extra labels, e.g. the `release: kube-prometheus-stack` many operator
+    # installs select ServiceMonitors on.
+    labels: {}
 
-podSecurityContext: {}
+# Runs as the non-root uid the Dockerfiles create (10001), which is what
+# lets these pods clear Pod Security Standards "restricted". runAsUser is
+# repeated here rather than left to the image so the guarantee is visible
+# in the manifest and survives an image rebuild that forgets its USER.
+#
+# Group 0 matches the Dockerfile: /app stays root-owned and group-readable,
+# so nothing needs a recursive chown at build time.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 0
+  fsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
+  # Nothing here writes to its image at runtime -- verified by running each
+  # image with a read-only root and no tmpfs. /tmp is mounted as an
+  # emptyDir by the Deployment when this is true, so a library that spools
+  # a temp file still works while the image itself stays immutable.
+  readOnlyRootFilesystem: true
   capabilities:
     drop: ["ALL"]
-  # runAsNonRoot/runAsUser are deliberately unset: the image builds on
-  # python:3.12-slim with no non-root user created, so enabling them
-  # without first rebuilding the image gives a pod that cannot start.
 
 # Keeps pods off the control plane, which nothing else enforces.
+# podAntiAffinity is preferred, not required: on a single-node cluster a
+# required rule would leave the second replica Pending forever, and a chart
+# that only works on a multi-node cluster is worse than one that degrades
+# to co-located pods. Where there is more than one eligible node the
+# scheduler honours it -- which is what stops replicaCount 2 from being two
+# pods on one node, i.e. no redundancy against the very failure a second
+# replica exists for.
+#
+# The selector matches on chart name alone: values.yaml cannot see
+# .Release.Name, and repelling other releases of the same chart is the
+# behaviour you want here anyway.
 affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: organization-control-plane
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
@@ -189,3 +280,32 @@ affinity:
 nodeSelector: {}
 tolerations: []
 podAnnotations: {}
+
+# A ServiceAccount of this release's own, bound to no Role. None of these
+# services call the Kubernetes API, so the token is never mounted (see
+# serviceaccount.yaml) -- this exists to stop the pods inheriting whatever
+# the namespace's shared "default" SA has been granted.
+serviceAccount:
+  create: true
+  # Empty => <release>-<chart>. Set a name to reuse an existing account.
+  name: ""
+  annotations: {}
+
+# A voluntary-disruption floor, so a node drain or cluster upgrade cannot
+# take every replica at once. minAvailable 1 with replicaCount 2 lets one
+# pod move at a time.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Enabling it with an EMPTY allowedIngress denies all
+# ingress to this service, so set the callers at the same time.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort. Its callers are:
+  #   - app.kubernetes.io/name: admin-control-plane
+  #   - app.kubernetes.io/name: model-gateway       # api-key verify
+  #   - app.kubernetes.io/name: portal              # the portals' /v1 proxy
+  allowedIngress: []

@@ -9,6 +9,7 @@ on, a limits document the service cannot parse.
 Skipped when helm is not on PATH, the same way the pyhelm3 tests skip
 without the extra.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -17,7 +18,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
@@ -45,10 +46,23 @@ PORTAL_MIN = ["--set", "config.apiUpstream=http://org-cp.test.svc.cluster.local:
 
 # The minimum each chart needs to render at all. Each refuses to install
 # without a deliberate choice, which is itself asserted below.
-GATEWAY_MIN = ["--set", "secret.existingSecret=gw-keys",
-               "--set", "config.orgCpInternalUrl=http://org-cp:8000"]
-LIMITER_MIN = ["--set", "config.events.backboneUrl=nats://nats:4222"]
-TOKENIZER_MIN = ["--set", "config.tokenizerDefault=gpt2"]
+GATEWAY_MIN = [
+    "--set",
+    "secret.existingSecret=gw-keys",
+    "--set",
+    "config.orgCpInternalUrl=http://org-cp:8000",
+    "--set",
+    "config.upstreamUrl=http://upstream:8000",
+]
+LIMITER_MIN = [
+    "--set",
+    "secret.create=true",
+    "--set",
+    "config.events.backboneUrl=nats://nats:4222",
+    "--set",
+    "config.valkeyUrl=redis://valkey:6379/0",
+]
+TOKENIZER_MIN = ["--set", "config.tokenizerDefault=cl100k_base"]
 
 # The two control planes need two separate things, and which of them is
 # missing changes what should happen -- so they are kept apart here
@@ -64,21 +78,36 @@ ORG_CP_MIN = SECRET_SOURCE + ORG_CP_CONFIG
 # templates/secret.yaml, so a new one breaks this list rather than
 # silently rendering an empty value.
 CREATED_SECRET = [
-    "--set", "secret.create=true",
-    "--set", "secret.databaseUrl=postgresql://u:p@db:5432/x",
-    "--set", "secret.adminApiKey=a",
-    "--set", "secret.serviceApiKey=s",
-    "--set", "secret.valkeyUrl=redis://:p@valkey-primary.cache.svc:6379/1",
-    "--set", "secret.jwtSecret=j",
+    "--set",
+    "secret.create=true",
+    # One per chart; each control plane ignores the other's.
+    "--set",
+    "secret.databaseUrl_admin=postgresql://u:p@db:5432/x",
+    "--set",
+    "secret.databaseUrl_org=postgresql://u:p@db:5432/x",
+    "--set",
+    "secret.adminApiKey=a",
+    "--set",
+    "secret.serviceApiKey=s",
+    "--set",
+    "secret.valkeyUrl=redis://:p@valkey-primary.cache.svc:6379/1",
+    "--set",
+    "secret.jwtSecret=j",
     # organization-control-plane only; admin-control-plane's chart has no
     # such value and silently ignores it.
-    "--set", "secret.mgServiceApiKey=m",
+    "--set",
+    "secret.mgServiceApiKey=m",
 ]
 
-def without(setting: str) -> List[str]:
+
+def without(setting: str) -> list[str]:
     """CREATED_SECRET minus one `--set key=value` pair."""
-    kept: List[str] = []
-    for flag, assignment in zip(CREATED_SECRET[::2], CREATED_SECRET[1::2]):
+    kept: list[str] = []
+    for flag, assignment in zip(
+        CREATED_SECRET[::2],
+        CREATED_SECRET[1::2],
+        strict=True,
+    ):
         if not assignment.startswith(f"{setting}="):
             kept += [flag, assignment]
     return kept
@@ -92,10 +121,12 @@ CONTROL_PLANES = [
 ]
 
 
-def render(chart: Path, *extra: str) -> List[Dict[str, Any]]:
+def render(chart: Path, *extra: str) -> list[dict[str, Any]]:
     result = subprocess.run(
         ["helm", "template", "test", str(chart), *extra],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr
     return [d for d in yaml.safe_load_all(result.stdout) if d]
@@ -104,19 +135,21 @@ def render(chart: Path, *extra: str) -> List[Dict[str, Any]]:
 def render_error(chart: Path, *extra: str) -> str:
     result = subprocess.run(
         ["helm", "template", "test", str(chart), *extra],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert result.returncode != 0, "expected the render to be refused"
     return result.stderr
 
 
-def one(docs: List[Dict[str, Any]], kind: str) -> Dict[str, Any]:
+def one(docs: list[dict[str, Any]], kind: str) -> dict[str, Any]:
     found = [d for d in docs if d.get("kind") == kind]
     assert len(found) == 1, f"expected exactly one {kind}, got {len(found)}"
     return found[0]
 
 
-def container(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def container(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return one(docs, "Deployment")["spec"]["template"]["spec"]["containers"][0]
 
 
@@ -138,10 +171,12 @@ LIMITERS = [
 
 # -- both charts ----------------------------------------------------------
 @pytest.mark.parametrize("chart,minimum,port", CHARTS)
-def test_chart_lints(chart: Path, minimum: List[str], port: int):
+def test_chart_lints(chart: Path, minimum: list[str], port: int):
     result = subprocess.run(
         ["helm", "lint", str(chart), *minimum],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -151,13 +186,13 @@ def test_no_credential_key_lands_in_a_configmap(chart: Path, minimum, port):
     """A ConfigMap is readable by anyone with get on the namespace.
 
     API_KEY and UPSTREAM_API_KEY are credentials outright. MODEL_ROUTES
-    can carry a provider's api_key. RATE_LIMITS is keyed by principal,
+    can carry a provider's api_key. RPM_RATE_LIMITS/TPM_RATE_LIMITS are keyed by principal,
     and the gateway sets the principal to the caller's bearer token
     (model-gateway/src/dependencies.py) -- so a limits document with a
     user override contains that user's API key.
     """
     config = one(render(chart, *minimum), "ConfigMap")["data"]
-    for key in ("API_KEY", "UPSTREAM_API_KEY", "RATE_LIMITS"):
+    for key in ("API_KEY", "UPSTREAM_API_KEY", "RPM_RATE_LIMITS", "TPM_RATE_LIMITS"):
         assert key not in config, f"{key} must live in a Secret, not a ConfigMap"
 
 
@@ -181,24 +216,28 @@ def test_probes_hit_health_on_that_port(chart: Path, minimum, port):
     counting state would produce a crash loop instead of a diagnosis
     (ADR-016).
 
-    Readiness differs by service. rate-limiter-tpm has a /ready that
+    Readiness differs by service. Both rate limiters have a /ready that
     returns 503 when a backbone is configured and its consumer is not
     counting, so its chart probes that — a pod answering /check while
     counting nothing leaves the Service instead of under-enforcing
-    silently. The other two have no such endpoint yet, so /health is the
+    silently. The other services have no such endpoint yet, so /health is the
     honest choice there rather than a probe that cannot fail (API-2 in
     bugs.md).
     """
     spec = container(render(chart, *minimum))
     assert spec["livenessProbe"]["httpGet"] == {"path": "/health", "port": "http"}
 
-    readiness = "/ready" if chart.parent.name == "rate-limiter-tpm" else "/health"
+    readiness = (
+        "/ready" if chart.parent.name in {"rate-limiter-rpm", "rate-limiter-tpm"} else "/health"
+    )
     assert spec["readinessProbe"]["httpGet"] == {"path": readiness, "port": "http"}
 
 
 @pytest.mark.parametrize("chart,minimum,port", CHARTS)
 def test_a_readiness_path_the_service_does_not_serve_would_never_be_ready(
-    chart: Path, minimum, port,
+    chart: Path,
+    minimum,
+    port,
 ):
     """The probe path has to exist in the image, or every pod stays
     NotReady forever with a chart that renders perfectly.
@@ -225,11 +264,14 @@ def test_pods_are_kept_off_the_control_plane(chart: Path, minimum, port):
     """Nothing else enforces this. rke2-cp01 carries no taint, so a chart
     with no affinity can put a workload next to etcd."""
     pod = one(render(chart, *minimum), "Deployment")["spec"]["template"]["spec"]
-    terms = pod["affinity"]["nodeAffinity"][
-        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    terms = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
     expressions = [e for t in terms for e in t["matchExpressions"]]
-    assert {"key": "node-role.kubernetes.io/control-plane",
-            "operator": "DoesNotExist"} in expressions
+    assert {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "DoesNotExist",
+    } in expressions
 
 
 @pytest.mark.parametrize("chart,minimum,port", CHARTS)
@@ -243,7 +285,7 @@ def test_the_secret_is_applied_after_the_configmap(chart: Path, minimum, port):
     empty one added for symmetry would be worse than none -- so the
     order is asserted for the charts that have one.
     """
-    sources = [list(s)[0] for s in container(render(chart, *minimum))["envFrom"]]
+    sources = [next(iter(s)) for s in container(render(chart, *minimum))["envFrom"]]
 
     if "secretRef" not in sources:
         # tokenizer: its whole .env.example is LOG_LEVEL and a tokenizer
@@ -264,38 +306,58 @@ def test_changing_config_rolls_the_pods(chart: Path, minimum, port):
     after = one(render(chart, *minimum, "--set", "config.logLevel=DEBUG"), "Deployment")
     annotations = before["spec"]["template"]["metadata"]["annotations"]
     assert "checksum/config" in annotations
-    assert (annotations["checksum/config"]
-            != after["spec"]["template"]["metadata"]["annotations"]["checksum/config"])
+    assert (
+        annotations["checksum/config"]
+        != after["spec"]["template"]["metadata"]["annotations"]["checksum/config"]
+    )
 
 
 # -- model-gateway --------------------------------------------------------
 def test_gateway_refuses_to_deploy_without_an_api_key_source():
-    """The image defaults to the published key 'pf-local-dev-key', so a
-    gateway deployed with no Secret authenticates on a credential that
-    is in this repository."""
+    """The gateway must be given an explicit Secret for its org verifier key."""
     # Everything else it needs except the Secret source, so the refusal
     # can only be about that -- otherwise Helm's first template error
     # wins, and that is orgCpInternalUrl's, not this one's.
-    message = render_error(GATEWAY, "--set",
-                           "config.orgCpInternalUrl=http://org-cp:8000")
+    message = render_error(
+        GATEWAY,
+        "--set",
+        "config.orgCpInternalUrl=http://org-cp:8000",
+        "--set",
+        "config.upstreamUrl=http://upstream:8000",
+    )
     assert "secret.existingSecret" in message
     assert "secret.create=true" in message
-    assert "pf-local-dev-key" in message
+    assert "ORG_VERIFY_API_KEY" in message
 
 
 def test_gateway_creates_a_secret_only_when_asked():
-    docs = render(GATEWAY, "--set", "secret.create=true",
-                  "--set", "secret.apiKey=k",
-                  "--set", "secret.orgVerifyApiKey=o",
-                  "--set", "config.orgCpInternalUrl=http://org-cp:8000")
-    assert one(docs, "Secret")["stringData"]["API_KEY"] == "k"
+    docs = render(
+        GATEWAY,
+        "--set",
+        "secret.create=true",
+        "--set",
+        "secret.orgVerifyApiKey=o",
+        "--set",
+        "config.orgCpInternalUrl=http://org-cp:8000",
+        "--set",
+        "config.upstreamUrl=http://upstream:8000",
+    )
+    assert one(docs, "Secret")["stringData"]["ORG_VERIFY_API_KEY"] == "o"
 
     # An existing Secret wins, and nothing is created alongside it.
-    docs = render(GATEWAY, "--set", "secret.create=true",
-                  "--set", "secret.apiKey=k",
-                  "--set", "secret.orgVerifyApiKey=o",
-                  "--set", "config.orgCpInternalUrl=http://org-cp:8000",
-                  "--set", "secret.existingSecret=mine")
+    docs = render(
+        GATEWAY,
+        "--set",
+        "secret.create=true",
+        "--set",
+        "secret.orgVerifyApiKey=o",
+        "--set",
+        "config.orgCpInternalUrl=http://org-cp:8000",
+        "--set",
+        "config.upstreamUrl=http://upstream:8000",
+        "--set",
+        "secret.existingSecret=mine",
+    )
     assert not [d for d in docs if d["kind"] == "Secret"]
     assert container(docs)["envFrom"][1]["secretRef"]["name"] == "mine"
 
@@ -303,9 +365,14 @@ def test_gateway_creates_a_secret_only_when_asked():
 def test_gateway_policy_endpoints_join_into_one_variable():
     """The service reads POLICY_ENDPOINTS as a comma-separated string, so
     the list in values has to arrive as one."""
-    docs = render(GATEWAY, *GATEWAY_MIN,
-                  "--set", "config.policy.endpoints[0]=http://a:8000/check",
-                  "--set", "config.policy.endpoints[1]=http://b:8000/check")
+    docs = render(
+        GATEWAY,
+        *GATEWAY_MIN,
+        "--set",
+        "config.policy.endpoints[0]=http://a:8000/check",
+        "--set",
+        "config.policy.endpoints[1]=http://b:8000/check",
+    )
     config = one(docs, "ConfigMap")["data"]
     assert config["POLICY_ENDPOINTS"] == "http://a:8000/check,http://b:8000/check"
 
@@ -318,13 +385,21 @@ def test_limiter_refuses_to_deploy_with_nothing_counting():
     """Counting is asynchronous (ADR-013). With no backbone there is no
     consumer, the counters never advance, and /check allows everything --
     a limiter that is Ready and enforcing nothing."""
-    message = render_error(LIMITER)
+    message = render_error(LIMITER, "--set", "secret.create=true")
     assert "config.events.backboneUrl" in message
     assert "config.allowNoBackbone=true" in message
 
 
 def test_limiter_can_be_deployed_deliberately_without_a_backbone():
-    docs = render(LIMITER, "--set", "config.allowNoBackbone=true")
+    docs = render(
+        LIMITER,
+        "--set",
+        "secret.create=true",
+        "--set",
+        "config.allowNoBackbone=true",
+        "--set",
+        "config.valkeyUrl=redis://valkey:6379/0",
+    )
     assert one(docs, "ConfigMap")["data"]["EVENT_BACKBONE_URL"] == ""
 
 
@@ -332,31 +407,35 @@ def test_limiter_refuses_a_string_where_a_limits_map_belongs():
     """`--set secret.limits.userOverrides=vip-key=600` assigns a string,
     and it looks plausible. The service then calls dict() on it and
     raises on the first /check."""
-    message = render_error(LIMITER, *LIMITER_MIN,
-                           "--set", "secret.limits.userOverrides=vip=600")
+    message = render_error(LIMITER, *LIMITER_MIN, "--set", "secret.limits.userOverrides=vip=600")
     assert "must be a map" in message
     assert "secret.limits" in message
 
 
 def test_limiter_refuses_a_non_numeric_default():
-    message = render_error(LIMITER, *LIMITER_MIN,
-                           "--set", "secret.limits.userDefault=lots")
+    message = render_error(LIMITER, *LIMITER_MIN, "--set", "secret.limits.userDefault=lots")
     assert "must be a number" in message
 
 
 def test_the_rendered_limits_are_what_the_service_parses():
     """The strongest check available without deploying: take the
-    RATE_LIMITS the chart renders and hand it to the service's own
+    RPM_RATE_LIMITS the chart renders and hand it to the service's own
     Settings class. A document the service cannot read becomes {} inside
     it, so every scope silently goes unlimited -- there is no error to
     assert on at deploy time."""
     pytest.importorskip("pydantic_settings")
 
-    docs = render(LIMITER, *LIMITER_MIN,
-                  "--set", "secret.limits.userDefault=60",
-                  "--set", "secret.limits.modelOverrides.limited-model=3",
-                  "--set", "secret.limits.userModelOverrides.vip-key|gpt-4o=300")
-    rendered = one(docs, "Secret")["stringData"]["RATE_LIMITS"]
+    docs = render(
+        LIMITER,
+        *LIMITER_MIN,
+        "--set",
+        "secret.limits.userDefault=60",
+        "--set",
+        "secret.limits.modelOverrides.limited-model=3",
+        "--set",
+        "secret.limits.userModelOverrides.vip-key|gpt-4o=300",
+    )
+    rendered = one(docs, "Secret")["stringData"]["RPM_RATE_LIMITS"]
 
     # Loaded under its own module name: the service's src/ is flat, and
     # "settings" is a name several services use.
@@ -366,7 +445,7 @@ def test_the_rendered_limits_are_what_the_service_parses():
     sys.modules["_rpm_settings"] = module
     spec.loader.exec_module(module)
 
-    limits = module.Settings(rate_limits=rendered, _env_file=None).limits()
+    limits = module.Settings(rpm_rate_limits=rendered, _env_file=None).limits()
     assert limits.user_default == 60
     assert limits.model_overrides == {"limited-model": 3}
     assert limits.user_model_overrides == {"vip-key|gpt-4o": 300}
@@ -394,20 +473,31 @@ def test_a_limiter_refuses_to_install_without_a_backbone(chart: Path, kind: str)
     """The failure this guard exists for is invisible: no backbone means no
     consumer, the counters never advance, and /check allows everything
     while the pod stays Ready."""
-    assert "no event backbone configured" in render_error(chart)
+    message = render_error(chart, "--set", "secret.create=true")
+    assert "config.events.backboneUrl" in message
+    assert "config.allowNoBackbone=true" in message
     # ...unless the operator says so on purpose.
-    docs = render(chart, "--set", "config.allowNoBackbone=true")
+    docs = render(
+        chart,
+        "--set",
+        "secret.create=true",
+        "--set",
+        "config.allowNoBackbone=true",
+        "--set",
+        "config.valkeyUrl=redis://valkey:6379/0",
+    )
     assert one(docs, "ConfigMap")["data"]["EVENT_BACKBONE_URL"] == ""
 
 
 @pytest.mark.parametrize("chart,kind", LIMITERS)
 def test_the_limits_document_is_never_in_a_configmap(chart: Path, kind: str):
-    """user_overrides is keyed by bearer token, so RATE_LIMITS is a
-    credential whichever limiter holds it."""
-    docs = render(chart, "--set", "config.events.backboneUrl=nats://nats:4222",
-                  "--set", "secret.limits.userDefault=100")
-    assert "RATE_LIMITS" not in one(docs, "ConfigMap")["data"]
-    assert "RATE_LIMITS" in one(docs, "Secret")["stringData"]
+    """user_overrides is keyed by bearer token, so the limits document
+    (RPM_RATE_LIMITS / TPM_RATE_LIMITS) is a credential whichever limiter
+    holds it."""
+    docs = render(chart, *LIMITER_MIN, "--set", "secret.limits.userDefault=100")
+    key = f"{kind.upper()}_RATE_LIMITS"
+    assert key not in one(docs, "ConfigMap")["data"]
+    assert key in one(docs, "Secret")["stringData"]
 
 
 @pytest.mark.parametrize("chart,kind", LIMITERS)
@@ -416,8 +506,9 @@ def test_each_limiter_has_its_own_durable(chart: Path, kind: str):
     the only thing giving each an independent cursor — share one and they
     split the stream, so each sees about half the events and both
     under-count with no error."""
-    docs = render(chart, "--set", "config.events.backboneUrl=nats://nats:4222")
-    assert one(docs, "ConfigMap")["data"]["EVENT_DURABLE_NAME"] == f"{kind}-counter"
+    docs = render(chart, *LIMITER_MIN)
+    expected = "tpm-counter-enriched" if kind == "tpm" else "rpm-counter"
+    assert one(docs, "ConfigMap")["data"]["EVENT_DURABLE_NAME"] == expected
 
 
 # -- rate-limiter-tpm only ------------------------------------------------
@@ -426,31 +517,29 @@ def test_tpm_refuses_rpms_durable():
     and no error on either side."""
     error = render_error(
         TPM_LIMITER,
-        "--set", "config.events.backboneUrl=nats://nats:4222",
-        "--set", "config.events.durableName=rpm-counter",
+        *LIMITER_MIN,
+        "--set",
+        "config.events.durableName=rpm-counter",
     )
-    assert "rpm-counter" in error and "under-count" in error
+    assert "different durable consumers" in error
+    assert "tpm-counter-enriched" in error
 
 
-def test_tpm_carries_the_tokenizer_fallback_settings():
-    """Empty is valid — it makes the fallback inert, so events with no
-    usage block are skipped rather than estimated. The value still has to
-    reach the container, or configuring it later does nothing."""
+def test_tpm_consumes_enriched_events_without_a_tokenizer_dependency():
+    """The enricher normalizes token usage before TPM consumes events."""
     docs = render(TPM_LIMITER, *LIMITER_MIN)
     data = one(docs, "ConfigMap")["data"]
-    assert data["TOKENIZER_URL"] == ""
-    assert data["TOKENIZER_TIMEOUT_MS"] == "2000"
-
-    docs = render(TPM_LIMITER, *LIMITER_MIN,
-                  "--set", "config.tokenizer.url=http://tokenizer:8000/tokenize")
-    assert one(docs, "ConfigMap")["data"]["TOKENIZER_URL"] == \
-        "http://tokenizer:8000/tokenize"
+    assert data["EVENT_STREAM_NAME"] == "GATEWAY_EVENTS_ENRICHED"
+    assert data["EVENT_STREAM_SUBJECT"] == "gateway.events.enriched"
+    assert "TOKENIZER_URL" not in data
+    assert "TOKENIZER_TIMEOUT_MS" not in data
 
 
 # -- the two control planes -----------------------------------------------
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_a_control_plane_refuses_to_deploy_with_no_secret_source(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """Both charts default to secret.create=false and existingSecret="",
     and nothing used to guard the case where neither was set. The render
@@ -469,7 +558,8 @@ def test_a_control_plane_refuses_to_deploy_with_no_secret_source(
 
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_a_control_plane_creates_a_secret_only_when_asked(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """And an existingSecret wins outright, with nothing created
     alongside it to drift from it."""
@@ -478,12 +568,14 @@ def test_a_control_plane_creates_a_secret_only_when_asked(
     assert container(docs)["envFrom"][1]["secretRef"]["name"] == "cp-secret"
 
     docs = render(chart, *config, *CREATED_SECRET)
-    assert one(docs, "Secret")["stringData"]["DATABASE_URL"].startswith("postgresql")
+    key = "DATABASE_URL_ADMIN" if chart == ADMIN_CP else "DATABASE_URL_ORG"
+    assert one(docs, "Secret")["stringData"][key].startswith("postgresql")
 
 
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_the_migration_job_is_kept_off_the_control_plane_too(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """The Deployment carried the anti-affinity and the Job did not, so
     the one pod in these charts that could land on rke2-cp01 was the one
@@ -495,22 +587,27 @@ def test_the_migration_job_is_kept_off_the_control_plane_too(
     job = one(render(chart, *config, *SECRET_SOURCE), "Job")
     pod = job["spec"]["template"]["spec"]
 
-    terms = pod["affinity"]["nodeAffinity"][
-        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    terms = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
     expressions = [e for t in terms for e in t["matchExpressions"]]
-    assert {"key": "node-role.kubernetes.io/control-plane",
-            "operator": "DoesNotExist"} in expressions
+    assert {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "DoesNotExist",
+    } in expressions
 
 
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_the_migration_job_is_scheduled_from_the_same_values(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """One set of scheduling values for the chart, not two. Pinning the
     Deployment to a node pool and leaving the migration free to run
     anywhere is not a configuration anyone wants."""
-    docs = render(chart, *config, *SECRET_SOURCE,
-                  "--set", "nodeSelector.kubernetes\\.io/hostname=rke2-wrk-2")
+    docs = render(
+        chart, *config, *SECRET_SOURCE, "--set", "nodeSelector.kubernetes\\.io/hostname=rke2-wrk-2"
+    )
 
     for kind in ("Deployment", "Job"):
         pod = one(docs, kind)["spec"]["template"]["spec"]
@@ -528,7 +625,9 @@ def portal_conf(*extra: str) -> str:
 def test_portal_lints():
     result = subprocess.run(
         ["helm", "lint", str(PORTAL), *PORTAL_MIN],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -590,7 +689,7 @@ def test_the_resolver_is_an_address_not_a_name():
           "rke2-coredns-rke2-coredns.kube-system.svc.cluster.local"
     """
     conf = portal_conf(*PORTAL_MIN)
-    resolver = [l for l in conf.splitlines() if "resolver " in l][0].split()[1]
+    resolver = next(line for line in conf.splitlines() if "resolver " in line).split()[1]
     assert all(part.isdigit() for part in resolver.split(".")), (
         f"resolver {resolver} is a name; nginx -t rejects that"
     )
@@ -611,10 +710,20 @@ def test_the_portal_is_pinned_to_the_node_holding_its_image():
     """There is no registry: images are built locally and sideloaded
     into one node's containerd. Unpinned, the pod schedules anywhere and
     sits in ImagePullBackOff -- which is where chart-test/tokenizer has
-    been for 20 hours, on mcw-all-series, with its image on rke2-wrk-2.
+    been for 20 hours, on mcw-all-series, with its image on the image node.
+
+    The chart ships no default pin -- the node holding the image is a
+    deploy-time fact, not something to bake into the repo -- so this
+    verifies that a pin set at install time renders, and that the image is
+    never pulled regardless.
     """
-    pod = one(render(PORTAL, *PORTAL_MIN), "Deployment")["spec"]["template"]["spec"]
-    assert pod["nodeSelector"], "nothing pins this to the node with the image"
+    pod = one(
+        render(PORTAL, *PORTAL_MIN, "--set", r"nodeSelector.kubernetes\.io/hostname=image-node"),
+        "Deployment",
+    )["spec"]["template"]["spec"]
+    assert pod["nodeSelector"] == {"kubernetes.io/hostname": "image-node"}, (
+        "a nodeSelector set at install time must reach the pod to pin it to the image"
+    )
     assert pod["containers"][0]["imagePullPolicy"] == "IfNotPresent", (
         "a sideloaded image must never be pulled"
     )
@@ -622,18 +731,21 @@ def test_the_portal_is_pinned_to_the_node_holding_its_image():
 
 def test_the_portal_is_kept_off_the_control_plane():
     pod = one(render(PORTAL, *PORTAL_MIN), "Deployment")["spec"]["template"]["spec"]
-    terms = pod["affinity"]["nodeAffinity"][
-        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    terms = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
     expressions = [e for t in terms for e in t["matchExpressions"]]
-    assert {"key": "node-role.kubernetes.io/control-plane",
-            "operator": "DoesNotExist"} in expressions
+    assert {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "DoesNotExist",
+    } in expressions
 
 
 def test_the_portal_service_targets_a_named_port():
     docs = render(PORTAL, *PORTAL_MIN)
     assert one(docs, "Service")["spec"]["ports"][0]["targetPort"] == "http"
     ports = {p["name"]: p["containerPort"] for p in container(docs)["ports"]}
-    assert ports["http"] == 80
+    assert ports["http"] == 8080
 
 
 def test_changing_the_api_upstream_rolls_the_portal():
@@ -641,18 +753,20 @@ def test_changing_the_api_upstream_rolls_the_portal():
     running pods keep serving the old upstream until something unrelated
     restarts them."""
     before = one(render(PORTAL, *PORTAL_MIN), "Deployment")
-    after = one(render(PORTAL, "--set", "config.apiUpstream=http://other:8000"),
-                "Deployment")
+    after = one(render(PORTAL, "--set", "config.apiUpstream=http://other:8000"), "Deployment")
     annotations = before["spec"]["template"]["metadata"]["annotations"]
     assert "checksum/config" in annotations
-    assert (annotations["checksum/config"]
-            != after["spec"]["template"]["metadata"]["annotations"]["checksum/config"])
+    assert (
+        annotations["checksum/config"]
+        != after["spec"]["template"]["metadata"]["annotations"]["checksum/config"]
+    )
 
 
 # -- the settings the control-plane charts used to leave out ---------------
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_a_control_plane_secret_carries_the_login_settings(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """Neither VALKEY_URL nor JWT_SECRET was in these charts at all --
     not in values.yaml, not in the ConfigMap. So an install came up
@@ -668,20 +782,24 @@ def test_a_control_plane_secret_carries_the_login_settings(
 
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_neither_login_setting_can_be_left_out_of_a_created_secret(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """Both fail the render rather than the sign-in. A chart cannot
     inspect an existingSecret, so this is the one path where the
     omission is catchable -- and NOTES.txt covers the other."""
     assert "secret.valkeyUrl is required" in render_error(
-        chart, *config, *without("secret.valkeyUrl"))
+        chart, *config, *without("secret.valkeyUrl")
+    )
     assert "secret.jwtSecret is required" in render_error(
-        chart, *config, *without("secret.jwtSecret"))
+        chart, *config, *without("secret.jwtSecret")
+    )
 
 
 @pytest.mark.parametrize("chart,config", CONTROL_PLANES)
 def test_the_notes_list_what_an_existing_secret_must_hold(
-    chart: Path, config: List[str],
+    chart: Path,
+    config: list[str],
 ):
     """The only lever for the existingSecret path: the chart never reads
     it, and a Secret missing a key installs cleanly and passes probes.
@@ -700,3 +818,204 @@ def test_the_notes_list_what_an_existing_secret_must_hold(
             f"secret.yaml renders {key} but NOTES.txt does not tell an "
             f"operator their existingSecret needs it"
         )
+
+
+# -- hardening ------------------------------------------------------------
+# CHARTS plus billing and enricher, which CHARTS leaves out because
+# their shared properties differ. What is asserted here is the
+# same for all of them: a pod that clears Pod Security Standards
+# "restricted", holds no Kubernetes API token, and can only write /tmp.
+BACKBONE = ["--set", "config.events.backboneUrl=nats://nats:4222"]
+HARDENED = [
+    *CHARTS,
+    pytest.param(
+        ROOT / "api/microservices/billing/chart",
+        [*BACKBONE, "--set", "secret.existingSecret=billing-secrets"],
+        8000,
+        id="billing",
+    ),
+    pytest.param(ROOT / "api/microservices/enricher/chart", BACKBONE, 8000, id="enricher"),
+]
+
+
+def pod_spec(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    return one(docs, "Deployment")["spec"]["template"]["spec"]
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_pods_run_as_their_own_service_account_with_no_token(
+    chart: Path,
+    minimum,
+    port,
+):
+    """The namespace's "default" SA is shared, so anything bound to it
+    would apply here too. None of these services call the API."""
+    docs = render(chart, *minimum)
+    account = one(docs, "ServiceAccount")
+    spec = pod_spec(docs)
+    assert spec["serviceAccountName"] == account["metadata"]["name"]
+    assert spec["automountServiceAccountToken"] is False
+    assert account["automountServiceAccountToken"] is False
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_an_existing_service_account_is_used_not_created(
+    chart: Path,
+    minimum,
+    port,
+):
+    docs = render(
+        chart,
+        *minimum,
+        "--set",
+        "serviceAccount.create=false",
+        "--set",
+        "serviceAccount.name=shared",
+    )
+    assert not [d for d in docs if d["kind"] == "ServiceAccount"]
+    assert pod_spec(docs)["serviceAccountName"] == "shared"
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_pods_clear_the_restricted_pod_security_standard(
+    chart: Path,
+    minimum,
+    port,
+):
+    docs = render(chart, *minimum)
+    pod = pod_spec(docs)["securityContext"]
+    assert pod["runAsNonRoot"] is True
+    assert pod["runAsUser"] == 10001
+    assert pod["seccompProfile"] == {"type": "RuntimeDefault"}
+    ctx = container(docs)["securityContext"]
+    assert ctx["allowPrivilegeEscalation"] is False
+    assert ctx["capabilities"]["drop"] == ["ALL"]
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_the_root_filesystem_is_read_only_except_tmp(chart: Path, minimum, port):
+    """Without the emptyDir a library that spools a temp file fails at
+    runtime, long after the pod went Ready."""
+    docs = render(chart, *minimum)
+    assert container(docs)["securityContext"]["readOnlyRootFilesystem"] is True
+    mounts = {m["mountPath"]: m["name"] for m in container(docs)["volumeMounts"]}
+    volumes = {v["name"]: v for v in pod_spec(docs)["volumes"]}
+    assert "emptyDir" in volumes[mounts["/tmp"]]
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_the_dockerfile_user_matches_the_charts_uid(chart: Path, minimum, port):
+    """runAsNonRoot is checked against the image's USER, and kubelet
+    rejects a named one -- it has to be the numeric uid."""
+    dockerfile = (chart.parent / "Dockerfile").read_text()
+    assert "\nUSER 10001\n" in dockerfile
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_a_digest_replaces_the_tag(chart: Path, minimum, port):
+    digest = "sha256:" + "a" * 64
+    docs = render(chart, *minimum, "--set", "image.tag=0.9.0", "--set", f"image.digest={digest}")
+    image = container(docs)["image"]
+    assert image.endswith("@" + digest)
+    assert ":0.9.0" not in image
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_a_service_monitor_refuses_without_the_operator_crds(
+    chart: Path,
+    minimum,
+    port,
+):
+    error = render_error(chart, *minimum, "--set", "metrics.serviceMonitor.enabled=true")
+    assert "monitoring.coreos.com/v1" in error
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_a_service_monitor_selects_the_charts_own_service(
+    chart: Path,
+    minimum,
+    port,
+):
+    docs = render(
+        chart,
+        *minimum,
+        "--set",
+        "metrics.serviceMonitor.enabled=true",
+        "--api-versions",
+        "monitoring.coreos.com/v1",
+    )
+    selector = one(docs, "ServiceMonitor")["spec"]["selector"]["matchLabels"]
+    services = [
+        d
+        for d in docs
+        if d["kind"] == "Service" and selector.items() <= d["metadata"]["labels"].items()
+    ]
+    assert len(services) == 1
+    named = {p["name"] for p in services[0]["spec"]["ports"]}
+    assert one(docs, "ServiceMonitor")["spec"]["endpoints"][0]["port"] in named
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_a_pdb_covers_the_deployments_pods(chart: Path, minimum, port):
+    docs = render(
+        chart, *minimum, "--set", "podDisruptionBudget.enabled=true", "--set", "replicaCount=2"
+    )
+    selector = one(docs, "PodDisruptionBudget")["spec"]["selector"]["matchLabels"]
+    labels = one(docs, "Deployment")["spec"]["template"]["metadata"]["labels"]
+    assert selector.items() <= labels.items()
+
+
+@pytest.mark.parametrize("chart,minimum,port", HARDENED)
+def test_a_single_replica_gets_no_pdb(chart: Path, minimum, port):
+    """minAvailable 1 over one pod allows no disruptions, so a node drain
+    waits on it forever. Found on a live cluster: the SDK runs the admin
+    control plane with replicas=1, under a chart that defaults the PDB on."""
+    docs = render(
+        chart, *minimum, "--set", "podDisruptionBudget.enabled=true", "--set", "replicaCount=1"
+    )
+    assert not [d for d in docs if d["kind"] == "PodDisruptionBudget"]
+
+
+def test_the_portal_gets_a_pdb_only_with_more_than_one_replica():
+    on = ["--set", "podDisruptionBudget.enabled=true"]
+    assert not [
+        d
+        for d in render(PORTAL, *PORTAL_MIN, *on, "--set", "replicaCount=1")
+        if d["kind"] == "PodDisruptionBudget"
+    ]
+    assert one(render(PORTAL, *PORTAL_MIN, *on, "--set", "replicaCount=2"), "PodDisruptionBudget")
+
+
+# The counter store can come from config.valkeyUrl, secret.valkeyUrl or an
+# existing Secret. The two Secret routes must not also demand the
+# ConfigMap value -- that would force a password-free URL alongside the
+# real one, or refuse the install outright.
+LIMITER_NO_STORE = ["--set", "config.events.backboneUrl=nats://nats:4222"]
+
+
+@pytest.mark.parametrize("chart,kind", LIMITERS)
+def test_a_limiter_takes_its_counter_store_from_the_secret_alone(chart: Path, kind):
+    docs = render(
+        chart,
+        *LIMITER_NO_STORE,
+        "--set",
+        "secret.create=true",
+        "--set",
+        "secret.valkeyUrl=redis://:pw@valkey:6379/0",
+    )
+    assert "VALKEY_URL" not in one(docs, "ConfigMap")["data"]
+    assert "VALKEY_URL" in one(docs, "Secret").get("stringData", {}) | one(docs, "Secret").get(
+        "data", {}
+    )
+
+
+@pytest.mark.parametrize("chart,kind", LIMITERS)
+def test_a_limiter_takes_its_counter_store_from_an_existing_secret(chart: Path, kind):
+    docs = render(chart, *LIMITER_NO_STORE, "--set", "secret.existingSecret=limits")
+    assert "VALKEY_URL" not in one(docs, "ConfigMap")["data"]
+
+
+@pytest.mark.parametrize("chart,kind", LIMITERS)
+def test_a_limiter_with_no_counter_store_anywhere_is_refused(chart: Path, kind):
+    error = render_error(chart, *LIMITER_NO_STORE, "--set", "secret.create=true")
+    assert "no counter store configured" in error

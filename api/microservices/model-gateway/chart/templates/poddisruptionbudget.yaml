@@ -1,0 +1,22 @@
+{{- /*
+Only with more than one replica. minAvailable 1 over a single pod allows no
+disruptions at all, so a node drain -- an upgrade, a reboot -- waits on it
+forever. A deploy that runs one replica on purpose (the SDK seeds the admin
+control plane with replicas=1) keeps the chart's default on and gets no PDB.
+*/ -}}
+{{- if and (.Values.podDisruptionBudget | default dict).enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "model-gateway.fullname" . }}
+  labels: {{- include "model-gateway.labels" . | nindent 4 }}
+spec:
+  {{/*
+  minAvailable, not maxUnavailable: it holds a floor regardless of how
+  many replicas are running, so a drain cannot take the last pod even if
+  the Deployment is mid-rollout and briefly below replicaCount.
+  */}}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{- include "model-gateway.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -18,8 +18,31 @@ data:
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   ADMIN_CP_INTERNAL_URL: {{ required "config.adminCpInternalUrl is required -- role-permission validation has nowhere to call" .Values.config.adminCpInternalUrl | quote }}
   ADMIN_TIMEOUT_MS: {{ .Values.config.adminTimeoutMs | quote }}
+  {{- if .Values.config.seedApiKey }}
+  # e2e/CI only -- seeds a fixed verify API key so the model-gateway's test bearer resolves. Unset
+  # (and so absent here) in every real deployment; see values.yaml.
+  SEED_API_KEY: {{ .Values.config.seedApiKey | quote }}
+  {{- end }}
   {{- if .Values.config.billingInternalUrl }}
   # Not required like adminCpInternalUrl above: a portal deployed before billing exists is a
   # supported stage, not an error -- see values.yaml.
   BILLING_INTERNAL_URL: {{ .Values.config.billingInternalUrl | quote }}
+  {{- end }}
+  {{- if .Values.config.orgPortalBaseUrl }}
+  # Optional: with it, invitation responses carry an absolute invite_url; without it only the
+  # relative invite_path (the Admin Portal then falls back to VITE_ORG_PORTAL_URL / its own origin).
+  ORG_PORTAL_BASE_URL: {{ .Values.config.orgPortalBaseUrl | quote }}
+  {{- end }}
+  INVITATION_TTL_HOURS: {{ .Values.config.invitationTtlHours | quote }}
+  {{- if .Values.config.smtp.host }}
+  # Outgoing mail for invitations. The password is a SECRET: SMTP_PASSWORD in the Secret, never here.
+  SMTP_HOST: {{ .Values.config.smtp.host | quote }}
+  SMTP_PORT: {{ .Values.config.smtp.port | quote }}
+  SMTP_SECURITY: {{ .Values.config.smtp.security | quote }}
+  SMTP_FROM_ADDRESS: {{ required "config.smtp.fromAddress is required when config.smtp.host is set -- there is no sender to put on the email" .Values.config.smtp.fromAddress | quote }}
+  SMTP_FROM_NAME: {{ .Values.config.smtp.fromName | quote }}
+  SMTP_TIMEOUT_SECONDS: {{ .Values.config.smtp.timeoutSeconds | quote }}
+  {{- if .Values.config.smtp.username }}
+  SMTP_USERNAME: {{ .Values.config.smtp.username | quote }}
+  {{- end }}
   {{- end }}

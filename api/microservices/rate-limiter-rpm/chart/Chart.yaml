@@ -1,13 +1,14 @@
 apiVersion: v2
 name: rate-limiter-rpm
-description: |
-  Requests-per-minute policy service: the first plug for the gateway's
-  pluggable policy chain. Answers POST /check; counts asynchronously off
-  the event backbone. Stateless -- the counters live in Valkey.
+description: Queue-backed requests-per-minute policy service with Valkey counters.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
-keywords: [rate-limiting, policy, rpm, gateway]
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - rate-limiting
+  - policy
+  - rpm
+  - queue
 home: https://github.com/Multicorewareinc/M-Stack
 sources:
   - https://github.com/Multicorewareinc/M-Stack/tree/main/api/microservices/rate-limiter-rpm

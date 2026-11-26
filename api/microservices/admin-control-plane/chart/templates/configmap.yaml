@@ -18,6 +18,11 @@ data:
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   SEED_PLANS: {{ .Values.config.seedPlans | quote }}
   SEED_PERMISSIONS: {{ .Values.config.seedPermissions | quote }}
+  {{- if .Values.config.seedAdminEmail }}
+  # e2e/CI only -- with secret.seedAdminPassword, bootstraps a login-able super-admin. Unset (and so
+  # absent here) in every real deployment; the operator CLI seeds prod. See values.yaml.
+  SEED_ADMIN_EMAIL: {{ .Values.config.seedAdminEmail | quote }}
+  {{- end }}
   ORG_CP_INTERNAL_URL: {{ required "config.orgCpInternalUrl is required -- the org-creation workflow and user-directory proxy have nowhere to call" .Values.config.orgCpInternalUrl | quote }}
   ORG_TIMEOUT_MS: {{ .Values.config.orgTimeoutMs | quote }}
   {{- if .Values.config.billingInternalUrl }}

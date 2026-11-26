@@ -9,8 +9,14 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/multicorewareinc/organization-portal
+  repository: ghcr.io/multicorewareinc/m-stack/organization-portal
   tag: ""                      # defaults to .Chart.AppVersion
+  # A sha256 digest, e.g. sha256:abc123... When set it REPLACES the tag,
+  # which is the only way to guarantee every node runs the same build --
+  # a re-pushed tag plus imagePullPolicy IfNotPresent otherwise leaves
+  # already-cached nodes on the old image indefinitely. Pin this for any
+  # deploy you would need to reproduce.
+  digest: ""
   # Never Always. There is no registry: images are built locally and
   # sideloaded into one node's containerd (scratch/rebuild/images.sh),
   # so a pull attempt can only fail.
@@ -27,8 +33,13 @@ service:
   type: ClusterIP
   port: 80
 
-# Must match the port nginx listens on in the image (EXPOSE 80).
-containerPort: 80
+# Must match the port nginx listens on in the image (EXPOSE 8080). 8080
+# rather than 80 because the image is nginx-unprivileged, which runs as
+# uid 101 and cannot bind a privileged port. This value is also what the
+# templated nginx.conf in configmap.yaml puts in its `listen` directive,
+# so the two cannot drift. The Service targets the port by NAME, so
+# service.port below stays 80 and callers are unaffected.
+containerPort: 8080
 
 # --- non-secret configuration -> ConfigMap -> mounted nginx.conf ------
 config:
@@ -104,8 +115,7 @@ resources:
 # ImagePullBackOff -- which is where chart-test/tokenizer has been for
 # 20 hours, on mcw-all-series, while its image sits on rke2-wrk-2.
 # Remove this the day a registry exists, not before.
-nodeSelector:
-  kubernetes.io/hostname: rke2-wrk-2
+nodeSelector: {}
 
 # Nothing else keeps workloads off the control plane: rke2-cp01 carries
 # no taint.
@@ -120,7 +130,54 @@ affinity:
 tolerations: []
 podAnnotations: {}
 
-podSecurityContext: {}
-# nginx:alpine binds 80, so it needs to start as root and drops
-# privileges to the nginx user itself.
-securityContext: {}
+# uid 101 is what nginx-unprivileged ships as, and its cache, log and pid
+# paths are owned by it -- so this matches the image rather than imposing
+# a uid the image has no writable directories for. runAsGroup/fsGroup are
+# deliberately left alone for the same reason: the image's own group
+# ownership already works, and overriding it would break nginx's cache
+# writes for no gain.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # The served bundle is baked into the image and never rewritten, so the
+  # root filesystem can stay immutable. nginx does need /tmp for its temp
+  # paths, which the Deployment mounts as an emptyDir when this is true --
+  # without it nginx refuses to start at all.
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# A ServiceAccount of this release's own, bound to no Role. None of these
+# services call the Kubernetes API, so the token is never mounted (see
+# serviceaccount.yaml) -- this exists to stop the pods inheriting whatever
+# the namespace's shared "default" SA has been granted.
+serviceAccount:
+  create: true
+  # Empty => <release>-<chart>. Set a name to reuse an existing account.
+  name: ""
+  annotations: {}
+
+# Off deliberately. This workload runs a single replica on purpose (see
+# replicaCount above), and a PDB over one pod cannot both keep it up and
+# let a node drain: minAvailable 1 would block the drain indefinitely,
+# which is worse than the brief gap a drain already costs here. Enable it
+# only alongside a replicaCount above 1.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Enabling it with an EMPTY allowedIngress denies all
+# ingress to this service, so set the callers at the same time.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort. Its callers are:
+  #   (whatever fronts it -- an ingress controller's pods, e.g.
+  #   app.kubernetes.io/name: ingress-nginx)
+  allowedIngress: []

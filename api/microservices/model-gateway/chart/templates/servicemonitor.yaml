@@ -1,0 +1,21 @@
+{{- if ((.Values.metrics | default dict).serviceMonitor | default dict).enabled }}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- fail "\n\nmodel-gateway: metrics.serviceMonitor.enabled is true but this cluster has no\nmonitoring.coreos.com/v1 (the Prometheus Operator CRDs).\n\nInstall the operator first, or leave this off and keep scraping via the\nprometheus.io/* pod annotations, which metrics.scrapeAnnotations already\nsets and which a plain Prometheus picks up without any CRD.\n" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "model-gateway.fullname" . }}
+  labels:
+    {{- include "model-gateway.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels: {{- include "model-gateway.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}

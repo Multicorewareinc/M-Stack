@@ -1,29 +1,7 @@
-# enricher
-#
-# Three things worth knowing before you set values:
-#
-#   1. Without a backbone, this service is a total no-op -- it does not
-#      even answer /check like the rate limiters do, since it has no
-#      HTTP surface downstream depends on. No backbone means TPM and
-#      billing both silently get zero enrichment. This chart refuses to
-#      install without one, for the same reason rate-limiter-rpm's does.
-#
-#   2. It ack's a NATS message only after a successful republish (ADR-030
-#      D5) -- unlike the rate limiters, which always ack (fail-open, a
-#      missed count is just under-enforcement). Here a dropped republish
-#      is real data loss for billing, so a failing republish is retried
-#      up to config.maxDeliver times instead. ackWaitSeconds must be
-#      generous enough to cover a tokenizer call plus republish, or
-#      JetStream redelivers mid-attempt and burns the retry budget for
-#      nothing -- this chart checks that arithmetic at install time.
-#
-#   3. Single consumer, same reason as the rate limiters: this is a
-#      durable JetStream push consumer, and JetStream allows only one
-#      subscription bound to a durable at a time. A second replica's
-#      consumer fails to bind and that pod does nothing while looking
-#      healthy.
 replicaCount: 1
 
+# The service binds one durable push consumer. Keep one replica and avoid
+# a surge pod attempting to bind the same durable during an upgrade.
 strategy:
   type: RollingUpdate
   rollingUpdate:
@@ -31,13 +9,16 @@ strategy:
     maxUnavailable: 1
 
 image:
-  repository: ghcr.io/multicorewareinc/enricher
+  repository: ghcr.io/multicorewareinc/m-stack/enricher
   tag: ""
+  # A sha256 digest, e.g. sha256:abc123... When set it REPLACES the tag,
+  # which is the only way to guarantee every node runs the same build --
+  # a re-pushed tag plus imagePullPolicy IfNotPresent otherwise leaves
+  # already-cached nodes on the old image indefinitely. Pin this for any
+  # deploy you would need to reproduce.
+  digest: ""
   pullPolicy: IfNotPresent
 
-# Secret is namespace-scoped and created alongside the release (see
-# docs/publishing.md). Set it to [] for a public package or a
-# mirror that needs no auth.
 imagePullSecrets:
   - name: ghcr-creds
 
@@ -48,50 +29,39 @@ service:
   type: ClusterIP
   port: 8000
 
-# Must match the port the image's uvicorn command binds (8000).
 containerPort: 8000
 
-# --- configuration -> ConfigMap -> envFrom -------------------------------
-# Nothing here is a credential: no Secret object exists for this chart.
 config:
   logLevel: INFO
 
-  events:
-    # nats://<nats-service>:4222. Empty => no consumer, no enrichment.
-    backboneUrl: ""
+  queue:
+    backend: nats
 
-    # Input: the gateway's own, unchanged stream. Consumes response
-    # events only.
+  events:
+    # Empty is rejected unless allowNoBackbone explicitly opts into inactivity.
+    backboneUrl: ""
     streamName: GATEWAY_EVENTS
     streamSubject: gateway.events
     durableName: enricher
-
-    # Output: a separate derived stream, so its retention/cursor is
-    # independent of the raw input's. rate-limiter-tpm and billing both
-    # point here, not at streamName/streamSubject above.
     enrichedStreamName: GATEWAY_EVENTS_ENRICHED
     enrichedSubject: gateway.events.enriched
 
-    # Bounded redelivery for the not-ack-on-republish-failure path.
+    # These values must match the externally provisioned NACK Consumer.
     maxDeliver: 5
     ackWaitSeconds: 30
 
-  # Fallback for response events that carry no usage block. Empty means
-  # the fallback is inert and such events are republished with
-  # source="none" rather than estimated. Streaming responses are the
-  # usual case, and they are only recoverable when the gateway runs with
-  # EVENT_CAPTURE_BODIES=true.
-  #   http://<tokenizer-service>.<namespace>.svc:8000/tokenize
   tokenizer:
     url: ""
     timeoutMs: 2000
 
-  # Set true only to deploy deliberately without a backbone -- a service
-  # that consumes nothing and republishes nothing, which is useful for
-  # wiring up the rest of the pipeline before NATS exists. Without this
-  # the install refuses, because "deployed and enriching nothing"
-  # otherwise looks identical to "deployed and working".
   allowNoBackbone: false
+
+# Optional Secret support for broker URLs containing credentials. For
+# shared deployments, prefer an externally managed Secret.
+secret:
+  existingSecret: ""
+  create: false
+  eventBackboneUrl: ""
 
 resources:
   requests:
@@ -100,9 +70,6 @@ resources:
   limits:
     memory: 192Mi
 
-# No /ready: the README is explicit that enricher_consumer_active is the
-# readiness signal, read via /metrics, not a separate endpoint. Both
-# probes use /health.
 probes:
   liveness:
     initialDelaySeconds: 5
@@ -115,16 +82,45 @@ probes:
 
 metrics:
   scrapeAnnotations: true
+  # A ServiceMonitor for the Prometheus Operator. Off by default because it
+  # needs the operator's CRDs installed -- with them absent the object is
+  # rejected at apply time, so this refuses at template time instead, with
+  # a message rather than an "unknown kind" from the API server. The
+  # scrapeAnnotations above are the CRD-free path and stay independent of
+  # this.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Extra labels, e.g. the `release: kube-prometheus-stack` many operator
+    # installs select ServiceMonitors on.
+    labels: {}
 
-podSecurityContext: {}
+# Runs as the non-root uid the Dockerfiles create (10001), which is what
+# lets these pods clear Pod Security Standards "restricted". runAsUser is
+# repeated here rather than left to the image so the guarantee is visible
+# in the manifest and survives an image rebuild that forgets its USER.
+#
+# Group 0 matches the Dockerfile: /app stays root-owned and group-readable,
+# so nothing needs a recursive chown at build time.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 0
+  fsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
+  # Nothing here writes to its image at runtime -- verified by running each
+  # image with a read-only root and no tmpfs. /tmp is mounted as an
+  # emptyDir by the Deployment when this is true, so a library that spools
+  # a temp file still works while the image itself stays immutable.
+  readOnlyRootFilesystem: true
   capabilities:
-    drop: ["ALL"]
-  # runAsNonRoot/runAsUser unset: the image has no non-root user yet.
+    drop:
+      - ALL
 
-# Keeps pods off the control plane, which nothing else enforces.
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -136,3 +132,34 @@ affinity:
 nodeSelector: {}
 tolerations: []
 podAnnotations: {}
+
+# A ServiceAccount of this release's own, bound to no Role. None of these
+# services call the Kubernetes API, so the token is never mounted (see
+# serviceaccount.yaml) -- this exists to stop the pods inheriting whatever
+# the namespace's shared "default" SA has been granted.
+serviceAccount:
+  create: true
+  # Empty => <release>-<chart>. Set a name to reuse an existing account.
+  name: ""
+  annotations: {}
+
+# Off deliberately. This workload runs a single replica on purpose (see
+# replicaCount above), and a PDB over one pod cannot both keep it up and
+# let a node drain: minAvailable 1 would block the drain indefinitely,
+# which is worse than the brief gap a drain already costs here. Enable it
+# only alongside a replicaCount above 1.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Ingress lockdown. Disabled by default => no NetworkPolicy is installed
+# and the Service stays reachable from anywhere in-cluster, matching
+# today's behavior. Enabling it with an EMPTY allowedIngress denies all
+# ingress to this service, so set the callers at the same time.
+networkPolicy:
+  enabled: false
+  # matchLabels selectors allowed to reach containerPort. Its callers are:
+  #   (none -- the enricher exposes only /health and /metrics; it is a
+  #   NATS consumer, not an in-cluster callee. Enabling this with an
+  #   empty list is the correct lockdown for it.)
+  allowedIngress: []
